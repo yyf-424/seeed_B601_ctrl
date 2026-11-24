@@ -147,16 +147,26 @@ void DmSystemHardware::parse_hardware_parameters()
   //   pos_vel    —— 电机内部位置环（默认，最安全；pos 命令来自 JTC）
   //   mit        —— MIT 位置阻抗，kp/kd 由 URDF 参数给定
   //   mit_torque —— 纯力矩：kp=kd=0，tau 来自控制器的 effort 命令（重力补偿用）
-  if (command_mode_ != "pos_vel" && command_mode_ != "mit" && command_mode_ != "mit_torque") {
+  if (command_mode_ != "pos_vel" && command_mode_ != "mit" && command_mode_ != "mit_torque" &&
+    command_mode_ != "mit_impedance")
+  {
     RCLCPP_WARN(
       logger(),
-      "未知 command_mode='%s'，只用 pos_vel / mit / mit_torque；回落 pos_vel",
+      "未知 command_mode='%s'，只用 pos_vel / mit / mit_torque / mit_impedance；回落 pos_vel",
       command_mode_.c_str());
     command_mode_ = "pos_vel";
   }
   // ⚠ 布尔参数绝不能走数字解析：曾经把 "false" 当非法数字回落成 true，
   //   等于把"只读模式"的安全闸关掉了。这类回落的默认值必须往"更安全"的一侧取。
   enable_motors_ = get_bool(p, "enable_motors", enable_motors_, where);
+  // 温度守护阈值（真值 hardware.dm.temperature，由 xacro 透传）
+  temp_guard_.configure(
+    get_double(p, "temp_warn_c", 70.0, where),
+    get_double(p, "temp_limit_c", 85.0, where),
+    get_double(p, "temp_hysteresis_c", 5.0, where));
+  RCLCPP_INFO(
+    logger(), "温度守护：告警 %.0f ℃ / 失能 %.0f ℃ / 迟滞 %.0f ℃（读反馈帧的 t_mos、t_rotor）",
+    temp_guard_.warn_c(), temp_guard_.limit_c(), temp_guard_.hysteresis_c());
   watchdog_timeout_ = get_double(p, "watchdog_timeout", watchdog_timeout_, where);
   can_timeout_ms_ = get_int(p, "can_timeout_ms", can_timeout_ms_, where);
   max_write_failures_ = std::max(1, get_int(p, "max_write_failures", max_write_failures_, where));
@@ -226,6 +236,14 @@ bool DmSystemHardware::parse_joint_config(
   cfg.model = p.count("model") ? p.at("model") : std::string("4310");
   cfg.direction = get_double(p, "direction", 1.0, where);
   cfg.scale = get_double(p, "scale", 1.0, where);
+  // effort_scale：关节 effort ↔ 电机力矩。缺省跟随 scale（当前结构下数值相同），
+  // 但它是独立旋钮 —— 传动比一变（换夹爪/加减速器）就要单独给。
+  cfg.effort_scale = get_double(p, "effort_scale", cfg.scale, where);
+  if (cfg.effort_scale <= 0.0) {
+    RCLCPP_ERROR(
+      logger(), "%s 的 effort_scale 必须 > 0（当前 %f）", cfg.name.c_str(), cfg.effort_scale);
+    return false;
+  }
   if (cfg.scale == 0.0) {
     RCLCPP_ERROR(logger(), "%s 的 scale 不能为 0", where.c_str());
     return false;
@@ -284,6 +302,11 @@ std::vector<hardware_interface::CommandInterface> DmSystemHardware::export_comma
       } else if (iface.name == hardware_interface::HW_IF_EFFORT) {
         // mit_torque 模式用：控制器写力矩，插件原样转成电机 MIT 帧（kp=kd=0）
         out.emplace_back(joint.name, iface.name, &joints_[i].cmd_effort);
+      } else if (iface.name == "kp") {
+        // mit_impedance：电机侧变刚度 —— 刚度直接进 MIT 帧
+        out.emplace_back(joint.name, iface.name, &joints_[i].cmd_kp);
+      } else if (iface.name == "kd") {
+        out.emplace_back(joint.name, iface.name, &joints_[i].cmd_kd);
       } else {
         RCLCPP_WARN(
           logger(), "本插件不实现 %s 的命令接口 %s", joint.name.c_str(), iface.name.c_str());
@@ -310,7 +333,8 @@ hardware_interface::CallbackReturn DmSystemHardware::on_configure(
 
   // 切换控制模式：电机的 CTRL_MODE 寄存器可能与我们要用的模式不一致
   // （本机实测出厂/上次运行为 1=MIT）。模式不对时，写命令会被电机忽略或按错语义解释。
-  const bool wants_mit = (command_mode_ == "mit" || command_mode_ == "mit_torque");
+  const bool wants_mit =
+    (command_mode_ == "mit" || command_mode_ == "mit_torque" || command_mode_ == "mit_impedance");
   const std::uint32_t wanted_mode =
     wants_mit ? static_cast<std::uint32_t>(abi::Mode::MIT)
               : static_cast<std::uint32_t>(abi::Mode::POS_VEL);
@@ -593,6 +617,8 @@ void DmSystemHardware::poll_state()
     joint.raw_pos_motor = static_cast<double>(state.pos);
     joint.raw_vel_motor = static_cast<double>(state.vel);
     joint.raw_torq_motor = static_cast<double>(state.torq);
+    joint.t_mos = static_cast<double>(state.t_mos);
+    joint.t_rotor = static_cast<double>(state.t_rotor);
     joint.raw_valid = true;
     // 电机量 → 关节量：joint = direction * scale * motor + zero_offset
     // scale 只在夹爪上用得上（电机转 rad，关节走 m）：0.01 m/rad 对应 5 rad ≈ 50 mm 行程
@@ -627,7 +653,9 @@ void DmSystemHardware::poll_state()
     joint.state_pos = new_pos;
     joint.state_vel = new_vel;
     joint.reject_count = 0;
-    joint.state_effort = effort_sign_ * joint.direction * static_cast<double>(state.torq);
+    // 电机 torq(N·m) → 关节 effort：臂是 N·m（1:1），夹爪是 N（τ/r）
+    joint.state_effort =
+      effort_sign_ * joint.direction * static_cast<double>(state.torq) / joint.effort_scale;
     // ⚠ 必须置位：configure 阶段的 wait_for_first_feedback 与 read() 的"读不到反馈"告警都靠它。
     //   2026-11-21 实测：这里漏了这句，导致数据明明收到了却一直认为"没收到首帧"，
     //   configure 直接失败（真机上表现为"2000 ms 内没收到 jointN 的反馈帧"）。
@@ -653,6 +681,39 @@ hardware_interface::return_type DmSystemHardware::read(
     return hardware_interface::return_type::ERROR;
   }
   poll_state();
+
+  // ---- 温度守护（决策③：不做力矩位置保护，堵转靠这里兜底）----
+  {
+    double t_max = 0.0;
+    std::string hottest;
+    for (const auto & joint : joints_) {
+      if (joint.motor_id == 0) {
+        continue;
+      }
+      const double t = std::max(joint.t_mos, joint.t_rotor);
+      if (t > t_max) {
+        t_max = t;
+        hottest = joint.name;
+      }
+    }
+    const auto r = temp_guard_.update(t_max, enabled_);
+    if (r.trip) {
+      over_temp_ = true;
+      RCLCPP_ERROR(
+        logger(),
+        "🛑 过温保护：%s 达到 %.1f ℃（上限 %.0f ℃）→ 立即失能整条总线。"
+        "恢复需降到 %.0f ℃ 以下并人工重启硬件组件（不会自动恢复）",
+        hottest.c_str(), r.max_c, temp_guard_.limit_c(),
+        temp_guard_.warn_c() - temp_guard_.hysteresis_c());
+    } else if (r.warn && !temp_warned_) {
+      temp_warned_ = true;
+      RCLCPP_WARN(
+        logger(), "%s 温度 %.1f ℃ 已超过告警线 %.0f ℃（失能线 %.0f ℃）—— 注意持续力矩/堵转",
+        hottest.c_str(), r.max_c, temp_guard_.warn_c(), temp_guard_.limit_c());
+    } else if (temp_warned_ && r.max_c < temp_guard_.warn_c() - temp_guard_.hysteresis_c()) {
+      temp_warned_ = false;
+    }
+  }
 
   // CSV 记录（log_csv 非空才写）
   if (log_file_.is_open()) {
@@ -726,6 +787,16 @@ hardware_interface::return_type DmSystemHardware::write(
   if (!bus_open_) {
     return hardware_interface::return_type::ERROR;
   }
+  if (over_temp_) {
+    // 过温已触发：确保总线已失能，并让 controller_manager 把硬件降级（保护性失能，
+    // 不做"归中"——归中本身要驱动电机，过温时晚一步更危险，见 AGENTS §11.4 例外）
+    if (enabled_) {
+      motor_controller_disable_all(controller_);
+      enabled_ = false;
+      RCLCPP_ERROR(logger(), "过温保护：已对整条总线执行 disable_all，硬件将置为 error");
+    }
+    return hardware_interface::return_type::ERROR;
+  }
   if (!enabled_) {
     return hardware_interface::return_type::OK;  // 只读模式：不写任何命令
   }
@@ -734,6 +805,42 @@ hardware_interface::return_type DmSystemHardware::write(
 
   for (auto & joint : joints_) {
     if (!joint.has_command || joint.handle == nullptr) {
+      continue;
+    }
+
+    // ---- mit_impedance：位置环在驱动器里 —— 下发 (pos_des, kp, kd, τ_ff) ----
+    if (command_mode_ == "mit_impedance") {
+      double pos_des = joint.cmd;
+      if (joint.has_position_limit) {
+        pos_des = std::clamp(pos_des, joint.min_pos, joint.max_pos);
+      }
+      double ff = joint.cmd_effort;
+      if (joint.torque_limit > 0.0) {
+        ff = std::clamp(ff, -joint.torque_limit, joint.torque_limit);
+      }
+      // 关节单位 → 电机单位：
+      //   位置：(pos - zero_offset) / (direction · scale)
+      //   力矩：command_sign · direction · τ_ff · effort_scale
+      //   刚度/阻尼：电机侧 kp[N·m/rad] = kp_joint · effort_scale²，kd 同理
+      //     （prismatic 的 x = r·θ ⇒ τ = kp_joint·r²·θ；revolute r=1 时就是恒等）
+      const double pos_motor =
+        (pos_des - joint.zero_offset) / (joint.direction * joint.scale);
+      const double kp_motor = std::max(0.0, joint.cmd_kp) * joint.effort_scale * joint.effort_scale;
+      const double kd_motor = std::max(0.0, joint.cmd_kd) * joint.effort_scale * joint.effort_scale;
+      const std::int32_t rc = motor_handle_send_mit(
+        joint.handle, static_cast<float>(pos_motor), 0.0F,
+        static_cast<float>(kp_motor), static_cast<float>(kd_motor),
+        static_cast<float>(command_sign_ * joint.direction * ff * joint.effort_scale));
+      if (rc != 0) {
+        ++consecutive_write_failures_;
+        RCLCPP_WARN_THROTTLE(
+          logger(), *clock_, 500,
+          "向 %s 写 MIT 阻抗帧失败（连续 %d 次）：%s", joint.name.c_str(),
+          consecutive_write_failures_, abi_error_text().c_str());
+      } else {
+        consecutive_write_failures_ = 0;
+      }
+      joint.command_sent = pos_des;
       continue;
     }
 
@@ -748,7 +855,7 @@ hardware_interface::return_type DmSystemHardware::write(
         joint.handle, static_cast<float>(joint.direction * (joint.state_pos - joint.zero_offset) /
                                          joint.scale),
         0.0F, 0.0F, 0.0F,
-        static_cast<float>(command_sign_ * joint.direction * tau));
+        static_cast<float>(command_sign_ * joint.direction * tau * joint.effort_scale));
       if (rc != 0) {
         ++consecutive_write_failures_;
         RCLCPP_WARN_THROTTLE(logger(), *clock_, 500,
@@ -842,7 +949,7 @@ bool DmSystemHardware::open_log_file()
   for (const auto & joint : joints_) {
     log_file_ << " " << joint.name << "=" << joint.kp << "/" << joint.kd;
   }
-  log_file_ << "\n";
+  log_file_ << "\n# 最后一列 t_max_c = 本次采样里所有电机 max(t_mos,t_rotor) 的最高温度（℃）\n";
 
   log_file_ << "t";
   for (const auto & joint : joints_) {
@@ -872,13 +979,22 @@ void DmSystemHardware::append_log_row(double t_sec)
   log_buffer_ += buf;
   for (const auto & joint : joints_) {
     // 原始值与过滤后的状态值都写：出问题时能一眼看出"是电机在动"还是"数据被丢了"
-    const double cmd_value = (command_mode_ == "mit_torque") ? joint.cmd_effort : joint.cmd;
+    const double cmd_value =
+      (command_mode_ == "mit_torque") ? joint.cmd_effort : joint.cmd;
     std::snprintf(
       buf, sizeof(buf), ",%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
       joint.raw_pos_motor, joint.raw_vel_motor, joint.raw_torq_motor,
       joint.state_pos, joint.state_vel, joint.state_effort, cmd_value);
     log_buffer_ += buf;
   }
+  // 温度：所有电机 max(t_mos, t_rotor) 的最高值（避免每关节两列把表撑爆；
+  // 要看单台电机温度就单独用 dm_probe.py 读）
+  double t_max = 0.0;
+  for (const auto & joint : joints_) {
+    t_max = std::max(t_max, std::max(joint.t_mos, joint.t_rotor));
+  }
+  std::snprintf(buf, sizeof(buf), ",%.1f", t_max);
+  log_buffer_ += buf;
   log_buffer_ += "\n";
   ++log_rows_;
 }

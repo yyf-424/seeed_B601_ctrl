@@ -12,11 +12,11 @@
     b601_bringup/config/b601_controllers.yaml          位置模式控制器
     b601_moveit_config/config/joint_limits.yaml        MoveIt 速度/加速度
     b601_safety/config/safety_params.yaml              安全监控节点参数
+    b601_bringup/config/b601_mit_controllers.yaml      MIT 力控（变刚度）控制器实例
 
-不生成（仍手写）：
-    b601_bringup/config/b601_mit_controllers.yaml      MIT 力控/重力补偿控制器
-      —— 这条线（b601_mit_controller + b601_gravity_id）真机复测通过后再迁入真值，
-         见本文件顶部说明与 docs/test-report.md「遗留」。
+    b601_bringup/config/b601_mit_controllers.yaml      MIT 力控（变刚度）控制器实例
+      —— 由真值的 control.mit 段生成（实例表 + 按关节名的 profile），
+         规划见 docs/changes/2026-11-22-01-per-joint-controller-and-variable-stiffness.md
 
 不派生的（运行时直接读真值，因此永远同步）：
     b601_description/urdf/inc/b601_links.xacro         关节 limit
@@ -117,6 +117,95 @@ def validate(cfg: dict) -> list[str]:
         known = {c.get("name") for c in cfg.get("controllers", {}).values() if isinstance(c, dict)}
         if cname not in known:
             errors.append(f"safety.estop.deactivate_controllers 里的 {cname} 不是已定义的控制器")
+
+    errors.extend(validate_effort_scale(cfg))
+    errors.extend(validate_mit(cfg))
+    return errors
+
+
+def validate_effort_scale(cfg: dict) -> list[str]:
+    """effort_scale：关节 effort ↔ 电机力矩的换算系数（revolute=1，prismatic=等效齿轮半径）。"""
+    errors: list[str] = []
+    for name, j in cfg.get("joints", {}).items():
+        if not j.get("control"):
+            continue
+        motor = j.get("motor") or {}
+        es = motor.get("effort_scale")
+        if es is None:
+            errors.append(f"关节 {name} 的 motor 缺 effort_scale（revolute 给 1.0，prismatic 给等效齿轮半径）")
+            continue
+        if float(es) <= 0:
+            errors.append(f"关节 {name} 的 effort_scale 必须 > 0（当前 {es}）")
+        # 当前机械结构下 effort_scale 与 scale 数值相同；若不同，说明传动比模型变了，必须是刻意的
+        if abs(float(es) - float(motor.get("scale", 1.0))) > 1e-12:
+            errors.append(
+                f"关节 {name} 的 effort_scale={es} 与 scale={motor.get('scale')} 不同 —— "
+                f"这不是错误，但必须确认是刻意改的（力矩换算与位置换算的传动比不一致）"
+            )
+    return errors
+
+
+def validate_mit(cfg: dict) -> list[str]:
+    """MIT 实例表自检：每个可控关节必须且只能属于一个实例（覆盖门禁的真值侧）。"""
+    errors: list[str] = []
+    mit = cfg.get("controllers", {}).get("mit")
+    if not mit:
+        errors.append("缺 controllers.mit 段（MIT 力控实例表）")
+        return errors
+    joints_cfg = cfg.get("joints", {})
+    profiles = mit.get("profiles") or {}
+    instances = mit.get("instances") or {}
+    if not instances:
+        errors.append("control.mit.instances 为空")
+        return errors
+
+    # 覆盖：每个有命令接口的关节必须且只能属于一个实例；mimic 关节不允许出现
+    controllable = [n for n, j in joints_cfg.items() if j.get("control")]
+    owner: dict[str, list[str]] = {}
+    for iname, inst in instances.items():
+        for jname in inst.get("joints", []):
+            owner.setdefault(jname, []).append(iname)
+    for jname, owners in owner.items():
+        if jname not in joints_cfg:
+            errors.append(f"MIT 实例表引用了不存在的关节 {jname}")
+        elif any(o for o in owners if len(owners) > 1):
+            errors.append(f"关节 {jname} 被多个 MIT 实例声明：{owners}（命令接口会抢，运行期报 already claimed）")
+    for jname in controllable:
+        if jname not in owner:
+            errors.append(f"关节 {jname} 没有归属任何 MIT 实例（裸关节 → 力矩恒 0）")
+    for jname, j in joints_cfg.items():
+        if not j.get("control") and jname in owner:
+            errors.append(f"mimic 关节 {jname} 出现在 MIT 实例表里（它没有命令接口）")
+
+    # 每个实例的 profile 必须覆盖它的关节
+    for iname, inst in instances.items():
+        pname = inst.get("profile")
+        if not pname:
+            errors.append(f"MIT 实例 {iname} 缺 profile")
+            continue
+        prof = profiles.get(pname)
+        if prof is None:
+            errors.append(f"MIT 实例 {iname} 引用了不存在的 profile {pname}")
+            continue
+        if not inst.get("plugin"):
+            errors.append(f"MIT 实例 {iname} 缺 plugin")
+        per_joint = prof.get("per_joint") or {}
+        for jname in inst.get("joints", []):
+            if jname not in per_joint:
+                errors.append(f"profile {pname} 的 per_joint 缺关节 {jname}（实例 {iname} 要用）")
+        # torque_limit 不许超过该关节的 max_effort（关节单位）
+        group = prof.get("group") or {}
+        for jname in inst.get("joints", []):
+            limit = per_joint.get(jname, {}).get("torque_limit", group.get("torque_limit"))
+            if limit is None:
+                continue
+            cap = float(joints_cfg.get(jname, {}).get("max_effort", 0.0))
+            if cap > 0 and float(limit) > cap + 1e-9:
+                errors.append(
+                    f"{jname} 的 torque_limit={limit} 超过 URDF max_effort={cap} —— 限幅形同虚设"
+                )
+    if not mit.get("shared", {}).get("gravity_params"):
+        errors.append("control.mit.shared.gravity_params 为空（重力前馈会全是 0）")
     return errors
 
 
@@ -252,6 +341,77 @@ def render_safety_params(cfg: dict) -> str:
     return head + dump_yaml(data)
 
 
+# ---- MIT 力控（变刚度）：实例表 → 控制器 yaml ----
+# 逐关节量必须按实例的 joints 顺序展开成数组；组级量（阈值/斜率/守卫）原样透传。
+MIT_ARRAY_KEYS = (
+    "kp_hold", "kd_hold", "kp_move", "kd_move", "friction", "torque_limit",
+    "kp_free", "kd_free", "free_enabled",
+    "target_deadband", "settle_band_min", "settle_band_max",
+)
+# 组级（标量）键透传白名单不需要维护：group 里除 state_interfaces 外都原样透传。
+
+
+def _mit_params(mit: dict, inst: dict) -> dict:
+    """把一个实例渲染成 ros__parameters。缺失的逐关节键**不输出**，交给控制器默认值。"""
+    profiles = mit["profiles"]
+    prof = profiles[inst["profile"]]
+    per_joint = prof.get("per_joint") or {}
+    group = dict(prof.get("group") or {})
+    joints = list(inst["joints"])
+
+    params: dict = {
+        "joints": joints,
+        "chain_joints": list(inst.get("chain_joints", joints)),
+        "state_interfaces": list(group.pop("state_interfaces", ["position", "velocity"])),
+    }
+    for key in MIT_ARRAY_KEYS:
+        values = []
+        ok = True
+        for jname in joints:
+            v = per_joint.get(jname, {}).get(key, group.get(key))
+            if v is None:
+                # 组级给了标量就当全体同值；都没有就跳过这个键
+                ok = False
+                break
+            values.append(float(v) if not isinstance(v, bool) else bool(v))
+        if ok and values:
+            params[key] = values
+        else:
+            group.pop(key, None)
+
+    for key, val in group.items():
+        params[key] = val
+
+    params["gravity_params"] = [float(x) for x in mit["shared"]["gravity_params"]]
+    return params
+
+
+def render_mit_controllers(cfg: dict) -> str:
+    """MIT 力控控制器 yaml（controller_manager 声明 + 每个实例的参数块）。"""
+    mit = cfg["controllers"]["mit"]
+    instances = mit["instances"]
+    cm_params: dict = {"update_rate": mit.get("update_rate", 200)}
+    cm_params["joint_state_broadcaster"] = {
+        "type": "joint_state_broadcaster/JointStateBroadcaster"}
+    body: dict = {"joint_state_broadcaster": {"ros__parameters": {"use_local_topics": False}}}
+    for name, inst in instances.items():
+        cm_params[name] = {"type": inst["plugin"]}
+        body[name] = {"ros__parameters": _mit_params(mit, inst)}
+
+    head = (
+        GENERATED_NOTE
+        + "# MIT 力控（变刚度）控制器：一个实例控一组关节，参数来自真值的 controllers.mit 段。\n"
+        + "# 启动示例（真机/仿真，纯力矩模式）：\n"
+        + "#   ros2 launch b601_bringup bringup.launch.py hardware:=mujoco \\\n"
+        + "#       dm_command_mode:=mit_torque \\\n"
+        + "#       controllers_file:=<本文件> \\\n"
+        + "#       controllers:=\"joint_state_broadcaster " + " ".join(instances) + "\"\n"
+    )
+    data = {"controller_manager": {"ros__parameters": cm_params}}
+    data.update(body)
+    return head + dump_yaml(data)
+
+
 def render_all(cfg: dict) -> dict[Path, str]:
     return {
         WS_SRC / "b601_description" / "config" / "initial_positions.yaml":
@@ -262,6 +422,8 @@ def render_all(cfg: dict) -> dict[Path, str]:
             render_joint_limits(cfg),
         WS_SRC / "b601_safety" / "config" / "safety_params.yaml":
             render_safety_params(cfg),
+        WS_SRC / "b601_bringup" / "config" / "b601_mit_controllers.yaml":
+            render_mit_controllers(cfg),
     }
 
 

@@ -16,6 +16,7 @@
 #        · 注入角度越限帧 → 急停（EMERGENCY_STOP），控制器全部 inactive、硬件 INACTIVE
 #        · 越限状态下解除急停 → 必须被拒绝
 #        · 回到安全范围后解除 → 成功
+#   5) MuJoCo 自检    若装了 mujoco：跑 scripts/sim_mit_check.py（动力学级验证）
 #
 # 为什么用 mock 而不是直接上真机：
 #   mock 后端能完整跑控制层与安全链路（控制器、action、/joint_states、急停动作），
@@ -30,7 +31,7 @@ WORKSPACE="$REPO_ROOT/ros2_ws"
 TMP="$REPO_ROOT/.verify"
 LOG="$TMP/preflight_bringup.log"
 mkdir -p "$TMP"
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-170}"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-171}"
 export ROS_LOCALHOST_ONLY=1
 export RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
 
@@ -81,7 +82,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- 1. 配置同步
-step "1/4 配置同步"
+step "1/5 配置同步"
 if python3 "$REPO_ROOT/scripts/sync_config.py" --check >/dev/null 2>&1; then
   ok "派生配置与 b601_project.yaml 同步"
 else
@@ -89,7 +90,7 @@ else
 fi
 
 # ------------------------------------------------------------ 2. 安全判定单测
-step "2/4 安全判定单测"
+step "2/5 安全判定单测"
 if python3 "$REPO_ROOT/scripts/test_safety.py" >"$TMP/preflight_safety_units.log" 2>&1; then
   ok "$(tail -1 "$TMP/preflight_safety_units.log")"
 else
@@ -97,7 +98,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 3. 静态自检
-step "3/4 静态自检"
+step "3/5 静态自检"
 if "$REPO_ROOT/scripts/verify.sh" >"$TMP/preflight_verify.log" 2>&1; then
   ok "$(grep -a '汇总' "$TMP/preflight_verify.log" | tail -1 | sed 's/\x1b\[[0-9;]*m//g')"
 else
@@ -105,7 +106,7 @@ else
 fi
 
 # ------------------------------------------------------------ 4. 仿真闭环
-step "4/4 仿真闭环（mock 后端 + 安全节点）"
+step "4/5 仿真闭环（mock 后端 + 安全节点）"
 
 wait_topic() {
   local topic="$1" timeout="${2:-30}" i=0
@@ -295,11 +296,55 @@ rec_stop
 inject "[-2.40, -0.30, -0.60, 0.0, 0.0, 0.0, 0.0, 0.0]" "[0,0,0,0,0,0,0,0]" 0.6 200
 timeout 25 $CLEAR >/dev/null 2>&1
 
+# ---------------------------------------------------------------- 5. MuJoCo
+step "5/6 MuJoCo 动力学自检（可选）"
+if python3 -c "import mujoco" >/dev/null 2>&1; then
+  if python3 "$REPO_ROOT/scripts/sim_mit_check.py" >"$TMP/preflight_mujoco.log" 2>&1; then
+    ok "MuJoCo 自检通过 → $(tail -1 "$TMP/preflight_mujoco.log" | cut -c1-60)"
+  else
+    bad "MuJoCo 自检失败 → 见 $TMP/preflight_mujoco.log"
+  fi
+else
+  info "本机没装 mujoco，跳过（pip install --user mujoco）"
+  info "注意：hardware:=mujoco 后端仍未实现，仿真验证目前依赖 mock + sim_mit_check.py"
+fi
+
+# ------------------------------------------- 6. 变刚度（MIT）全链路回归（仿真）
+# 这一节覆盖 Phase 0/1 新增的能力：指令层状态机、整组 done、拆分实例、夹爪力控、过温守护。
+# 全部走真正的 ROS 链路（controller_manager → b601_mit_controller → MuJoCo 硬件插件），
+# **不碰真机**。任一项失败就禁止上真机 —— 变刚度这条线动的是力矩输出，比位置模式更危险。
+step "6/6 变刚度（MIT）全链路回归（MuJoCo，不上真机）"
+export ROS_DOMAIN_ID=173
+if python3 -c "import mujoco" >/dev/null 2>&1 && [[ -x "$REPO_ROOT/scripts/sim_mit_ros.py" ]]; then
+  MIT_LOG="$TMP/preflight_mit.log"
+  : >"$MIT_LOG"
+  mit_run() {   # $1=说明 $2=tag 其余=参数
+    local desc="$1"; local tag="$2"; shift 2
+    if timeout 300 python3 "$REPO_ROOT/scripts/sim_mit_ros.py" --tag "$tag" "$@" \
+        >"$MIT_LOG.$tag" 2>&1; then
+      ok "$desc"
+    else
+      bad "$desc → 见 $MIT_LOG.$tag"
+      grep -E "RESULT|❌" "$MIT_LOG.$tag" | tail -3 | sed 's/^/         /'
+    fi
+  }
+  mit_run "零重力跟踪回归（3 姿态，稳态误差判据 0.02）" pf_track \
+      --zero-gravity --no-safety --tol 0.02 --max-vel 1.5
+  mit_run "变刚度状态机（slew/死区/整组 done/刚度斜坡）" pf_state \
+      --zero-gravity --no-safety --state-machine-test
+  mit_run "夹爪 MIT 力控（0/20/40 mm）" pf_grip \
+      --controllers "b601_mit_arm b601_mit_gripper" --zero-gravity --no-safety \
+      --joints finger_left --poses "0.0;0.02;0.04" --tol 0.004 --max-vel 0.3
+  mit_run "过温守护（热模型升温 → 失能）" pf_temp --temp-trip-test --no-safety --tol 99 --max-vel 99
+else
+  info "跳过：缺 mujoco 或 scripts/sim_mit_ros.py"
+fi
+
 # ---------------------------------------------------------------- 汇总
 printf '\n\033[1m上电门禁\033[0m：%d 通过 / %d 失败\n' "$PASS" "$FAIL"
 if [[ $FAIL -eq 0 ]]; then
   printf '\033[1;32m✅ 允许上真机。\033[0m 流程：先 enable_motors:=false 只读 → 手推核对方向 → 再小幅度使能。\n'
-  printf '   真机命令：ros2 launch b601_bringup bringup.launch.py hardware:=dm\n'
+  printf '   本版本复测入口见 README.md。先运行：./scripts/hw_mit_test1.sh --dry-run --amp big --slew 0.12\n'
 else
   printf '\033[1;31m⛔ 禁止上真机。\033[0m 先修到全绿，再回到本脚本。\n'
 fi

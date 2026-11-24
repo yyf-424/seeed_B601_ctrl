@@ -34,6 +34,11 @@
   <!-- 真机 CSV 记录路径：留空 = 用 config/b601_project.yaml 的 hardware.dm.log_csv（默认关闭）。
        示例：ros2 launch ... dm_log_csv:="$PWD/.verify/run.csv" -->
   <xacro:arg name="dm_log_csv" default=""/>
+  <!-- MuJoCo 模型路径：默认用包内的；仿真回归可以指向"零重力夹具"等变体模型。
+       为什么要能换：控制器实现回归不该被"重力前馈准不准"干扰（那是重力补偿那条线的事）。 -->
+  <!-- 默认留空：真正的 $(find b601_mujoco) 放在 ros2_control.xacro 的 mujoco 分支里求值。
+       否则 mock/dm 展开时也会去解析 $(find)，而没 source 工作区时该包不可见 → 展开失败。 -->
+  <xacro:arg name="mujoco_model" default=""/>
 
   <xacro:include filename="inc/materials.xacro"/>
   <xacro:include filename="inc/macros.xacro"/>
@@ -52,6 +57,7 @@
       dm_device="$(arg dm_device)"
       dm_enable_motors="$(arg dm_enable_motors)"
       dm_command_mode="$(arg dm_command_mode)"
-      dm_log_csv="$(arg dm_log_csv)"/>
+      dm_log_csv="$(arg dm_log_csv)"
+      mujoco_model="$(arg mujoco_model)"/>
 
 </robot>

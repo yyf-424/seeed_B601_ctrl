@@ -122,6 +122,76 @@ def check_controllers(urdf, path, errors, warnings):
         errors.append("缺少 joint_state_broadcaster：/joint_states 不会发布，MoveIt 与 RViz 都会瞎")
 
 
+def check_mit_controllers(urdf, path, errors):
+    """MIT 力控实例表：每个可控关节必须且只能属于一个实例（裸关节 = 力矩恒 0）。
+
+    为什么要单独查一遍：sync_config 的校验针对**真值**，这里查**生成物**。
+    两道关一起才挡得住"手改了生成文件"或"真值里 profile 写漏一个关节"。
+    """
+    with open(path, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    cm = cfg.get("controller_manager", {}).get("ros__parameters", {})
+    if not cm:
+        errors.append(f"{path} 里没有 controller_manager.ros__parameters")
+        return
+    instances = {k: v for k, v in cm.items() if isinstance(v, dict) and "type" in v
+                 and k != "joint_state_broadcaster"}
+    if not instances:
+        errors.append(f"{path} 里没有 MIT 控制器实例（controller_manager 只声明了 broadcaster）")
+        return
+
+    # ros2_control 里带 effort 命令接口的关节（= mit_torque 模式下可控的关节）
+    effort_joints = set()
+    for system in urdf["ros2_control"].values():
+        for name, joint in system["joints"].items():
+            if "effort" in joint.get("command", []):
+                effort_joints.add(name)
+    if not effort_joints:
+        # 位置模式的 URDF 展开：MIT 实例表不适用，跳过而不是报错
+        return
+
+    claim = {}
+    for name, decl in instances.items():
+        params = cfg.get(name, {}).get("ros__parameters", {})
+        joints = params.get("joints", [])
+        chain = params.get("chain_joints", [])
+        if not joints:
+            errors.append(f"MIT 实例 {name} 没有 joints")
+        for joint in joints:
+            if joint not in urdf["joints"]:
+                errors.append(f"MIT 实例 {name} 引用了不存在的关节 {joint}")
+            if joint in claim:
+                errors.append(f"关节 {joint} 同时被 {claim[joint]} 与 {name} 声明（会互相抢命令接口）")
+            claim[joint] = name
+        # 逐关节数组长度必须与 joints 一致（长度错 = 参数静默失效）
+        for key, val in params.items():
+            if isinstance(val, list) and key not in ("joints", "chain_joints", "state_interfaces"):
+                if key == "gravity_params":
+                    continue
+                if len(val) != len(joints):
+                    errors.append(
+                        f"MIT 实例 {name} 的 {key} 长度 {len(val)} ≠ joints 个数 {len(joints)}")
+        for cname in chain:
+            if cname not in urdf["joints"]:
+                errors.append(f"MIT 实例 {name} 的 chain_joints 引用了不存在的关节 {cname}")
+
+    for joint in sorted(effort_joints):
+        if joint not in claim:
+            errors.append(
+                f"关节 {joint} 有 effort 命令接口却没有任何 MIT 实例声明它 —— "
+                f"力矩恒 0（裸关节），使能后会直接塌或不受控")
+
+    # 声明顺序检查：数组参数必须与 joints 顺序对齐（防止"参数按 6 元写、实例只控 1 个"）
+    for decl in instances:
+        params = cfg.get(decl, {}).get("ros__parameters", {})
+        if not params.get("joints"):
+            continue
+        for key in ("kp_hold", "kd_hold", "kp_move", "kd_move", "friction", "torque_limit"):
+            val = params.get(key)
+            if isinstance(val, list) and len(val) != len(params["joints"]):
+                errors.append(f"MIT 实例 {decl} 的 {key} 与 joints 长度不一致")
+
+
 def check_moveit_controllers(urdf, path, ros_controller_names, errors):
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -265,6 +335,7 @@ def main():
     parser.add_argument("--controllers")
     parser.add_argument("--moveit-controllers")
     parser.add_argument("--srdf")
+    parser.add_argument("--mit-controllers", help="MIT 力控控制器 yaml（生成物）")
     args = parser.parse_args()
 
     urdf = load_urdf(args.urdf)
@@ -294,6 +365,8 @@ def main():
         check_moveit_controllers(urdf, args.moveit_controllers, ros_controller_names, errors)
     if args.srdf:
         check_srdf(urdf, args.srdf, errors)
+    if args.mit_controllers:
+        check_mit_controllers(urdf, args.mit_controllers, errors)
 
     for w in warnings:
         print(f"  [warn] {w}")

@@ -68,7 +68,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
-    max_effort: 27.0
+    max_effort: 24.0
     max_acceleration: 4.0
     startup: 0.0
     control: true
@@ -78,6 +78,8 @@ joints:
       model: "4340P"
       direction: 1.0
       scale: 1.0
+      # 关节 effort ↔ 电机力矩换算（revolute=1.0；prismatic=等效齿轮半径 m）
+      effort_scale: 1.0
       zero_offset: 0.0
       kp: 120.0
       kd: 8.0
@@ -90,7 +92,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
-    max_effort: 27.0
+    max_effort: 24.0
     max_acceleration: 4.0
     startup: -0.3
     control: true
@@ -100,6 +102,8 @@ joints:
       model: "4340P"
       direction: 1.0
       scale: 1.0
+      # 关节 effort ↔ 电机力矩换算（revolute=1.0；prismatic=等效齿轮半径 m）
+      effort_scale: 1.0
       zero_offset: 0.0
       kp: 120.0
       kd: 8.0
@@ -112,7 +116,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
-    max_effort: 27.0
+    max_effort: 24.0
     max_acceleration: 4.0
     startup: -0.6
     control: true
@@ -122,6 +126,8 @@ joints:
       model: "4340P"
       direction: 1.0
       scale: 1.0
+      # 关节 effort ↔ 电机力矩换算（revolute=1.0；prismatic=等效齿轮半径 m）
+      effort_scale: 1.0
       zero_offset: 0.0
       kp: 120.0
       kd: 8.0
@@ -134,7 +140,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.37
-    max_effort: 7.0
+    max_effort: 10.0
     max_acceleration: 8.0
     startup: 0.0
     control: true
@@ -144,6 +150,8 @@ joints:
       model: "4310"
       direction: 1.0
       scale: 1.0
+      # 关节 effort ↔ 电机力矩换算（revolute=1.0；prismatic=等效齿轮半径 m）
+      effort_scale: 1.0
       zero_offset: 0.0
       kp: 18.0
       kd: 2.0
@@ -156,7 +164,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.37
-    max_effort: 7.0
+    max_effort: 10.0
     max_acceleration: 8.0
     startup: 0.0
     control: true
@@ -166,6 +174,8 @@ joints:
       model: "4310"
       direction: 1.0
       scale: 1.0
+      # 关节 effort ↔ 电机力矩换算（revolute=1.0；prismatic=等效齿轮半径 m）
+      effort_scale: 1.0
       zero_offset: 0.0
       kp: 18.0
       kd: 2.0
@@ -178,7 +188,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.37
-    max_effort: 7.0
+    max_effort: 10.0
     max_acceleration: 8.0
     startup: 0.0
     control: true
@@ -188,6 +198,8 @@ joints:
       model: "4310"
       direction: 1.0
       scale: 1.0
+      # 关节 effort ↔ 电机力矩换算（revolute=1.0；prismatic=等效齿轮半径 m）
+      effort_scale: 1.0
       zero_offset: 0.0
       kp: 18.0
       kd: 2.0
@@ -206,7 +218,7 @@ joints:
     max_velocity: 0.05
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.05
-    max_effort: 8.0
+    max_effort: 10.0
     max_acceleration: 0.2
     startup: 0.0
     control: true
@@ -216,6 +228,8 @@ joints:
       model: "4310"
       direction: -1.0
       scale: 0.01
+      # 关节 effort ↔ 电机力矩换算（revolute=1.0；prismatic=等效齿轮半径 m）
+      effort_scale: 0.01
       zero_offset: 0.0
       kp: 8.0
       kd: 1.0
@@ -233,7 +247,7 @@ joints:
     max_velocity: 0.05
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.05
-    max_effort: 8.0
+    max_effort: 10.0
     max_acceleration: 0.2
     startup: 0.0
     control: false
@@ -264,6 +278,21 @@ hardware:
     # （pos_vel/mit → 目标位置；mit_torque → 力矩命令）。用于事后分析"抽风"这类事件。
     log_csv: ""
     log_rate_hz: 200.0
+
+    # ---- 温度守护（决策③：不做力矩位置保护，堵转靠温度兜底）----
+    # 数据来自反馈帧自带的 t_mos / t_rotor；插件以前完全没读它们。
+    # ⚠ 70/85 ℃ 是**保守占位值**，达妙规格书里没有查到官方上限（本地文档与官方 SDK 都没有），
+    #   实测正常工况（空载 21–23 ℃）后再收紧；改这里即可，不用改代码。
+    temperature:
+      warn_c: 70.0          # 告警线：只报警 + 进日志/CSV，不动作
+      limit_c: 85.0         # 超这条：立即 disable 整条总线 + 硬件置 error（锁存，需人工重启）
+      hysteresis_c: 5.0     # 恢复要求降到 warn_c − 5 以下
+
+    # 仿真后端（MujocoSystemHardware）的一阶热模型：让"持续大扭矩 → 过温失能"能在仿真里验
+    thermal:
+      ambient_c: 25.0
+      heat_c_per_s: 1.5     # 满载（|τ|=torque_limit）时的升温速率
+      cooling_tau_s: 60.0
 
     request_feedback: true      # 达妙是应答式：不发请求帧就收不到任何反馈
     feedback_divider: 1         # 每 N 个控制周期发一次请求帧（1 = 每周期）
@@ -301,10 +330,139 @@ controllers:
       allow_nonzero_velocity_at_trajectory_end: true
       allow_partial_joints_goal: true
 
-  # MIT 力控（b601_mit_controller）暂【未】纳入统一配置：
-  #   它属于"重力补偿/力控"这条线，真机复测通过后再把 kp/kd/重力参数搬到这里统一管理。
-  #   在那之前 b601_bringup/config/b601_mit_controllers.yaml 仍是手写文件（不生成、不校验）。
-  #   TODO(后续): 迁入 controllers.mit + 在 sync_config.py 里恢复生成。
+  # -------------------------------------------------------------------------
+  # MIT 力控（变刚度）实例表 —— 「哪个关节归哪个控制器」的唯一真值
+  #
+  #   生成 → ros2_ws/src/b601_bringup/config/b601_mit_controllers.yaml
+  #   规划 → docs/changes/2026-11-22-01-per-joint-controller-and-variable-stiffness.md
+  #
+  # 为什么用「实例 + 按关节名的 profile」而不是 6 元下标数组：
+  #   ① 一个实例可以只控 1 个关节（把 joint6 换成实验控制器），下标数组会错位；
+  #   ② 历史上出过「批量替换误改 joint2 限位」的事故，按名字给值不可能错位。
+  # 覆盖要求：joint1..joint6 + finger_left 每个都必须且只能属于一个实例（verify.sh 校验）。
+  # -------------------------------------------------------------------------
+  mit:
+    update_rate: 200
+
+    instances:
+      b601_mit_arm:
+        plugin: b601_mit_controller/B601MitController
+        joints: [joint1, joint2, joint3, joint4, joint5, joint6]
+        profile: standard_mit
+        # 重力前馈需要整条运动链的位形（只读 position），与"本实例控哪些关节"无关
+        chain_joints: [joint1, joint2, joint3, joint4, joint5, joint6]
+      b601_mit_gripper:
+        plugin: b601_mit_controller/B601MitController
+        joints: [finger_left]
+        profile: gripper_mit
+        chain_joints: [joint1, joint2, joint3, joint4, joint5, joint6]
+
+    # ---- 参数模板：per_joint 用**关节名**给值，生成时按实例的 joints 顺序展开成数组 ----
+    profiles:
+      # 冻结：= 2026-11-21 真机验证过的那一套（纯 MIT 20 姿态 / 0 急停）
+      standard_mit:
+        # torque_limit 一律 ≤ 该关节 URDF 的 max_effort。
+        # 2026-11-23 按「MIT 模式下的电机力矩上限」定：**j1-j3(4340P)=24 N·m、j4-j7(4310)=10 N·m**
+        # （之前用的 10/7 是软件保守值，j3 斜坡期撞到 99% 限幅反而拖慢跟踪）。
+        # 历史上控制器写死 10，对 j4–j6 其实早就被插件按 7 夹断了 —— 现在显式取更严者。
+        # kp_free/kd_free = **等待档**（上层无权威、可手推）；kd_free 取临界阻尼 2√(kp_free·I)：
+        #   I=[0.111,0.414,0.297,0.047,0.021,0.0106] → ζ=1 时 [0.36,0.70,0.60,0.24,0.16,0.11]
+        per_joint:
+          joint1: {kp_hold: 6.0, kd_hold: 1.63, kp_move: 70.0, kd_move: 5.58, kp_free: 0.3, kd_free: 0.36,
+                   friction: 0.0,      torque_limit: 24.0, target_deadband: 0.001,
+                   settle_band_min: 0.01, settle_band_max: 0.05}
+          joint2: {kp_hold: 6.0, kd_hold: 3.15, kp_move: 75.0, kd_move: 11.15, kp_free: 0.3, kd_free: 0.70,
+                   friction: -0.45533, torque_limit: 24.0, target_deadband: 0.001,
+                   settle_band_min: 0.01, settle_band_max: 0.05}
+          joint3: {kp_hold: 6.0, kd_hold: 2.67, kp_move: 150.0, kd_move: 13.36, kp_free: 0.3, kd_free: 0.60,
+                   friction: 0.0,      torque_limit: 24.0, target_deadband: 0.001,
+                   settle_band_min: 0.01, settle_band_max: 0.05}
+          joint4: {kp_hold: 2.0, kd_hold: 0.37, kp_move: 35.0, kd_move: 1.55, kp_free: 0.3, kd_free: 0.24,
+                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.001,
+                   settle_band_min: 0.01, settle_band_max: 0.05}
+          joint5: {kp_hold: 1.0, kd_hold: 0.21, kp_move: 14.0, kd_move: 0.65, kp_free: 0.3, kd_free: 0.16,
+                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.001,
+                   settle_band_min: 0.01, settle_band_max: 0.05}
+          joint6: {kp_hold: 0.8, kd_hold: 0.13, kp_move: 8.0,  kd_move: 0.35, kp_free: 0.3, kd_free: 0.11,
+                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.001,
+                   settle_band_min: 0.01, settle_band_max: 0.05}
+        # 2026-11-23（第十九轮）：kp_move/kd_move 按「纯 PD 无前馈」精度需求重定标 ——
+        #   误差 = (τ_g + 静摩擦)/kp，故 kp 越大越准；上限由实测反馈延迟 12 ms 定：
+        #   ωn·τd ≤ 0.33（= 已验证的 joint6 工作点）。真机 5 姿态复测：最大误差 0.148 → 0.058 rad。
+        #   kd 按 ζ≈0.6~1.0 同步放大（kd·T/I ≤ 0.52，远低于 1 的抖动线）。
+        group:
+          # ---- 指令层（Phase 1）：决定"怎么走"和"到没到" ----
+          target_slew: 0.5            # 关节单位/s：目标一律斜坡推进，实物不跳变
+          settle_band_pct: 0.05       # 误差带 = 5% × 本次指令位移（再夹到逐关节的 min/max）
+          settle_sec: 3.0             # 全部关节连续在带内这么久 → 整组 done
+          kp_up_sec: 0.8              # free → track 的刚度上升时间（线性速率）
+          kp_down_sec: 2.0            # track → free 的刚度回落时间（回落要慢，避免突然变软塌下去）
+          q_ref_lpf_hz: 30.0          # 等待模式下 q_ref 跟随实测的带宽
+          track_timeout_sec: 0.0      # 0=关闭：目标不可达时**不**兜底（决策⑩）
+          free_enabled: true          # 本 profile 的关节是否参与等待模式
+          # 电机侧阻抗（Phase 3，可选）：true 时控制器不自己算 PD，而是把
+          # (q_up, kp, kd, τ_ff) 交给驱动器，位置环在电机里闭环（1 kHz 量级，不受
+          # 200 Hz 控制周期与反馈延迟影响）。需要 dm_command_mode:=mit_impedance。
+          motor_impedance: false
+          # ---- 以下是 Phase 0 及以前的参数：仍声明但不参与模式判定 ----
+          move_threshold: 0.08
+          hold_threshold: 0.03
+          vel_hold_threshold: 0.30
+          kp_ramp_sec: 0.35
+          max_error: 0.45
+          velocity_lpf_hz: 6.0
+          max_vel_feedback: 0.4
+          torque_slew: 50.0
+          gravity_scale: 1.0
+          friction_scale: 0.0
+          friction_vel_eps: 0.02
+          use_gravity: true
+          state_interfaces: [position, velocity]
+
+      # 夹爪：prismatic，单位 m / N，量级与手臂差 3 个数量级（见规划 §5.4.3）
+      gripper_mit:
+        # 手指等效质量只有 ~0.025 kg：kp 用 2000 N/m 时 1 mm 误差就是 2 N，
+        # 加速度 80 m/s² —— 实测会冲到 2.3 m/s。所以量级压到 500，kd 按 ζ≈1 给。
+        per_joint:
+          finger_left: {kp_hold: 200.0, kd_hold: 5.0, kp_move: 500.0, kd_move: 10.0,
+                        kp_free: 50.0, kd_free: 2.0,
+                        friction: 0.0, torque_limit: 10.0, target_deadband: 0.0001,
+                        settle_band_min: 0.0005, settle_band_max: 0.0025}
+        group:
+          target_slew: 0.02           # m/s：夹爪合拢速度（真机 vel 上限 0.05）
+          settle_band_pct: 0.05
+          settle_sec: 2.0
+          kp_up_sec: 0.5
+          kp_down_sec: 1.0
+          q_ref_lpf_hz: 30.0
+          track_timeout_sec: 0.0
+          free_enabled: true          # 决策⑭：夹爪也一起进等待模式（前期不夹物体）
+          motor_impedance: false
+          move_threshold: 0.01
+          hold_threshold: 0.002
+          vel_hold_threshold: 0.01    # m/s
+          kp_ramp_sec: 0.5
+          max_error: 0.02             # m
+          velocity_lpf_hz: 6.0
+          max_vel_feedback: 0.05      # m/s
+          torque_slew: 40.0           # N/s
+          gravity_scale: 1.0
+          friction_scale: 0.0
+          friction_vel_eps: 0.002
+          use_gravity: true
+          state_interfaces: [position, velocity]
+
+    # ---- 所有实例共用的东西（重力模型参数 = 整条链，与实例划分无关）----
+    shared:
+      # 8 个 link 的 [m, m*cx, m*cy, m*cz]，顺序 = b601_chain.hpp 的 kGravityLinks
+      gravity_params: [1.326600, -0.124435, -0.086111, -0.040900,
+                       0.821833, 0.070095, 0.029823, -0.025906,
+                       0.494982, 0.061640, -0.024109, -0.015756,
+                       0.360243, -0.013547, -0.007382, 0.017297,
+                       0.343277, -0.002668, -0.000196, -0.002202,
+                       0.475011, -0.048506, 0.000262, -0.002781,
+                       0.025011, -0.011623, 0.000267, -0.002785,
+                       0.025011, -0.011623, 0.000267, -0.002785]
 
 # ---------------------------------------------------------------------------
 # MoveIt 规划限速（时间参数化的依据）

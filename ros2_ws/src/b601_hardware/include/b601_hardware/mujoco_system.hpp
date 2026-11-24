@@ -42,6 +42,8 @@
 // 且 CMake 只给该目标加 mujoco include path，不会污染其它编译单元。
 #include <mujoco/mujoco.h>
 
+#include "b601_hardware/temperature_guard.hpp"
+
 namespace b601_hardware
 {
 
@@ -85,10 +87,18 @@ private:
     bool has_position_limit{false};
     bool has_command{false};
     bool is_finger{false};
+    // 运动学直通（命令即位置，不走物理）：没有执行器的关节必然如此；
+    // 夹爪在**位置模式**下也保持直通 —— 那是 2026-11-21 验证过的行为（否则真机/仿真不一致、
+    // 也会打破"夹爪 0/45 mm"的既有验收）。mit_torque 模式下夹爪改用 MJCF 执行器，让它"真的有力"。
+    bool passthrough{false};
     // 运行时
     double init_position{0.0};   // URDF state_interface 的 initial_value（仿真初值，避免起点压在限位上）
     double cmd_position{0.0};
     double cmd_effort{0.0};
+    // mit_impedance（Phase 3）：位置环在"驱动器"里闭环 —— 仿真里就是插件按物理步长
+    // 用 cmd_kp/cmd_kd 自己算力矩，从而和真机一样把带宽提到 1 kHz 量级。
+    double cmd_kp{0.0};
+    double cmd_kd{0.0};
     double state_position{0.0};
     double state_velocity{0.0};
     double state_effort{0.0};
@@ -101,6 +111,8 @@ private:
 
   bool load_model();
   void step_sim(double dt);
+  /// mit_impedance：按物理步长对每个关节做阻抗闭环（模拟驱动器内部位置环）
+  void apply_impedance_inside_physics();
   void mirror_finger();
 
   // 配置
@@ -117,7 +129,23 @@ private:
   // 安全节点第一帧就判急停。收到第一份非零力矩命令（或超过 300 个周期）后才开始积分。
   bool sim_started_{false};
   long cycles_since_activate_{0};
+  long physics_wait_cycles_{2000};   // mit_torque 下等控制器写入力矩的周期数上限
+                                     // （200 Hz × 2000 = 10 s；两个控制器实例的加载/激活
+                                     //  在慢机器上可能超过 1.5 s，早于它积分会让手臂自由落体）
   bool verbose_{false};
+
+  // ---- 温度守护（决策③）：与真机插件用**同一份**判定逻辑 ----
+  // 仿真里的温度用一阶热模型：
+  //   dT/dt = heat_c_per_s · (|τ| / τ_limit) − (T − ambient) / cooling_tau_s
+  // 这样"持续大扭矩 → 升温 → 过温失能"这条链路在仿真里可以端到端验，
+  // 而不是靠注入假数据把判定逻辑绕过去。
+  TemperatureGuard temp_guard_;
+  bool over_temp_{false};
+  bool temp_warned_{false};
+  double thermal_ambient_c_{25.0};
+  double thermal_heat_c_per_s_{1.5};
+  double thermal_cooling_tau_s_{60.0};
+  double temp_now_c_{25.0};
 
   mjModel * model_{nullptr};
   mjData * data_{nullptr};

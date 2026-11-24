@@ -52,7 +52,9 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_init(
   if (const auto it = hp.find("command_mode"); it != hp.end()) {
     command_mode_ = it->second;
   }
-  if (command_mode_ != "pos_vel" && command_mode_ != "mit" && command_mode_ != "mit_torque") {
+  if (command_mode_ != "pos_vel" && command_mode_ != "mit" && command_mode_ != "mit_torque" &&
+    command_mode_ != "mit_impedance")
+  {
     RCLCPP_WARN(
       logger(), "未知 command_mode='%s'，回落 pos_vel", command_mode_.c_str());
     command_mode_ = "pos_vel";
@@ -64,6 +66,22 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_init(
     effort_sign_ = effort_sign_ < 0.0 ? -1.0 : 1.0;
   }
   verbose_ = get_double(hp, "verbose", 0.0, "hardware") > 0.5;
+  // 温度守护 + 一阶热模型（阈值与真机同一套参数名）
+  temp_guard_.configure(
+    get_double(hp, "temp_warn_c", 70.0, "hardware"),
+    get_double(hp, "temp_limit_c", 85.0, "hardware"),
+    get_double(hp, "temp_hysteresis_c", 5.0, "hardware"));
+  thermal_ambient_c_ = get_double(hp, "thermal_ambient_c", 25.0, "hardware");
+  thermal_heat_c_per_s_ = get_double(hp, "thermal_heat_c_per_s", 1.5, "hardware");
+  thermal_cooling_tau_s_ = std::max(1.0, get_double(hp, "thermal_cooling_tau_s", 60.0, "hardware"));
+  temp_now_c_ = thermal_ambient_c_;
+  RCLCPP_INFO(
+    logger(),
+    "温度守护（仿真）：告警 %.0f ℃ / 失能 %.0f ℃；热模型 环境 %.0f ℃、满载 %.2f ℃/s、冷却 %.0f s",
+    temp_guard_.warn_c(), temp_guard_.limit_c(), thermal_ambient_c_,
+    thermal_heat_c_per_s_, thermal_cooling_tau_s_);
+  physics_wait_cycles_ = static_cast<long>(
+    std::max(1.0, get_double(hp, "physics_wait_cycles", 2000.0, "hardware")));
 
   if (model_path_.empty()) {
     RCLCPP_ERROR(logger(), "缺少 model_path 参数（指向 MJCF 文件）");
@@ -139,6 +157,10 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_configure(
     const std::string act_name = jm.name + "_motor";
     jm.actuator = mj_name2id(model_, mjOBJ_ACTUATOR, act_name.c_str());
     jm.is_finger = (jm.actuator < 0);
+    const bool is_prismatic_finger = (jm.name == "finger_left" || jm.name == "finger_right");
+    jm.passthrough = (jm.actuator < 0) ||
+      (is_prismatic_finger && command_mode_ != "mit_torque" &&
+       command_mode_ != "mit_impedance");
     if (jm.is_finger && jm.has_command && command_mode_ == "mit_torque") {
       RCLCPP_WARN(
         logger(), "%s 在 MJCF 里没有执行器：imt_torque 模式下它的 effort 命令会被忽略",
@@ -203,10 +225,10 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_activate(
       jm.min_pos, jm.max_pos);
   }
   RCLCPP_INFO(
-    logger(), "已激活（仿真）：模式 %s，%zu 关节（其中 %d 个无执行器=手指）",
+    logger(), "已激活（仿真）：模式 %s，%zu 关节（其中 %d 个走运动学直通）",
     command_mode_.c_str(), joints_.size(),
     static_cast<int>(std::count_if(
-      joints_.begin(), joints_.end(), [](const JointMap & j) { return j.is_finger; })));
+      joints_.begin(), joints_.end(), [](const JointMap & j) { return j.passthrough; })));
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -257,7 +279,12 @@ std::vector<hardware_interface::CommandInterface> MujocoSystemHardware::export_c
     if (!jm.has_command) {
       continue;   // finger_right 是 mimic，无命令接口
     }
-    if (command_mode_ == "mit_torque") {
+    if (command_mode_ == "mit_impedance") {
+      commands.emplace_back(jm.name, hardware_interface::HW_IF_POSITION, &jm.cmd_position);
+      commands.emplace_back(jm.name, "kp", &jm.cmd_kp);
+      commands.emplace_back(jm.name, "kd", &jm.cmd_kd);
+      commands.emplace_back(jm.name, hardware_interface::HW_IF_EFFORT, &jm.cmd_effort);
+    } else if (command_mode_ == "mit_torque") {
       commands.emplace_back(jm.name, hardware_interface::HW_IF_EFFORT, &jm.cmd_effort);
     } else {
       commands.emplace_back(jm.name, hardware_interface::HW_IF_POSITION, &jm.cmd_position);
@@ -278,6 +305,33 @@ void MujocoSystemHardware::mirror_finger()
   right.cmd_position = -left.cmd_position;
 }
 
+void MujocoSystemHardware::apply_impedance_inside_physics()
+{
+  // 模拟"电机内部位置环"：每个物理子步都用**当前** q/qd 重算一次力矩。
+  // 这正是电机侧变刚度的价值 —— 环不在 200 Hz 的 ROS 控制周期里，
+  // 所以不受反馈延迟影响（真机上这是能否把 kp 提到 120 量级的关键）。
+  for (auto & jm : joints_) {
+    if (jm.actuator < 0) {
+      continue;
+    }
+    if (jm.cmd_kp <= 0.0 && jm.cmd_kd <= 0.0 && std::abs(jm.cmd_effort) < 1e-9) {
+      data_->ctrl[jm.actuator] = 0.0;
+      continue;
+    }
+    double pos_des = jm.cmd_position;
+    if (jm.has_position_limit) {
+      pos_des = std::clamp(pos_des, jm.min_pos, jm.max_pos);
+    }
+    const double q = data_->qpos[jm.qpos_adr];
+    const double qd = data_->qvel[jm.dof_adr];
+    double tau = jm.cmd_kp * (pos_des - q) - jm.cmd_kd * qd + effort_sign_ * jm.cmd_effort;
+    if (jm.torque_limit > 0.0) {
+      tau = std::clamp(tau, -jm.torque_limit, jm.torque_limit);
+    }
+    data_->ctrl[jm.actuator] = tau;
+  }
+}
+
 void MujocoSystemHardware::step_sim(double dt)
 {
   const double model_dt = model_->opt.timestep;
@@ -289,6 +343,9 @@ void MujocoSystemHardware::step_sim(double dt)
     steps = 200;
   }
   for (int k = 0; k < steps; ++k) {
+    if (command_mode_ == "mit_impedance") {
+      apply_impedance_inside_physics();
+    }
     mj_step(model_, data_);
   }
   steps_total_ += steps;
@@ -326,16 +383,61 @@ hardware_interface::return_type MujocoSystemHardware::write(
   }
   const double dt = std::clamp(period.seconds(), 1e-4, 0.2);
 
-  if (command_mode_ == "mit_torque" && !sim_started_) {
+  // ---- 温度守护（决策③）----
+  {
+    // 一阶热模型：按"实际下达的力矩 / 该关节力矩上限"的比例发热
+    double load = 0.0;
+    for (const auto & jm : joints_) {
+      if (jm.actuator < 0 || jm.torque_limit <= 0.0) {
+        continue;
+      }
+      const double frac = std::abs(data_->ctrl[jm.actuator]) / jm.torque_limit;
+      load = std::max(load, frac);
+    }
+    const double cooling = (temp_now_c_ - thermal_ambient_c_) / thermal_cooling_tau_s_;
+    temp_now_c_ = std::max(
+      thermal_ambient_c_,
+      temp_now_c_ + (thermal_heat_c_per_s_ * load - cooling) * dt);
+    const auto r = temp_guard_.update(temp_now_c_, true);
+    if (r.trip) {
+      over_temp_ = true;
+      RCLCPP_ERROR(
+        logger(),
+        "🛑 过温保护（仿真热模型）：%.1f ℃ ≥ 上限 %.0f ℃ → 失能并让硬件置 error。"
+        "恢复需人工重启硬件组件",
+        temp_now_c_, temp_guard_.limit_c());
+      for (auto & jm : joints_) {
+        if (jm.actuator >= 0) {
+          data_->ctrl[jm.actuator] = 0.0;
+        }
+      }
+      return hardware_interface::return_type::ERROR;
+    }
+    if (r.warn && !temp_warned_) {
+      temp_warned_ = true;
+      RCLCPP_WARN(
+        logger(), "温度 %.1f ℃ 超过告警线 %.0f ℃（失能线 %.0f ℃）",
+        temp_now_c_, temp_guard_.warn_c(), temp_guard_.limit_c());
+    } else if (temp_warned_ && temp_now_c_ < temp_guard_.warn_c() - temp_guard_.hysteresis_c()) {
+      temp_warned_ = false;
+    }
+  }
+
+  if (over_temp_) {
+    return hardware_interface::return_type::ERROR;
+  }
+
+  if ((command_mode_ == "mit_torque" || command_mode_ == "mit_impedance") && !sim_started_) {
     bool any_torque = false;
     for (const auto & jm : joints_) {
-      if (jm.actuator >= 0 && std::abs(jm.cmd_effort) > 1e-6) {
+      if (jm.actuator >= 0 &&
+        (std::abs(jm.cmd_effort) > 1e-6 || (command_mode_ == "mit_impedance" && jm.cmd_kp > 1e-6))) {
         any_torque = true;
         break;
       }
     }
     ++cycles_since_activate_;
-    if (!any_torque && cycles_since_activate_ < 300) {
+    if (!any_torque && cycles_since_activate_ < physics_wait_cycles_) {
       return hardware_interface::return_type::OK;   // 控制器尚未接管：抱闸，不积分
     }
     sim_started_ = true;
@@ -356,8 +458,8 @@ hardware_interface::return_type MujocoSystemHardware::write(
   }
 
   for (auto & jm : joints_) {
-    if (jm.actuator < 0) {
-      // 手指没有执行器：命令即位置（运动学直通），仿真里仍能看到夹爪"开合"
+    if (jm.passthrough) {
+      // 运动学直通：命令即位置（无执行器的手指 / 位置模式下的夹爪）
       if (jm.has_command) {
         double pos = jm.cmd_position;
         if (jm.has_position_limit) {
@@ -370,6 +472,11 @@ hardware_interface::return_type MujocoSystemHardware::write(
     }
 
     double tau = 0.0;
+    if (command_mode_ == "mit_impedance") {
+      // 位置环在驱动器里：这里不写 ctrl，交给 apply_impedance_inside_physics()
+      // 在每个物理子步按当前 q/qd 算力矩（等价于 1 kHz 的电机内环）
+      continue;
+    }
     if (command_mode_ == "mit_torque") {
       tau = effort_sign_ * jm.cmd_effort;   // 与真机插件同一符号约定
     } else {
@@ -399,8 +506,8 @@ hardware_interface::return_type MujocoSystemHardware::write(
   // 2026-11-21 实测：不夹的话 finger_left 会掉到 -0.0000（限位 0 的负侧），
   // 安全节点立刻判越限并急停，整条轨迹被打断。
   for (auto & jm : joints_) {
-    if (jm.actuator >= 0) {
-      continue;
+    if (!jm.passthrough) {
+      continue;   // 有执行器的关节由物理决定位置，不夹紧
     }
     double pos = data_->qpos[jm.qpos_adr];
     if (jm.has_position_limit) {

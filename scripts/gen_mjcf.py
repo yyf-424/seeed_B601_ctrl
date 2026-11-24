@@ -137,8 +137,11 @@ class JointEl:
         self.axis = np.array([float(v) for v in ax.get("xyz").split()]) if ax is not None else np.zeros(3)
         lim = el.find("limit")
         self.limit = None
+        self.effort = None
         if lim is not None:
             self.limit = (float(lim.get("lower", "0")), float(lim.get("upper", "0")))
+            if lim.get("effort"):
+                self.effort = float(lim.get("effort"))
         mimic = el.find("mimic")
         self.mimic = mimic.get("joint") if mimic is not None else None
         self.mimic_mult = float(mimic.get("multiplier", "1")) if mimic is not None else 1.0
@@ -292,14 +295,25 @@ def main() -> int:
 
     w('  </worldbody>')
     w('')
-    w('  <!-- 执行器：给六个关节各一个力矩执行器（力矩控制 = 我们的 MIT 控制律）-->')
+    w('  <!-- 执行器：六个手臂关节 + 夹爪主动指，各一个力矩执行器（力矩控制 = MIT 控制律）-->')
+    # 夹爪为什么也要执行器：真机夹爪是电机驱动的；以前仿真里手指没有执行器，
+    # 手臂一加速惯性就会把手指甩出去，插件只能每周期"运动学夹紧"，
+    # 于是 mit_torque 模式下夹爪的 effort 命令无处可去 —— 夹爪 MIT 力控在仿真里无法验证。
     w('  <actuator>')
     for jn in ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]:
         j = by_id = next(x for x in joints if x.name == jn)
         lim = abs(j.limit[1] - j.limit[0]) if j.limit else 100
-        eff = (27.0 if jn in ("joint1", "joint2", "joint3") else 7.0)
+        # 力矩上限取 URDF 的 <limit effort>（真值 b601_project.yaml 的 max_effort）：
+        # 写死会与真机 torque_limit 脱钩 —— 2026-11-23 用户确认 MIT 模式下
+        # j1-j3(4340P)=24 N·m、j4-j7(4310)=10 N·m，之前这里写死 27/7 已过时。
+        eff = j.effort if j.effort else 10.0
         w(f'    <motor name="{jn}_motor" joint="{jn}" gear="1" '
           f'ctrlrange="{-eff:.1f} {eff:.1f}" ctrllimited="true"/>')
+    # 夹爪：prismatic，关节 effort 单位是 N，执行器 gear=1 即直接给力（上限同样取 URDF effort）
+    fj = next(x for x in joints if x.name == "finger_left")
+    feff = fj.effort if fj.effort else 10.0
+    w(f'    <motor name="finger_left_motor" joint="finger_left" gear="1" '
+      f'ctrlrange="{-feff:.1f} {feff:.1f}" ctrllimited="true"/>')
     w('  </actuator>')
     w('')
     w('  <!-- 传感器：便于和真机 /joint_states 对照 -->')
@@ -308,6 +322,7 @@ def main() -> int:
         w(f'    <jointpos name="{jn}_pos" joint="{jn}"/>')
         w(f'    <jointvel name="{jn}_vel" joint="{jn}"/>')
         w(f'    <jointactuatorfrc name="{jn}_frc" joint="{jn}"/>')
+    w('    <jointactuatorfrc name="finger_left_frc" joint="finger_left"/>')
     w('  </sensor>')
     w('</mujoco>')
     print("\n".join(out))

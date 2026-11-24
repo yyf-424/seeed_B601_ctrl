@@ -69,6 +69,7 @@ def generate_launch_description():
     dm_enable_motors = LaunchConfiguration("dm_enable_motors")
     dm_command_mode = LaunchConfiguration("dm_command_mode")
     dm_log_csv = LaunchConfiguration("dm_log_csv")
+    mujoco_model = LaunchConfiguration("mujoco_model")
     use_rviz = LaunchConfiguration("use_rviz")
     use_safety = LaunchConfiguration("use_safety")
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -94,6 +95,8 @@ def generate_launch_description():
                 dm_command_mode,
                 " dm_log_csv:=",
                 dm_log_csv,
+                " mujoco_model:=",
+                mujoco_model,
                 " initial_positions_file:=",
                 initial_positions_file,
                 " project_config_file:=",
@@ -189,6 +192,12 @@ def generate_launch_description():
                 "dm_log_csv", default_value=str(dm_cfg.get("log_csv", "")),
                 description="真机 CSV 记录路径（速度/MIT 数据）；留空 = 关闭。"
                             "例：dm_log_csv:=\"$PWD/.verify/run.csv\"",
+            ),
+            DeclareLaunchArgument(
+                "mujoco_model",
+                default_value="",
+                description="MuJoCo 模型路径（留空=用 xacro 默认的包内模型）；"
+                            "仿真回归可指向零重力夹具等变体",
             ),
             DeclareLaunchArgument(
                 "use_sim_time", default_value="false",

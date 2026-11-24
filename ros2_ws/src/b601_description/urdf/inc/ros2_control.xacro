@@ -31,10 +31,18 @@
       <!-- 命令接口由控制模式决定：
            mit_torque（重力补偿）→ effort，由 MIT 控制器给力矩；
            其它模式              → position，由 JTC 等位置控制器给轨迹 -->
+      <!-- mit_impedance：位置环交给驱动器 —— 控制器写 position + effort + kp + kd
+           （Phase 3，见 docs/changes/2026-11-22-01 §4 方案 D） -->
+      <xacro:if value="${dm_command_mode == 'mit_impedance'}">
+        <command_interface name="position"/>
+        <command_interface name="effort"/>
+        <command_interface name="kp"/>
+        <command_interface name="kd"/>
+      </xacro:if>
       <xacro:if value="${dm_command_mode == 'mit_torque'}">
         <command_interface name="effort"/>
       </xacro:if>
-      <xacro:unless value="${dm_command_mode == 'mit_torque'}">
+      <xacro:unless value="${dm_command_mode == 'mit_torque' or dm_command_mode == 'mit_impedance'}">
         <command_interface name="position"/>
       </xacro:unless>
       <state_interface name="position">
@@ -59,6 +67,8 @@
         <param name="model">${mt['model']}</param>
         <param name="direction">${mt['direction']}</param>
         <param name="scale">${mt['scale']}</param>
+        <!-- 关节 effort ↔ 电机力矩（决策⑫）：臂 1.0，夹爪 = 等效齿轮半径 r = scale -->
+        <param name="effort_scale">${mt['effort_scale']}</param>
         <param name="zero_offset">${mt['zero_offset']}</param>
         <param name="kp">${mt['kp']}</param>
         <param name="kd">${mt['kd']}</param>
@@ -89,7 +99,8 @@
 
   <xacro:macro name="b601_ros2_control"
                params="name hardware:='mock' initial_positions_file project_config_file
-                       dm_device:='' dm_enable_motors:='' dm_command_mode:='' dm_log_csv:=''">
+                       dm_device:='' dm_enable_motors:='' dm_command_mode:='' dm_log_csv:=''
+                       mujoco_model:=''">
     <xacro:property name="CFG" value="${xacro.load_yaml(project_config_file)}"/>
     <xacro:property name="J" value="${CFG['joints']}"/>
     <xacro:property name="HW" value="${CFG['hardware']['dm']}"/>
@@ -151,13 +162,23 @@
                开启后每采样周期写一行，含电机原始 pos/vel/torq 与过滤后的关节状态、命令值。 -->
           <param name="log_csv">${eff_log_csv}</param>
           <param name="log_rate_hz">${HW['log_rate_hz']}</param>
+          <!-- 温度守护（决策③）：阈值来自真值 hardware.dm.temperature -->
+          <param name="temp_warn_c">${HW['temperature']['warn_c']}</param>
+          <param name="temp_limit_c">${HW['temperature']['limit_c']}</param>
+          <param name="temp_hysteresis_c">${HW['temperature']['hysteresis_c']}</param>
         </xacro:if>
 
         <xacro:if value="${hardware == 'mujoco'}">
           <!-- MuJoCo 动力学仿真后端：物理由 MuJoCo 算，控制器/安全节点/MoveIt 全在环。
                model_path 用 $(find) 取安装后的绝对路径（插件里直接 mj_loadXML）。 -->
           <plugin>b601_hardware/MujocoSystemHardware</plugin>
-          <param name="model_path">$(find b601_mujoco)/models/b601_arm.xml</param>
+          <!-- 留空就用包内默认模型；非空则是显式覆盖（零重力夹具等） -->
+          <xacro:if value="${mujoco_model == ''}">
+            <param name="model_path">$(find b601_mujoco)/models/b601_arm.xml</param>
+          </xacro:if>
+          <xacro:unless value="${mujoco_model == ''}">
+            <param name="model_path">${mujoco_model}</param>
+          </xacro:unless>
           <param name="command_mode">${eff_mode}</param>
           <!-- 仿真里不需要额外收紧限速（1.0 = 只用 vel_limit × dt） -->
           <param name="velocity_scale">1.0</param>
@@ -167,6 +188,13 @@
                （2026-11-21 实测：照抄 -1 会让 PD 变成正反馈，1 秒内甩到 7.5 rad/s 触发急停） -->
           <param name="effort_sign">1.0</param>
           <param name="verbose">0</param>
+          <!-- 温度守护 + 一阶热模型（与真机同一套判定逻辑，便于仿真验证） -->
+          <param name="temp_warn_c">${HW['temperature']['warn_c']}</param>
+          <param name="temp_limit_c">${HW['temperature']['limit_c']}</param>
+          <param name="temp_hysteresis_c">${HW['temperature']['hysteresis_c']}</param>
+          <param name="thermal_ambient_c">${HW['thermal']['ambient_c']}</param>
+          <param name="thermal_heat_c_per_s">${HW['thermal']['heat_c_per_s']}</param>
+          <param name="thermal_cooling_tau_s">${HW['thermal']['cooling_tau_s']}</param>
         </xacro:if>
       </hardware>
 
@@ -199,10 +227,16 @@
       <xacro:property name="FL" value="${J['finger_left']}"/>
       <xacro:property name="FLM" value="${FL['motor']}"/>
       <joint name="finger_left">
+          <xacro:if value="${eff_mode == 'mit_impedance'}">
+          <command_interface name="position"/>
+          <command_interface name="effort"/>
+          <command_interface name="kp"/>
+          <command_interface name="kd"/>
+        </xacro:if>
         <xacro:if value="${eff_mode == 'mit_torque'}">
           <command_interface name="effort"/>
         </xacro:if>
-        <xacro:unless value="${eff_mode == 'mit_torque'}">
+        <xacro:unless value="${eff_mode == 'mit_torque' or eff_mode == 'mit_impedance'}">
           <command_interface name="position"/>
         </xacro:unless>
         <state_interface name="position">
@@ -220,6 +254,7 @@
           <param name="model">${FLM['model']}</param>
           <param name="direction">${FLM['direction']}</param>
           <param name="scale">${FLM['scale']}</param>
+          <param name="effort_scale">${FLM['effort_scale']}</param>
           <param name="zero_offset">${FLM['zero_offset']}</param>
           <param name="kp">${FLM['kp']}</param>
           <param name="kd">${FLM['kd']}</param>

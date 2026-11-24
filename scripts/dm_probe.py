@@ -113,6 +113,29 @@ def main() -> int:
             print(f"{name:<9}{mid:>6}{fid:>8}{pos:>12.4f}{float(state.vel):>10.3f}"
                   f"{float(state.torq):>9.3f}{float(state.t_mos):>9.1f}  {flag}")
 
+        # ---- 电机固件里的控制参数（寄存器 21/22/23；只读，不写） ----
+        # 为什么必须知道 TMAX：MIT 模式下力矩命令由电机按 TMAX 归一化并**在固件里**限幅。
+        # 软件侧的 torque_limit 若大于 TMAX，多出来的部分电机直接削掉 —— 看起来"没生效"。
+        print(f"\n{'关节':<9}{'PMAX(rad)':>11}{'VMAX(rad/s)':>13}{'TMAX(N·m)':>11}{'CTRL_MODE':>11}")
+        for name, _mid, _fid, _model, _lim in JOINTS:
+            motor = motors[name]
+            def _rd(fn, reg):
+                for _ in range(2):
+                    try:
+                        return fn(reg, 300)
+                    except Exception:  # noqa: BLE001 - 个别电机不支持就打印 ?
+                        time.sleep(0.1)
+                return None
+            pmax = _rd(motor.get_register_f32, 21)
+            vmax = _rd(motor.get_register_f32, 22)
+            tmax = _rd(motor.get_register_f32, 23)
+            mode = _rd(motor.get_register_u32, 10)
+            f = lambda v, nd: ("?" if v is None else f"{v:.{nd}f}")  # noqa: E731
+            print(f"{name:<9}{f(pmax,3):>11}{f(vmax,3):>13}{f(tmax,3):>11}"
+                  f"{('?' if mode is None else int(mode)):>11}")
+        print("  说明：TMAX 是电机固件里力矩映射/限幅的上限；MIT 模式下软件 torque_limit")
+        print("        必须 ≤ TMAX，否则超出部分会被电机静默削掉（软件限幅形同虚设）。")
+
         if not ok:
             print("\n⚠ 有电机没反馈或角度超出 URDF 限位。")
             print("  若只是角度超限：可能是零位没标定，或关节方向定义与真机相反 ——")

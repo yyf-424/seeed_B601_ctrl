@@ -1,0 +1,10 @@
+<library path="b601_mit_controller">
+  <class name="b601_mit_controller/B601MitController"
+         type="b601_mit_controller::B601MitController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      B601 的 MIT 力控：τ = Kp·(q_des−q) + Kd·(−q̇) + 重力前馈 + 摩擦前馈。
+      静止时用很小的 Kp（手臂可被推动），收到新目标时自动切大 Kp 快速到位。
+    </description>
+  </class>
+</library>

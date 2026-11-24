@@ -38,6 +38,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/state.hpp>
 
+#include "b601_hardware/temperature_guard.hpp"
+
 namespace b601_hardware
 {
 
@@ -77,7 +79,15 @@ private:
     std::string model;
     double direction{1.0};      // +1 / -1：关节正方向与电机正方向的关系
     double scale{1.0};          // 电机 rad → 关节单位 的比例（臂关节=1；夹爪 m/rad）
+    // 关节 effort ↔ 电机力矩的换算（决策⑫）：
+    //   臂（revolute）：关节单位 N·m ↔ 电机力矩 1:1   → effort_scale = 1.0
+    //   夹爪（prismatic）：关节单位是 N，电机是 N·m，靠齿条-齿轮 r 换算 τ = F·r
+    //   r 由位置换算比例直接给出：scale = 0.01 m/rad ⇒ 运动 1 rad 走 0.01 m ⇒ r = 0.01 m
+    //   ⚠ 数值上现在等于 scale，但含义不同（位置换算 vs 力矩换算），必须分开给。
+    double effort_scale{1.0};
     double zero_offset{0.0};    // 关节 0 位相对电机编码器 0 位的偏置
+    double t_mos{0.0};          // 反馈帧自带的 MOS 温度（℃，未换算）
+    double t_rotor{0.0};        // 反馈帧自带的转子温度（℃）
     double kp{0.0};             // MIT 模式位置刚度
     double kd{0.0};             // MIT 模式阻尼
     double vel_limit{5.0};      // rad/s，用于限速与 POS_VEL 模式的 vlim
@@ -99,7 +109,10 @@ private:
     // 运行时
     void * handle{nullptr};
     double cmd{0.0};            // 控制器写进来的期望位置
-    double cmd_effort{0.0};     // 控制器写进来的期望力矩（mit_torque 模式）
+    double cmd_effort{0.0};
+    // mit_impedance（Phase 3）：位置环交给驱动器，控制器下发 (pos, kp, kd, τ_ff)
+    double cmd_kp{0.0};
+    double cmd_kd{0.0};     // 控制器写进来的期望力矩（mit_torque 模式）
     double command_sent{0.0};   // 上一周期真正下发到电机的值（限速基准）
     double state_pos{0.0};
     double state_vel{0.0};
@@ -183,6 +196,12 @@ private:
   std::uint64_t log_rows_{0};
   double log_t0_{-1.0};
   std::ofstream log_file_{};
+
+  // 温度守护（决策③）：不做力矩位置保护，堵转就靠温度兜底。
+  // 温度来自反馈帧自带的 t_mos / t_rotor —— 插件以前完全没读它们。
+  TemperatureGuard temp_guard_;
+  bool over_temp_{false};          // 已触发过温失能（锁存，需人工重启硬件组件）
+  bool temp_warned_{false};
   std::string log_buffer_{};
 
   // ---- 运行时 ----
