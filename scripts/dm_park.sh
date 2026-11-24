@@ -8,6 +8,7 @@
 # 用法（前提：bringup 正在跑，硬件已使能）：
 #   ./scripts/dm_park.sh                 # 回中 → 核对 → 失能
 #   ./scripts/dm_park.sh --keep-enabled  # 只回中核对，不失能（想接着做实验时用）
+#   ./scripts/dm_park.sh --mit           # 电机侧 MIT 分段回中 → 核对 → 失能
 #   ./scripts/dm_park.sh --duration 25   # 回中用时（默认 20 s）
 set -uo pipefail
 
@@ -20,34 +21,26 @@ while IFS=$'\t' read -r key value; do
   cfg["$key"]="$value"
 done <<< "$settings"
 
-# 归中目标来自统一真值的 recenter 段（2026-11-21 实测校准，不要写死）
-TRUTH="$REPO_ROOT/ros2_ws/src/b601_description/config/b601_project.yaml"
-TARGET="$(python3 - "$TRUTH" <<'PYRT' 2>/dev/null || true
-import sys, yaml
-cfg = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
-r = cfg.get("recenter", {}).get("joints", {})
-names = cfg["robot"]["arm_joints"]
-if not all(n in r for n in names):
-    raise SystemExit(1)
-print(",".join("%s=%+.4f" % (n, float(r[n])) for n in names))
-PYRT
-)"
-if [[ -z "$TARGET" ]]; then
-  echo "缺少 recenter.joints，无法校验归中目标。" >&2
-  exit 2
-fi
 DURATION="${cfg[duration_sec]}"
 KEEP_ENABLED=0
-ERR_LIMIT="$(python3 "$REPO_ROOT/scripts/project_config.py" recenter.position_tolerance_rad)"
+MIT=0
+DURATION_OVERRIDE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --duration) DURATION="$2"; shift 2 ;;
+    --duration)
+      [[ $# -ge 2 ]] || { echo "缺少 --duration 的秒数"; exit 2; }
+      DURATION="$2"; DURATION_OVERRIDE=1; shift 2 ;;
+    --mit) MIT=1; shift ;;
     --keep-enabled) KEEP_ENABLED=1; shift ;;
     -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "未知参数：$1"; exit 2 ;;
   esac
 done
+if [[ $MIT -eq 1 && $DURATION_OVERRIDE -eq 1 ]]; then
+  echo "MIT 回中各段由统一 target_slew 和实测到位反馈推进，--duration 用于位置回路。"
+  exit 2
+fi
 
 ok()   { printf '\033[1;32m  [OK]\033[0m   %s\n' "$1"; }
 bad()  { printf '\033[1;31m  [FAIL]\033[0m %s\n' "$1"; }
@@ -79,30 +72,57 @@ if [[ $KEEP_ENABLED -eq 0 ]]; then
 fi
 info "1/4 回中"
 
-# --- 1. 回中 ---
-OUT="$(timeout $((DURATION + cfg[result_grace_sec])) python3 scripts/dm_first_move.py \
-        --set "$TARGET" --duration "$DURATION" 2>&1)"
-RC=$?
-echo "$OUT" | grep -E "起点|目标|执行成功|跟踪误差|实际位移|❌" | sed 's/^/        /'
-if [[ $RC -ne 0 ]]; then
-  bad "回中失败（dm_first_move 退出码 $RC）—— **不要失能**，先排查"
-  echo "        排查：/joint_states 是否有数据、安全状态是否 EMERGENCY_STOP、目标是否越限"
-  exit 3
-fi
-
-# --- 2. 核对 ---
-ERR="$(echo "$OUT" | sed -n 's/.*跟踪误差: 最大 \([0-9.]*\) rad.*/\1/p' | tail -1)"
-if [[ -z "$ERR" ]]; then
-  bad "没读到跟踪误差 —— 按未核对处理，**不要失能**"
-  exit 3
-fi
-info "2/4 核对到位（最大误差 ${ERR} rad，判据 ≤${ERR_LIMIT}）"
-if awk -v e="$ERR" -v l="$ERR_LIMIT" 'BEGIN{exit !(e<=l)}'; then
-  ok "已归中：误差 ${ERR} rad ≤ ${ERR_LIMIT}"
+# --- 1. 回中并核对 ---
+if [[ $MIT -eq 1 ]]; then
+  if ! ros2 run b601_demos mit_recenter_call; then
+    bad "MIT 分段回中失败，请核对安全状态与电机状态"
+    exit 3
+  fi
+  ok "2/4 已通过校准停放位的六轴容差检查"
 else
-  bad "误差 ${ERR} rad > ${ERR_LIMIT} —— 不算归中"
-  echo "请核对干涉、限位和安全状态。"
-  exit 3
+# 归中目标来自统一真值的 recenter 段（2026-11-21 实测校准，不要写死）
+TRUTH="$REPO_ROOT/ros2_ws/src/b601_description/config/b601_project.yaml"
+TARGET="$(python3 - "$TRUTH" <<'PYRT' 2>/dev/null || true
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+r = cfg.get("recenter", {}).get("joints", {})
+names = cfg["robot"]["arm_joints"]
+if not all(n in r for n in names):
+    raise SystemExit(1)
+print(",".join("%s=%+.4f" % (n, float(r[n])) for n in names))
+PYRT
+)"
+if [[ -z "$TARGET" ]]; then
+  echo "缺少 recenter.joints，无法校验归中目标。" >&2
+  exit 2
+fi
+  ERR_LIMIT="$(python3 "$REPO_ROOT/scripts/project_config.py" recenter.position_tolerance_rad)"
+
+  # --- 1. 回中 ---
+  OUT="$(timeout $((DURATION + cfg[result_grace_sec])) python3 scripts/dm_first_move.py \
+          --set "$TARGET" --duration "$DURATION" 2>&1)"
+  RC=$?
+  echo "$OUT" | grep -E "起点|目标|执行成功|跟踪误差|实际位移|❌" | sed 's/^/        /'
+  if [[ $RC -ne 0 ]]; then
+    bad "回中失败（dm_first_move 退出码 $RC）—— **不要失能**，先排查"
+    echo "        排查：/joint_states 是否有数据、安全状态是否 EMERGENCY_STOP、目标是否越限"
+    exit 3
+  fi
+
+  # --- 2. 核对 ---
+  ERR="$(echo "$OUT" | sed -n 's/.*跟踪误差: 最大 \([0-9.]*\) rad.*/\1/p' | tail -1)"
+  if [[ -z "$ERR" ]]; then
+    bad "没读到跟踪误差 —— 按未核对处理，**不要失能**"
+    exit 3
+  fi
+  info "2/4 核对到位（最大误差 ${ERR} rad，判据 ≤${ERR_LIMIT}）"
+  if awk -v e="$ERR" -v l="$ERR_LIMIT" 'BEGIN{exit !(e<=l)}'; then
+    ok "已归中：误差 ${ERR} rad ≤ ${ERR_LIMIT}"
+  else
+    bad "误差 ${ERR} rad > ${ERR_LIMIT} —— 不算归中"
+    echo "请核对干涉、限位和安全状态。"
+    exit 3
+  fi
 fi
 
 if [[ $KEEP_ENABLED -eq 1 ]]; then

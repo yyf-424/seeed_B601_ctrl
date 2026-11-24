@@ -13,6 +13,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>b601_description</exec_depend>
+  <exec_depend>b601_demos</exec_depend>
   <exec_depend>b601_safety</exec_depend>
   <exec_depend>xacro</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>

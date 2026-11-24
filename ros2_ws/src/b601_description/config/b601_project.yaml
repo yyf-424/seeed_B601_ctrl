@@ -351,7 +351,7 @@ controllers:
               joint2: {friction: 0.0}
               joint3: {friction: 0.0}
               # 2026-11-25 真机 −0.30 rad 两轮复测通过。Kd 输入 3.501 对齐 Orin 阻尼编码 2867。
-              joint4: {friction: 0.0, kp_move: 30.0, kd_move: 3.501}
+              joint4: &j4_gravity_mit_profile {friction: 0.0, kp_move: 30.0, kd_move: 3.501}
               joint5: {friction: 0.0}
               joint6: {friction: 0.0}
       j2_j4_gravity:
@@ -387,6 +387,19 @@ controllers:
           standard_mit:
             group: *fixed_gravity_mit
             per_joint: *j2_j3_j4_gravity_mit_joints
+      j2_j3_j4_j5_gravity_wrist_kd_trial:
+        compensation: identified_dm
+        compensation_joints: [joint2, joint3, joint4, joint5]
+        gain_reference: rebot_orin_0002_motor_mit
+        gain_joints: [joint2, joint3, joint5]
+        profiles:
+          standard_mit:
+            group: *fixed_gravity_mit
+            per_joint:
+              <<: *j2_j3_j4_gravity_mit_joints
+              joint4: {<<: *j4_gravity_mit_profile, kd_move: 2.8}
+              joint5: {friction: 0.0, kd_move: 1.6}
+              joint6: {friction: 0.0, kd_move: 0.65}
 
     compensations:
       identified_dm:
@@ -616,6 +629,15 @@ moveit:
 #   位置回路和关节端 MIT 归中共用此目标和逐轴容差。
 recenter:
   position_tolerance_rad: 0.01  # 按六轴逐个判定归中
+  mit:
+    joint4_clearance_rad: -0.10
+    joint4_minimum_lift_rad: 0.10
+    joint4_lift_tracking_tolerance_rad: 0.01
+    position_tolerance_rad_by_joint: {joint3: 0.03, joint4: 0.02}
+    phase_timeout_sec: 20
+    settle_window_sec: 0.4
+    correction_wait_sec: 3.0
+    check_collisions: false
   calibrated_at: "2026-11-25"
   note: "只读会话 /joint_states 实测中位数，共 801 帧"
   joints:
@@ -1747,14 +1769,13 @@ validation:
       gripper_max_error_m: 0.003
       initial_gripper_tolerance_m: 0.003
       minimum_motion_samples: 10
+      recenter_check_collisions: true
       collision_samples_per_transit: 51
       small_step_joint: joint1
       small_step_rad: 0.035
       small_min_actual_rad: 0.018
       small_max_error_rad: 0.08
       park_settle_sec: 3.0
-
-      park_fine_settle_sec: 2.5
       state_average_sec: 0.35
       observation_pause_sec: 0.5
       readonly_duration_sec: 4.0

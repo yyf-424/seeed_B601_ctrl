@@ -27,6 +27,9 @@ source ros2_ws/install/setup.bash
 控制和安全门槛、URDF 形状与惯量、MoveIt 规划、仿真场景、演示节点和测试工具。ROS 运行时参数和
 脚本命令行选项可覆盖对应默认值。
 
+固定增益、逐轴重力前馈及辨识模型来自 `controllers.mit`。停放位、J4 预置、分段等待、
+碰撞检查默认值及归中容差来自 `recenter`。控制器 YAML 和安全配置由该文件生成。
+
 整机运动约束由 `joints.min_pos/max_pos`、`joints.max_velocity`、`joints.max_effort` 和
 `target_slew` 提供。手臂速度上限为 6.0 rad/s，夹爪为 0.05 m/s。位置目标的斜率分别为
 0.5 rad/s 和 0.5 m/s。MIT 的总输出包括 PD 和前馈。关节端 MIT 在下发前用最新反馈估算
@@ -50,12 +53,29 @@ rm "$model"
 ```
 
 位置回路使用 `./scripts/dm_park.sh` 核对归中并失能，`--keep-enabled` 用于只归中核对。
-关节端 MIT 归中核对使用 `recenter.joints` 的校准停放位。六轴实测位置须同时落在整机关节限位内，与各自停放目标相差不超过 0.01 rad。
+位置回路和关节端 MIT 都使用 `recenter.joints` 的校准停放位。MIT 归中使用逐轴容差与整机关节限位的交集。J3 容差为 ±0.03 rad，J4 为 ±0.02 rad，其余四轴为 ±0.01 rad。
+
+### 电机侧 MIT 归中
+
+使能的 `mit_impedance` 启动会一并启动 `b601_mit_recenter`。收到调用后，节点先根据反馈判断 J4。
+J4 实测高于 −0.10 rad 时，先向负方向移动至少 0.10 rad，并到达 −0.10 rad 或更负；已经达到预置角时保持原角度。
+随后 J1、J2、J3、J5、J6 归中，最后 J4 回落。六轴实测到位后返回成功。归中前，先让上一位目标发布者结束发令。
+
+```bash
+# 只归中并保持电机使能
+./scripts/dm_park.sh --mit --keep-enabled
+
+# 归中成功后失能
+./scripts/dm_park.sh --mit
+
+# 从其他 ROS 2 节点或命令行单独触发归中
+ros2 service call /b601_mit_recenter/recenter std_srvs/srv/Trigger '{}'
+```
 
 ## 电机侧 MIT 重力补偿
 
-档位从统一配置的 `controllers.mit` 生成。下列实机档关闭变刚度和摩擦前馈，
-手臂的 PD 在电机侧闭环。未启用重力补偿的关节及夹爪沿用基线 PD。
+档位从统一配置的 `controllers.mit` 生成。下列实机档使用固定电机侧 PD 和逐轴重力前馈，
+摩擦前馈关闭。夹爪沿用默认电机侧 MIT 配置。
 
 | `mit_preset` | 重力补偿关节 |
 |---|---|
@@ -63,6 +83,7 @@ rm "$model"
 | `j2_j4_gravity` | J2、J4 |
 | `j2_j3_j4_gravity` | J2、J3、J4 |
 | `j2_j3_j4_j5_gravity` | J2、J3、J4、J5 |
+| `j2_j3_j4_j5_gravity_wrist_kd_trial` | J2、J3、J4、J5，腕部低 Kd 实测档 |
 
 合并档中 J2/J3 为 120.025/5.0，J4 为 30.0/3.501，J5 为 18.0/2.0。
 J2/J3/J5 的增益编码与 Orin 0002 一致。J4 用实机结果选定比例增益，阻尼编码与 Orin 一致。
@@ -71,11 +92,15 @@ J2/J3/J5 的增益编码与 Orin 0002 一致。J4 用实机结果选定比例增
 J4 的负向 0.30 和 0.50 rad 通过，0.10 rad 末段误差为 10.01%。
 J4 上抬至约 −45.3° 时，J5 的负向和正向 0.30 rad 末段误差分别为 2.22% 和 0.18%。
 
-以下命令用合并档回读实机状态。使能和运动需现场确认。
+低 Kd 档将 J4、J5、J6 的 Kd 分别设为 2.8、1.6、0.65。在接近 P1 的姿态单测 J4 时，
+峰值速度从 2.15 降到 0.74 rad/s，持续的约 54 Hz 震荡未复现。随后一次 P1 六轴动作和分段回程
+完成，J4 误差 0.01335 rad，在更新后的归中容差内。J7 指令 0.014 m 时实测仍约 0.00323 m。
+
+以下命令用低 Kd 档回读实机状态。使能和运动需现场确认。
 
 ```bash
 ros2 launch b601_bringup bringup.launch.py hardware:=dm \
-  dm_command_mode:=mit_impedance mit_preset:=j2_j3_j4_j5_gravity \
+  dm_command_mode:=mit_impedance mit_preset:=j2_j3_j4_j5_gravity_wrist_kd_trial \
   dm_enable_motors:=false use_rviz:=false
 ```
 

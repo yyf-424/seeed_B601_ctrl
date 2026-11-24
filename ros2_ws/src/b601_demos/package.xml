@@ -12,6 +12,7 @@
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
   <exec_depend>trajectory_msgs</exec_depend>
   <exec_depend>control_msgs</exec_depend>
   <exec_depend>moveit_msgs</exec_depend>

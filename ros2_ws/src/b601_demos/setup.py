@@ -26,6 +26,8 @@ setup(
             "demo_trajectory = b601_demos.demo_trajectory:main",
             "gripper = b601_demos.gripper_control:main",
             "moveit_pose_goal = b601_demos.moveit_pose_goal:main",
+            "mit_recenter = b601_demos.mit_recenter:main",
+            "mit_recenter_call = b601_demos.mit_recenter_client:main",
         ],
     },
 )

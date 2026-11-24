@@ -10,6 +10,8 @@
     - 限位来自 config/b601_project.yaml（唯一真值）；拼轨迹前先验证，越界直接拒绝
 """
 
+import math
+
 from builtin_interfaces.msg import Duration
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -28,14 +30,31 @@ JOINT_UPPER = {name: float(j["max_pos"]) for name, j in _JOINTS.items()}
 JOINT_VEL_MAX = {name: float(j["max_velocity"]) for name, j in _JOINTS.items()}
 
 
-def at_recenter(positions):
+def mit_recenter_tolerances(project):
+    park = project["recenter"]
+    arm = project["robot"]["arm_joints"]
+    overrides = park.get("mit", {}).get("position_tolerance_rad_by_joint", {})
+    if set(overrides) - set(arm):
+        raise ValueError("MIT 归中容差包含未知手臂关节")
+    tolerances = tuple(float(overrides.get(name, park["position_tolerance_rad"])) for name in arm)
+    if not all(math.isfinite(value) and value >= 0.0 for value in tolerances):
+        raise ValueError("MIT 归中容差必须是有限非负值")
+    return tolerances
+
+
+def recenter_position_bounds(home, tolerances, bounds):
+    return tuple((max(low, target - tolerance), min(high, target + tolerance))
+                 for target, tolerance, (low, high) in zip(home, tolerances, bounds))
+
+
+def at_recenter(positions, *, mit=False):
     """检查六轴反馈是否同时满足停放位容差和关节限位。"""
-    return len(positions) == len(ARM_JOINTS) and all(
-        max(JOINT_LOWER[name], target - RECENTER_TOLERANCE)
-        <= actual
-        <= min(JOINT_UPPER[name], target + RECENTER_TOLERANCE)
-        for name, actual, target in zip(ARM_JOINTS, positions, RECENTER_POSITIONS)
+    tolerances = mit_recenter_tolerances(_PROJECT) if mit else (RECENTER_TOLERANCE,) * len(ARM_JOINTS)
+    bounds = recenter_position_bounds(
+        RECENTER_POSITIONS, tolerances, ((JOINT_LOWER[name], JOINT_UPPER[name]) for name in ARM_JOINTS)
     )
+    return len(positions) == len(bounds) and all(
+        low <= actual <= high for actual, (low, high) in zip(positions, bounds))
 
 
 def check_limits(joint_names, positions):

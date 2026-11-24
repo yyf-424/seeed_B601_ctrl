@@ -16,13 +16,15 @@ from controller_manager_msgs.srv import ListHardwareComponents, SetHardwareCompo
 from lifecycle_msgs.msg import State
 from moveit_msgs.srv import GetStateValidity
 import rclpy
+from sensor_msgs.msg import JointState
 
 from mit_five_poses import (
     CONFIG, CRITERIA, NAMES, OBSERVED, PLAN, FivePoseHarness,
     check_plan, checked_sample, score_hardware_pose, validate_configuration,
 )
 
-from b601_demos.trajectory_utils import RECENTER_POSITIONS, RECENTER_TOLERANCE, at_recenter
+from b601_demos.mit_recenter_client import request_recenter
+from b601_demos.trajectory_utils import RECENTER_POSITIONS, at_recenter
 
 from project_config import ROOT
 
@@ -55,9 +57,11 @@ def bringup(enable):
     if subprocess.run(["fuser", device], capture_output=True).returncode != 1:
         raise RuntimeError(f"未确认串口空闲：{device}")
     mode = "hardware" if enable else "readonly"
+    check_collisions = str(HARDWARE["recenter_check_collisions"]).lower()
     return launch(f"{mode}_bringup.log", "b601_bringup", "bringup.launch.py",
                   "hardware:=dm", f"dm_enable_motors:={str(enable).lower()}",
                   "dm_command_mode:=mit_impedance", "use_rviz:=false", "use_safety:=true",
+                  f"mit_recenter_check_collisions:={check_collisions}",
                   f"controllers_file:={bringup_config('b601_mit_controllers.yaml')}",
                   f'dm_log_csv:={OUT / (mode + "_dm.csv")}')
 
@@ -125,7 +129,6 @@ class Motion:
     def __init__(self, node, writer):
         self.node = node
         self.writer = writer
-        self.reference = None
         self.recovering = False
 
     def monitor(self, duration):
@@ -154,8 +157,8 @@ class Motion:
                     check_cancelled()
                 u = step / steps
                 blend = u**3 * (10 + u * (-15 + 6 * u))
-                self.reference = goal if step == steps else [a + blend * d for a, d in zip(start, delta)]
-                node.command(self.reference)
+                reference = goal if step == steps else [a + blend * d for a, d in zip(start, delta)]
+                node.command(reference)
                 tick = max(tick + PERIOD, time.monotonic() + PERIOD / 2)
                 self.monitor(tick - time.monotonic())
             self.monitor(settle)
@@ -293,7 +296,7 @@ def run(node):
     validate_configuration(bringup_config('b601_mit_controllers.yaml'))
     probe = json.loads((OUT / "probe.json").read_text())
     initial = json.loads((OUT / "readonly_pose.json").read_text())
-    if not at_recenter(initial[:GRIPPER_INDEX]):
+    if not at_recenter(initial[:GRIPPER_INDEX], mit=True):
         raise RuntimeError(f"初始手臂超出归中启动范围：{initial[:GRIPPER_INDEX]}")
     if abs(initial[GRIPPER_INDEX] - PARK[GRIPPER_INDEX]) > HARDWARE["initial_gripper_tolerance_m"]:
         raise RuntimeError(f"初始夹爪未接近闭合：{initial[6]:.5f} m")
@@ -305,8 +308,6 @@ def run(node):
     nudge[small_index] += HARDWARE["small_step_rad"]
     paths = [("j1 small motion", initial, nudge), ("return small", nudge, PARK),
              ("approach", PARK, PLAN["start"])]
-    paths.extend((f"park from {pose['name']}", pose["target"], PARK) for pose in PLAN["poses"])
-    paths.append(("park from start", PLAN["start"], PARK))
     mesh = launch("active_move_group.log", str(COLLISION_LAUNCH))
     process = None
     safe_to_stop = False
@@ -323,7 +324,7 @@ def run(node):
         process = bringup(True)
         ready(node, process, "hardware")
         q, _ = state(node)
-        if not at_recenter(q[:GRIPPER_INDEX]):
+        if not at_recenter(q[:GRIPPER_INDEX], mit=True):
             raise RuntimeError(f"使能后起点漂移超限：{q}")
         print(f'6+1 电机侧 MIT 已使能，执行 {HARDWARE["small_step_joint"]} '
               f'{HARDWARE["small_step_rad"]} rad 预检查。', flush=True)
@@ -354,40 +355,36 @@ def run(node):
                 if node.status_level < 2:
                     motion.recovering = True
                     motion.monitor(HARDWARE["observation_pause_sec"])
-                    current, _ = state(node)
-                    reference = motion.reference or in_range(current)
-                    precheck(node, client, "park actual", in_range(current), PARK)
-                    precheck(node, client, "park reference", reference, PARK)
-                    park = motion.move("park", reference, PARK,
-                                       settle=HARDWARE["park_settle_sec"])
+                    index = len(node.samples)
+                    try:
+                        request_recenter(node, CONFIG)
+                        current, _ = state(node)
+                        grip_target = [*current[:GRIPPER_INDEX], PARK[GRIPPER_INDEX]]
+                        precheck(node, client, "park gripper", current, grip_target)
+                        node.gripper.publish(JointState(name=[GRIPPER], position=grip_target[-1:]))
+                        motion.monitor(HARDWARE["park_settle_sec"])
+                        after, final_rows = state(node, PLAN["settle_window_sec"])
+                    finally:
+                        for stamp, q, dq in node.samples[index:]:
+                            writer.writerow(["park", stamp, *q, *dq])
+                    park = {
+                        "after": after,
+                        "arm_max_error_rad": max(abs(actual - goal)
+                                                 for actual, goal in zip(after, PARK[:GRIPPER_INDEX])),
+                        "arm_end_speed_rad_s": max(
+                            sum(abs(row[2][i]) for row in final_rows) / len(final_rows)
+                            for i in range(GRIPPER_INDEX)),
+                    }
                     print("归中", json.dumps(park), flush=True)
                     summary["park"] = park
-                    parked = at_recenter(park["after"][:GRIPPER_INDEX])
-                    if not parked:
-                        correction = in_range([
-                            2 * goal - feedback
-                            for goal, feedback in zip(PARK, park["after"])
-                        ])
-                        precheck(node, client, "park fine adjustment", PARK, correction)
-                        fine = motion.move("park_fine", PARK, correction,
-                                           settle=HARDWARE["park_fine_settle_sec"])
-                        fine["arm_max_park_error_rad"] = max(
-                            abs(a - b) for a, b in zip(PARK[:6], fine["after"][:6]))
-                        summary["park_fine"] = fine
-                        print("归中微调", json.dumps(fine), flush=True)
-                        parked = at_recenter(fine["after"][:GRIPPER_INDEX])
-                        park_speed = fine["arm_end_speed_rad_s"]
-                    else:
-                        park_speed = park["arm_end_speed_rad_s"]
-                    if parked and park_speed <= CRITERIA["arm_end_speed_rad_s"]:
+                    if (at_recenter(after[:GRIPPER_INDEX], mit=True)
+                            and park["arm_end_speed_rad_s"] <= CRITERIA["arm_end_speed_rad_s"]):
                         disable_parked(node)
                         summary["disabled"] = True
                         safe_to_stop = True
                         print("已确认归中，硬件 INACTIVE。", flush=True)
                     else:
-                        raise RuntimeError(
-                            f"归中未通过位置容差 {RECENTER_TOLERANCE:g} rad 或停稳检查，保留当前控制器持位"
-                        )
+                        raise RuntimeError("归中后位置或停稳复核未通过，保持电机使能")
     except RuntimeError as exc:
         if process is not None and node.status_level >= 2:
             summary["estop_fault"] = str(exc)

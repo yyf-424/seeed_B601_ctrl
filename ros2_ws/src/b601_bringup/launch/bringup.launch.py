@@ -75,6 +75,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     controllers_file = LaunchConfiguration("controllers_file")
     mit_preset = LaunchConfiguration("mit_preset")
+    mit_recenter_check_collisions = LaunchConfiguration("mit_recenter_check_collisions")
     safety_params_file = PathJoinSubstitution([safety_share, "config", "safety_params.yaml"])
     initial_positions_file = LaunchConfiguration("initial_positions_file")
     project_config_file = LaunchConfiguration("project_config_file")
@@ -171,6 +172,22 @@ def generate_launch_description():
             )
         ]
 
+    def launch_mit_recenter(context):
+        if dm_command_mode.perform(context) != "mit_impedance":
+            return []
+        if hardware.perform(context) == "dm" and not IfCondition(dm_enable_motors).evaluate(context):
+            return []
+        parameters = {"project_config_file": project_config_file}
+        collision_override = mit_recenter_check_collisions.perform(context)
+        if collision_override:
+            parameters["check_collisions"] = ParameterValue(collision_override, value_type=bool)
+        return [Node(
+            package="b601_demos",
+            executable="mit_recenter",
+            output="screen",
+            parameters=[parameters],
+        )]
+
     rviz = Node(
         package="rviz2",
         executable="rviz2",
@@ -231,6 +248,10 @@ def generate_launch_description():
                 description="电机侧 MIT 档位，参数来自 b601_project.yaml",
             ),
             DeclareLaunchArgument(
+                "mit_recenter_check_collisions", default_value="",
+                description="覆盖统一配置中的 MIT 归中 MoveIt 状态有效性检查开关",
+            ),
+            DeclareLaunchArgument(
                 "controllers", default_value="",
                 description="控制器名称（空格分隔），留空按 dm_command_mode 自动选择",
             ),
@@ -253,5 +274,6 @@ def generate_launch_description():
             rviz,
 
             OpaqueFunction(function=launch_spawners),
+            OpaqueFunction(function=launch_mit_recenter),
         ]
     )
