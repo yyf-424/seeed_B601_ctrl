@@ -74,7 +74,7 @@ def generate_launch_description():
     use_safety = LaunchConfiguration("use_safety")
     use_sim_time = LaunchConfiguration("use_sim_time")
     controllers_file = LaunchConfiguration("controllers_file")
-    safety_params_file = LaunchConfiguration("safety_params_file")
+    safety_params_file = PathJoinSubstitution([safety_share, "config", "safety_params.yaml"])
     initial_positions_file = LaunchConfiguration("initial_positions_file")
     project_config_file = LaunchConfiguration("project_config_file")
 
@@ -218,12 +218,6 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "controllers", default_value="",
                 description="控制器名称（空格分隔），留空按 dm_command_mode 自动选择",
-            ),
-            DeclareLaunchArgument(
-                "safety_params_file",
-                default_value=PathJoinSubstitution(
-                    [safety_share, "config", "safety_params.yaml"]),
-                description="安全监控参数（由 scripts/sync_config.py 生成，勿手改）",
             ),
             DeclareLaunchArgument(
                 "initial_positions_file",

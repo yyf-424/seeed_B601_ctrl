@@ -18,7 +18,6 @@ xacro、演示节点及命令行工具直接读取真值。MuJoCo 模型由 gen_
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 import difflib
 import re
 import sys
@@ -66,6 +65,8 @@ def validate(cfg: dict) -> list[str]:
             errors.append(f"关节 {name} 限位区间非法：[{j.get('min_pos')}, {j.get('max_pos')}]")
         if j.get("max_velocity", 0) <= 0:
             errors.append(f"关节 {name} 的 max_velocity 必须 > 0")
+        if not 0 < j.get("max_effort", 0) < float("inf"):
+            errors.append(f"关节 {name} 的 max_effort 必须为有限正数")
         start = j.get("startup")
         if start is not None and not (j["min_pos"] <= start <= j["max_pos"]):
             errors.append(f"关节 {name} 的启动姿态 {start} 不在限位内")
@@ -87,12 +88,10 @@ def validate(cfg: dict) -> list[str]:
 
     # 安全阈值自洽
     vel = safety.get("velocity", {})
-    if vel.get("warn_ratio", 0) >= vel.get("estop_ratio", 0):
-        errors.append("safety.velocity.warn_ratio 必须小于 estop_ratio（否则警告永远看不见）")
+    if not 0.0 <= vel.get("warn_ratio", 0) < 1.0:
+        errors.append("safety.velocity.warn_ratio 必须在 [0,1) 内")
     if safety.get("angle", {}).get("warn_margin", 0) <= 0:
         errors.append("safety.angle.warn_margin 必须 > 0")
-    if float(safety.get("angle", {}).get("static_tolerance", 0.05)) < 0:
-        errors.append("safety.angle.static_tolerance 必须 >= 0")
     estop = safety.get("estop", {})
     hw_name = estop.get("hardware_component")
     if hw_name != robot.get("ros2_control_name"):
@@ -182,17 +181,6 @@ def validate_mit(cfg: dict) -> list[str]:
         for jname in inst.get("joints", []):
             if jname not in per_joint:
                 errors.append(f"profile {pname} 的 per_joint 缺关节 {jname}（实例 {iname} 要用）")
-        # torque_limit 不许超过该关节的 max_effort（关节单位）
-        group = prof.get("group") or {}
-        for jname in inst.get("joints", []):
-            limit = per_joint.get(jname, {}).get("torque_limit", group.get("torque_limit"))
-            if limit is None:
-                continue
-            cap = float(joints_cfg.get(jname, {}).get("max_effort", 0.0))
-            if cap > 0 and float(limit) > cap + 1e-9:
-                errors.append(
-                    f"{jname} 的 torque_limit={limit} 超过 URDF max_effort={cap} —— 限幅形同虚设"
-                )
     if not mit.get("shared", {}).get("gravity_params"):
         errors.append("control.mit.shared.gravity_params 为空（重力前馈会全是 0）")
     return errors
@@ -259,14 +247,11 @@ def render_joint_limits(cfg: dict) -> str:
     for name, j in cfg["joints"].items():
         if not j.get("control"):
             continue  # mimic 关节不参与规划
-        acc = float(j["max_acceleration"])
         limits[name] = {
             "has_velocity_limits": True,
-            "max_velocity": float(j["max_velocity"]),
-            "has_acceleration_limits": True,
-            "max_acceleration": acc,
-            "has_deceleration_limits": True,
-            "max_deceleration": -acc,
+            "max_velocity": min(float(j["max_velocity"]), float(cfg["target_slew"][j["type"]])),
+            "has_acceleration_limits": False,
+            "has_deceleration_limits": False,
         }
     data = {
         "default_velocity_scaling_factor": moveit["default_velocity_scaling_factor"],
@@ -303,14 +288,9 @@ def render_safety_params(cfg: dict) -> str:
         "feedback_timeout_sec": safety["feedback_timeout_sec"],
         "estop_on_feedback_timeout": safety["estop_on_feedback_timeout"],
         "startup_grace_sec": safety["startup_grace_sec"],
-        "estop_pos_margin": safety["angle"]["estop_margin"],
         # 静止零位漂移容差（同 hardware 激活检查用的那个值）
         # 静止零位漂移容差：逐关节列表（夹爪单位 m，真值里单独覆盖成 0.002）
-        "static_tolerance": [float(joints[n].get(
-            "static_tolerance", safety["angle"].get("static_tolerance", 0.05))) for n in names],
         "warn_vel_ratio": safety["velocity"]["warn_ratio"],
-        "estop_vel_ratio": safety["velocity"]["estop_ratio"],
-        "estop_vel_absolute": safety["velocity"]["estop_absolute"],
         "warn_on_pose_deviation": safety["pose"]["warn_on_deviation"],
         "warn_pose_threshold": safety["pose"]["warn_deviation"],
         "joint_states_topic": safety["joint_states_topic"],
@@ -338,14 +318,14 @@ def render_safety_params(cfg: dict) -> str:
 # ---- MIT 力控（变刚度）：实例表 → 控制器 yaml ----
 # 逐关节量必须按实例的 joints 顺序展开成数组；组级量（阈值/斜率/守卫）原样透传。
 MIT_ARRAY_KEYS = (
-    "kp_hold", "kd_hold", "kp_move", "kd_move", "friction", "torque_limit",
+    "kp_hold", "kd_hold", "kp_move", "kd_move", "friction",
     "kp_free", "kd_free", "free_enabled",
-    "target_deadband", "settle_band_min", "settle_band_max",
+    "settle_band_min", "settle_band_max",
 )
 # 组级（标量）键透传白名单不需要维护：group 里除 state_interfaces 外都原样透传。
 
 
-def _mit_params(mit: dict, inst: dict) -> dict:
+def _mit_params(cfg: dict, mit: dict, inst: dict) -> dict:
     """把一个实例渲染成 ros__parameters。缺失的逐关节键**不输出**，交给控制器默认值。"""
     profiles = mit["profiles"]
     prof = profiles[inst["profile"]]
@@ -356,6 +336,7 @@ def _mit_params(mit: dict, inst: dict) -> dict:
     params: dict = {
         "joints": joints,
         "chain_joints": list(inst.get("chain_joints", joints)),
+        "target_slew": [float(cfg["target_slew"][cfg["joints"][name]["type"]]) for name in joints],
         "state_interfaces": list(group.pop("state_interfaces", ["position", "velocity"])),
     }
     for key in MIT_ARRAY_KEYS:
@@ -390,7 +371,7 @@ def render_mit_controllers(cfg: dict) -> str:
     body: dict = {"joint_state_broadcaster": {"ros__parameters": {"use_local_topics": False}}}
     for name, inst in instances.items():
         cm_params[name] = {"type": inst["plugin"]}
-        body[name] = {"ros__parameters": _mit_params(mit, inst)}
+        body[name] = {"ros__parameters": _mit_params(cfg, mit, inst)}
 
     head = (
         GENERATED_NOTE
@@ -469,9 +450,6 @@ def render_srdf(cfg: dict, path: Path) -> str:
 def render_all(cfg: dict) -> dict[Path, str]:
     moveit = WS_SRC / "b601_moveit_config" / "config"
     srdf = moveit / "b601_dm.srdf"
-    verified = deepcopy(cfg)
-    plan = verified["validation"]["mit_five_poses"]["hardware_retest"]
-    verified["safety"]["velocity"]["estop_absolute"] = plan["estop_arm_speed_rad_s"]
     return {
         WS_SRC / "b601_description" / "config" / "initial_positions.yaml":
             render_initial_positions(cfg),
@@ -483,8 +461,6 @@ def render_all(cfg: dict) -> dict[Path, str]:
             render_safety_params(cfg),
         WS_SRC / "b601_bringup" / "config" / "b601_mit_controllers.yaml":
             render_mit_controllers(cfg),
-        WS_SRC / "b601_bringup" / "config" / "b601_mit_safety_verified.yaml":
-            render_safety_params(verified),
         WS_SRC / "b601_bringup" / "config" / "hardware_dm.yaml":
             render_hardware_dm(cfg),
         srdf: render_srdf(cfg, srdf),

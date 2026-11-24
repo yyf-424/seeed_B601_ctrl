@@ -4,55 +4,41 @@
 #    改完执行：  ./scripts/sync_config.py
 # ============================================================================
 # MoveIt 规划限速：时间参数化的依据。速度上限 = URDF limit.velocity（同一个来源）。
-default_velocity_scaling_factor: 0.2
-default_acceleration_scaling_factor: 0.2
+default_velocity_scaling_factor: 1.0
+default_acceleration_scaling_factor: 1.0
 joint_limits:
   joint1:
     has_velocity_limits: true
-    max_velocity: 6.0
-    has_acceleration_limits: true
-    max_acceleration: 4.0
-    has_deceleration_limits: true
-    max_deceleration: -4.0
+    max_velocity: 0.08
+    has_acceleration_limits: false
+    has_deceleration_limits: false
   joint2:
     has_velocity_limits: true
-    max_velocity: 6.0
-    has_acceleration_limits: true
-    max_acceleration: 4.0
-    has_deceleration_limits: true
-    max_deceleration: -4.0
+    max_velocity: 0.08
+    has_acceleration_limits: false
+    has_deceleration_limits: false
   joint3:
     has_velocity_limits: true
-    max_velocity: 6.0
-    has_acceleration_limits: true
-    max_acceleration: 4.0
-    has_deceleration_limits: true
-    max_deceleration: -4.0
+    max_velocity: 0.08
+    has_acceleration_limits: false
+    has_deceleration_limits: false
   joint4:
     has_velocity_limits: true
-    max_velocity: 6.0
-    has_acceleration_limits: true
-    max_acceleration: 8.0
-    has_deceleration_limits: true
-    max_deceleration: -8.0
+    max_velocity: 0.08
+    has_acceleration_limits: false
+    has_deceleration_limits: false
   joint5:
     has_velocity_limits: true
-    max_velocity: 6.0
-    has_acceleration_limits: true
-    max_acceleration: 8.0
-    has_deceleration_limits: true
-    max_deceleration: -8.0
+    max_velocity: 0.08
+    has_acceleration_limits: false
+    has_deceleration_limits: false
   joint6:
     has_velocity_limits: true
-    max_velocity: 6.0
-    has_acceleration_limits: true
-    max_acceleration: 8.0
-    has_deceleration_limits: true
-    max_deceleration: -8.0
+    max_velocity: 0.08
+    has_acceleration_limits: false
+    has_deceleration_limits: false
   finger_left:
     has_velocity_limits: true
-    max_velocity: 0.05
-    has_acceleration_limits: true
-    max_acceleration: 0.2
-    has_deceleration_limits: true
-    max_deceleration: -0.2
+    max_velocity: 0.02
+    has_acceleration_limits: false
+    has_deceleration_limits: false

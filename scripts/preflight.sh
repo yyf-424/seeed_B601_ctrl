@@ -388,10 +388,10 @@ if python3 -c "import mujoco" >/dev/null 2>&1 && [[ -x "$REPO_ROOT/scripts/sim_m
       grep -E "RESULT|❌" "$MIT_LOG.$tag" | tail -3 | sed 's/^/         /'
     fi
   }
-  track_slew="$(python3 "$REPO_ROOT/scripts/project_config.py" controllers.mit.profiles.standard_mit.group.target_slew)"
+  track_slew="$(python3 "$REPO_ROOT/scripts/project_config.py" target_slew.revolute)"
   mit_run "零重力跟踪回归（稳态误差判据 ${cfg[track_tol_rad]} rad）" pf_track \
       --zero-gravity --no-safety --slew "$track_slew" --tol "${cfg[track_tol_rad]}" --max-vel "${cfg[track_speed_rad_s]}"
-  mit_run "变刚度状态机（slew/死区/整组 done/刚度斜坡）" pf_state \
+  mit_run "变刚度状态机（slew/目标更新/整组 done/刚度斜坡）" pf_state \
       --zero-gravity --no-safety --state-machine-test
   mit_run "夹爪 MIT 力控（配置序列）" pf_grip \
       --controllers "b601_mit_arm b601_mit_gripper" --zero-gravity --no-safety \

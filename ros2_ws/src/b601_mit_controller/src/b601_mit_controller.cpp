@@ -212,12 +212,10 @@ bool B601MitController::read_gain_params()
   ensure("kp_move", b601_config::mit::kp_move);
   ensure("kd_move", b601_config::mit::kd_move);
   ensure("friction", std::vector<double>(n, 0.0));
-  ensure("torque_limit", b601_config::mit::legacy_torque_default);
   // 等待档：没给就回落到 hold 档（老配置仍能跑）
   ensure("kp_free", std::vector<double>(kp_hold_.begin(), kp_hold_.end()));
   ensure("kd_free", std::vector<double>(kd_hold_.begin(), kd_hold_.end()));
   ensure("free_enabled", std::vector<bool>(n, true));
-  ensure("target_deadband", b601_config::mit::target_deadband);
   ensure("settle_band_min", b601_config::mit::settle_band_min);
   ensure("settle_band_max", b601_config::mit::settle_band_max);
 
@@ -225,7 +223,6 @@ bool B601MitController::read_gain_params()
   // kp_free/kd_free 可能来自 hold 档的默认值，需要在 kp_hold_ 读完之后再取
   kp_free_ = to_per_joint("kp_free", node->get_parameter("kp_free"), n);
   kd_free_ = to_per_joint("kd_free", node->get_parameter("kd_free"), n);
-  target_deadband_ = to_per_joint("target_deadband", node->get_parameter("target_deadband"), n);
   settle_band_min_ = to_per_joint("settle_band_min", node->get_parameter("settle_band_min"), n);
   settle_band_max_ = to_per_joint("settle_band_max", node->get_parameter("settle_band_max"), n);
   {
@@ -253,10 +250,9 @@ bool B601MitController::read_gain_params()
   kp_move_ = to_per_joint("kp_move", node->get_parameter("kp_move"), n);
   kd_move_ = to_per_joint("kd_move", node->get_parameter("kd_move"), n);
   friction_ = to_per_joint("friction", node->get_parameter("friction"), n);
-  torque_limit_ = to_per_joint("torque_limit", node->get_parameter("torque_limit"), n);
   if (kp_hold_.size() != n || kd_hold_.size() != n || kp_move_.size() != n ||
-    kd_move_.size() != n || friction_.size() != n || torque_limit_.size() != n ||
-    kp_free_.size() != n || kd_free_.size() != n || target_deadband_.size() != n ||
+    kd_move_.size() != n || friction_.size() != n ||
+    kp_free_.size() != n || kd_free_.size() != n ||
     settle_band_min_.size() != n || settle_band_max_.size() != n)
   {
     return false;
@@ -264,7 +260,6 @@ bool B601MitController::read_gain_params()
   for (std::size_t i = 0; i < n; ++i) {
     kp_free_[i] = std::max(0.0, kp_free_[i]);
     kd_free_[i] = std::max(0.0, kd_free_[i]);
-    target_deadband_[i] = std::max(0.0, target_deadband_[i]);
     settle_band_min_[i] = std::max(0.0, settle_band_min_[i]);
     settle_band_max_[i] = std::max(settle_band_min_[i], settle_band_max_[i]);
     settle_band_.assign(n, settle_band_max_[i]);
@@ -274,7 +269,6 @@ bool B601MitController::read_gain_params()
     kd_hold_[i] = std::max(0.0, kd_hold_[i]);
     kp_move_[i] = std::max(0.0, kp_move_[i]);
     kd_move_[i] = std::max(0.0, kd_move_[i]);
-    torque_limit_[i] = std::max(0.0, torque_limit_[i]);
   }
   return true;
 }
@@ -360,8 +354,16 @@ controller_interface::CallbackReturn B601MitController::on_init()
     settle_band_pct_ = std::clamp(node->get_parameter("settle_band_pct").as_double(), 0.0, 1.0);
     ensure("settle_sec", settle_sec_);
     settle_sec_ = std::max(b601_config::mit::settle_sec_min, node->get_parameter("settle_sec").as_double());
-    ensure("target_slew", target_slew_);
-    target_slew_ = std::max(b601_config::mit::slew_min, node->get_parameter("target_slew").as_double());
+    ensure("target_slew", std::vector<double>{});
+    target_slew_ = to_per_joint("target_slew", node->get_parameter("target_slew"), joint_names_.size());
+    if (target_slew_.size() != joint_names_.size() ||
+      !std::all_of(target_slew_.begin(), target_slew_.end(), [](double value) {
+        return std::isfinite(value) && value > 0.0;
+      }))
+    {
+      RCLCPP_ERROR(node->get_logger(), "target_slew 需要有效的正逐关节斜率");
+      return controller_interface::CallbackReturn::ERROR;
+    }
     ensure("kp_up_sec", kp_up_sec_);
     kp_up_sec_ = std::max(b601_config::mit::ramp_time_sec_min, node->get_parameter("kp_up_sec").as_double());
     ensure("kp_down_sec", kp_down_sec_);
@@ -394,9 +396,9 @@ controller_interface::CallbackReturn B601MitController::on_init()
   }
   RCLCPP_INFO(
     get_node()->get_logger(),
-    "指令层：slew=%.2f 死区=%.4f 误差带=%.0f%%×位移且夹在[%.4f,%.4f] 到位判定=%.2fs "
+    "指令层：slew=%.2f 误差带=%.0f%%×位移且夹在[%.4f,%.4f] 到位判定=%.2fs "
     "刚上升/下降=%.2f/%.2fs 等待档某关节禁用=%s track_timeout=%.1fs",
-    target_slew_, target_deadband_.front(), settle_band_pct_ * 100.0,
+    target_slew_.front(), settle_band_pct_ * 100.0,
     settle_band_min_.front(), settle_band_max_.front(), settle_sec_,
     kp_up_sec_, kp_down_sec_,
     std::any_of(free_enabled_.begin(), free_enabled_.end(), [](bool b) {return !b;}) ? "是" : "否",
@@ -421,7 +423,7 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
     } else if (name == "friction_scale") {
       friction_scale_ = std::clamp(p.as_double(), 0.0, b601_config::mit::friction_scale_max);
     } else if (name == "kp_hold" || name == "kd_hold" || name == "kp_move" || name == "kd_move" ||
-      name == "friction" || name == "torque_limit")
+      name == "friction")
     {
       auto v = to_per_joint(name, p, n);
       if (v.size() != n) {
@@ -440,10 +442,8 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
         kp_move_ = v;
       } else if (name == "kd_move") {
         kd_move_ = v;
-      } else if (name == "friction") {
-        friction_ = v;
       } else {
-        torque_limit_ = v;
+        friction_ = v;
       }
     } else if (name == "move_threshold") {
       move_threshold_ = std::max(0.0, p.as_double());
@@ -822,7 +822,7 @@ controller_interface::return_type B601MitController::update(
   {
     bool changed = done_ && moving_reference;
     for (std::size_t i = 0; i < n; ++i) {
-      if (std::abs(cmd->q[i] - q_cmd_[i]) > target_deadband_[i]) {
+      if (cmd->q[i] != q_cmd_[i]) {
         changed = true;
         break;
       }
@@ -848,7 +848,7 @@ controller_interface::return_type B601MitController::update(
 
   // ================== ② 目标斜坡（只决定"怎么走"） ==================
   for (std::size_t i = 0; i < n; ++i) {
-    q_up_[i] = move_toward(q_up_[i], q_cmd_[i], target_slew_ * dt);
+    q_up_[i] = move_toward(q_up_[i], q_cmd_[i], target_slew_[i] * dt);
   }
 
   // 速度低通仅用于主机侧摩擦补偿。
@@ -920,8 +920,7 @@ controller_interface::return_type B601MitController::update(
     ff_components_[i] = friction;
     ff_components_[n + i] = gravity;
     ff_components_[2 * n + i] = task_torque;
-    const double limit = torque_limit_[i];
-    tau_cmd_[i] = std::clamp(gravity + friction + task_torque, -limit, limit);
+    tau_cmd_[i] = gravity + friction + task_torque;
 
     command_interfaces_[pos_cmd_idx_[i]].set_value(q_ref_[i]);
     command_interfaces_[vel_cmd_idx_[i]].set_value(

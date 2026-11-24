@@ -27,6 +27,11 @@ source ros2_ws/install/setup.bash
 控制和安全门槛、URDF 形状与惯量、MoveIt 规划、仿真场景、演示节点和测试工具。ROS 运行时参数和
 脚本命令行选项可覆盖对应默认值。
 
+整机运动约束由 `joints.min_pos/max_pos`、`joints.max_velocity`、`joints.max_effort` 和
+`target_slew` 提供。手臂速度上限为 6.0 rad/s，夹爪为 0.05 m/s。位置目标的斜率分别为
+0.08 rad/s 和 0.02 m/s。MIT 的总输出包括 PD 和前馈。关节端 MIT 在下发前用最新反馈估算
+总力矩，电机仍按内部高速闭环计算。温度、总线故障和反馈失效继续触发停机保护。
+
 ```bash
 ./scripts/sync_config.py           # 同步生成的 ROS 参数文件和 SRDF 命名姿态
 ./scripts/sync_config.py --check   # 检查派生文件同步状态
@@ -68,7 +73,7 @@ export B601_VENDOR_DESCRIPTION=/path/to/rebotarm_ros2/src/rebotarm_bringup
 ./scripts/hw_mit_five_poses.sh --execute
 ```
 
-真机流程用此标签中的验收增益、0.08 rad/s 手臂目标斜率和 0.65 rad/s 独立急停阈值。
+真机复测使用整机的关节速度限幅、总力矩限幅和目标斜率。
 日志、CSV 和判定写入 `.verify/mit_hardware_five_poses/`。需要在试验中途停止发新目标并尝试安全归中时，
 在输出目录创建 `HOLD_HARDWARE`；遇到危险立即使用现场急停。参数集中在
 `ros2_ws/src/b601_description/config/b601_project.yaml`，改后执行 `./scripts/sync_config.py` 和构建。

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """dm_mit_move.py —— 真机 MIT 力控模式下的"限速摆动"工具（安全第一）。
 
-    # 首次：小幅验证（只动 joint2，0.05 rad，0.1 rad/s）
-    ./scripts/dm_mit_move.py --set "joint2=-0.35" --slew 0.1
+    # 首次：小幅验证（只动 joint2，0.05 rad）
+    ./scripts/dm_mit_move.py --set "joint2=-0.35"
 
     # 摆动几个姿态（每个目标都会按 slew 斜坡逼近，绝不阶跃）
     ./scripts/dm_mit_move.py --poses "joint1=0.3;joint1=0.3,joint2=-0.5;joint1=0"
@@ -13,9 +13,8 @@
       · 目标用**阶跃** → joint6 峰值 **25 rad/s**，会立即触发安全节点 6 rad/s 急停
     所以本脚本只做"斜坡逼近"，并且每一步都：
       ① 读当前 /joint_states 作为起点（不假设手臂在哪）
-      ② 按 slew 限速逐步逼近目标，单步增量不超过 slew·dt
-      ③ 全程盯 /b601_safety/status：只要不是 NORMAL 就立刻停止发目标并退出
-      ④ 超过 --max-delta 的目标直接拒发（防止手误大角度）
+      ② 由控制器按统一目标斜率逼近
+      ③ 全程盯 /b601_safety/status：检测到急停就停止发目标并退出
 
 接口：
     发布  /b601_mit_arm/joint_target          sensor_msgs/JointState（MIT 控制器实例 b601_mit_arm 的目标话题）
@@ -62,8 +61,8 @@ def load_limits():
 
 
 class MitMover(Node):
-    def __init__(self, topic: str, rate_hz: float, slew: float,
-                 max_delta: float, tolerance: float, debug_topic: str,
+    def __init__(self, topic: str, rate_hz: float,
+                 tolerance: float, debug_topic: str,
                  settle: float = SETTINGS["settle"]):
         super().__init__("b601_mit_move")
         self.pub = self.create_publisher(JointState, topic, 10)
@@ -79,8 +78,7 @@ class MitMover(Node):
         self.create_subscription(
             Float64MultiArray, debug_topic, self._on_debug, 10)
         self.rate = rate_hz
-        self.slew = slew
-        self.max_delta = max_delta
+        self.slew = PROJECT["target_slew"]["revolute"]
         self.tol = tolerance
         self.settle = settle
         self.lo, self.hi = load_limits()
@@ -120,10 +118,6 @@ class MitMover(Node):
             if not (self.lo[n] - 1e-9 <= v <= self.hi[n] + 1e-9):
                 self.get_logger().error(f"{label}：{n}={v:+.3f} 超出限位 [{self.lo[n]}, {self.hi[n]}]，拒发")
                 return False
-            if abs(v - start[n]) > self.max_delta + 1e-9:
-                self.get_logger().error(
-                    f"{label}：{n} 需要移动 {abs(v - start[n]):.3f} rad > --max-delta {self.max_delta}，拒发")
-                return False
         if self.safety == "EMERGENCY_STOP":
             self.get_logger().error(f"{label}：当前是急停状态，拒发（先调用 clear_estop）")
             return False
@@ -135,11 +129,10 @@ class MitMover(Node):
         self.get_logger().info(
             f"{label}：最大位移 {move:.3f} rad，斜坡 {self.slew:.2f} rad/s → 约 {move / max(self.slew, 1e-3):.1f}s")
 
-        cmd = dict(start)
         dt = 1.0 / self.rate
         t0 = time.monotonic()
         last_log = 0.0
-        err0 = max(abs(want[n] - start[n]) for n in ARM)
+        err0 = move
         self._quiet = 0.0
         self._frozen = 0.0
         while True:
@@ -151,22 +144,10 @@ class MitMover(Node):
             if self.safety == "WARNING" and not getattr(self, "_warned", False):
                 self._warned = True
                 self.get_logger().warn(f"{label}：安全状态 WARNING（继续，不停机）")
-            # 用最新实测作为反馈基准逼近（而不是死跟计划曲线）。
-            # ⚠ 无论误差多小都必须走斜坡：曾经写成"|err|<=tol 就直接取 want"，那等于
-            #   对小误差做阶跃。2026-11-21 真机 j6 只差 0.0254 rad，被 kp=60 放大成
-            #   1.5 N·m 的力矩台阶，最轻的 j6（I=0.0106）当场抖振到 13.5 rad/s 触发急停。
-            #   tolerance 只能用来判"到位"，绝不能用来跳步。
-            for n in ARM:
-                err = want[n] - self.current[n]
-                step = max(-self.slew * dt, min(self.slew * dt, err))
-                nxt = cmd[n] + step
-                if (want[n] - nxt) * err < 0:   # 不许越过目标
-                    nxt = want[n]
-                cmd[n] = nxt
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name = ARM
-            msg.position = [cmd[n] for n in ARM]
+            msg.position = [want[n] for n in ARM]
             self.pub.publish(msg)
 
             elapsed = time.monotonic() - t0
@@ -178,9 +159,8 @@ class MitMover(Node):
                     f"  {elapsed:5.1f}s  最大剩余误差 {errs[worst]:.3f} rad（{worst}）")
             err_now = max(abs(want[n] - self.current[n]) for n in ARM)
             vel_now = max((abs(self.current_vel.get(n, 0.0)) for n in ARM), default=0.0)
-            # 目标命令是否已经走完全程（斜坡是"靠近实测"而不是"死跟计划曲线"，
-            # 所以必须确认 cmd 真的到过 want，否则稳态误差量的是"斜坡还没走完"）。
-            reached = all(abs(cmd[n] - want[n]) < 1e-9 for n in ARM)
+            # 至少等待按统一斜率走完全程的时间，再检查稳态误差。
+            reached = elapsed >= move / self.slew
             # 冻结检测：误差很大却一动不动（控制器没接管 / 目标没被执行）——
             # 必须报错而不是报成功。纯 MIT 的重力下垂是"误差小且静止"，
             # 与"误差大且静止"是两回事（2026-11-21 在仿真里踩到过假成功）。
@@ -250,10 +230,7 @@ def main() -> int:
                     help="MIT 控制器心跳（激活后 ~10 Hz 发布），用于确认控制器真在跑")
     ap.add_argument("--set", default="", help="目标姿态，例：joint2=-0.35,joint5=0.2")
     ap.add_argument("--poses", default="", help="多个姿态用 ; 分隔，依次执行")
-    ap.add_argument("--slew", type=float, default=SETTINGS["slew"], help="目标逼近速率 rad/s（默认 0.2，很慢）")
     ap.add_argument("--rate", type=float, default=SETTINGS["rate"], help="目标发布频率 Hz")
-    ap.add_argument("--max-delta", type=float, default=SETTINGS["max_delta"],
-                    help="单个关节允许的最大位移 rad（默认 0.15，防手误；确认无误后可调大）")
     ap.add_argument("--tolerance", type=float, default=SETTINGS["tolerance"],
                     help="到位判据 rad（只用于判到位，不会让目标跳步；纯 MIT 有下垂，别设太小）")
     ap.add_argument("--settle", type=float, default=SETTINGS["settle"],
@@ -266,7 +243,7 @@ def main() -> int:
         return 2
 
     rclpy.init()
-    node = MitMover(args.topic, args.rate, args.slew, args.max_delta,
+    node = MitMover(args.topic, args.rate,
                     args.tolerance, args.debug_topic, args.settle)
     try:
         if not node.wait_ready():
@@ -274,7 +251,7 @@ def main() -> int:
             return 1
         node.get_logger().info(
             "起始位形：" + ", ".join(f"{n}={node.current[n]:+.3f}" for n in ARM)
-            + f"；安全状态 {node.safety}；斜坡 {args.slew:.2f} rad/s；单次最大位移 {args.max_delta} rad")
+            + f"；安全状态 {node.safety}；斜坡 {node.slew:.2f} rad/s")
 
         specs = [p for p in args.poses.split(";") if p.strip()] if args.poses else [args.set]
         for i, spec in enumerate(specs, 1):

@@ -62,12 +62,11 @@ def load_limits():
         return (
             list(params["joint_names"]),
             [float(v) for v in params["vel_max"]],
-            float(params["estop_vel_ratio"]),
             float(params["warn_vel_ratio"]),
         )
     except Exception:  # noqa: BLE001 —— 没有配置就不做超阈值统计，不影响录制
         velocity = PROJECT["safety"]["velocity"]
-        return None, None, velocity["estop_ratio"], velocity["warn_ratio"]
+        return None, None, velocity["warn_ratio"]
 
 
 class Recorder(Node):
@@ -159,7 +158,7 @@ def main() -> int:
         rclpy.try_shutdown()
 
     # ------------------------------------------------------------------ 摘要
-    names, vel_max, estop_ratio, warn_ratio = load_limits()
+    names, vel_max, warn_ratio = load_limits()
     n = len(node.rows)
     print(f"\n已写入 {out}（{n} 行 × {len(node.names)} 关节）")
     if n == 0 or not node.rows:
@@ -178,7 +177,7 @@ def main() -> int:
         print(f"{name:<12}{vmax:>18.3f}{emax:>14.3f}{pmin:>10.3f} … {pmax:>8.3f}")
         if names and name in names and vel_max:
             k = names.index(name)
-            estop_line = estop_ratio * vel_max[k]
+            estop_line = vel_max[k]
             warn_line = warn_ratio * vel_max[k]
             over_warn = sum(1 for v in vels if v == v and v >= warn_line)
             over_stop = sum(1 for v in vels if v == v and v > estop_line)

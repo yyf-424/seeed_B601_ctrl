@@ -25,16 +25,13 @@ JOINT_LOWER = {name: float(j["min_pos"]) for name, j in _JOINTS.items()}
 JOINT_UPPER = {name: float(j["max_pos"]) for name, j in _JOINTS.items()}
 JOINT_VEL_MAX = {name: float(j["max_velocity"]) for name, j in _JOINTS.items()}
 
-# 安全余量：贴着硬限位发轨迹，控制器和编码器零点误差会让它被判越界
-SAFETY_MARGIN = _PROJECT["nodes"]["trajectory_utils"]["limit_margin_rad"]
 
-
-def check_limits(joint_names, positions, margin=SAFETY_MARGIN):
+def check_limits(joint_names, positions):
     """返回越界描述列表；空列表表示全部合法。"""
     problems = []
     for name, value in zip(joint_names, positions):
-        low = JOINT_LOWER[name] + margin
-        high = JOINT_UPPER[name] - margin
+        low = JOINT_LOWER[name]
+        high = JOINT_UPPER[name]
         if not (low <= value <= high):
             problems.append(f"{name}={value:.3f} 超出 [{low:.3f}, {high:.3f}]")
     return problems

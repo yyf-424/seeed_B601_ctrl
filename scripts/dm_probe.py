@@ -110,8 +110,7 @@ def main() -> int:
             factor = motor["direction"] * motor["scale"]
             pos = float(state.pos) * factor + motor["zero_offset"]
             velocity = float(state.vel) * factor
-            tolerance = joint.get("static_tolerance", PROJECT["safety"]["angle"]["static_tolerance"])
-            in_range = lo - tolerance <= pos <= hi + tolerance
+            in_range = lo <= pos <= hi
             ok = ok and in_range
             flag = "OK" if in_range else f"⚠ 超出 [{lo:+.2f},{hi:+.2f}]"
             print(f"{name:<9}{mid:>6}{fid:>8}{pos:>12.4f}{velocity:>10.3f}"

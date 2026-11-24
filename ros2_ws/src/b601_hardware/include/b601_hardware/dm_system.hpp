@@ -92,15 +92,11 @@ private:
     double t_rotor{0.0};        // 反馈帧自带的转子温度（℃）
     double kp{0.0};             // MIT 模式位置刚度
     double kd{0.0};             // MIT 模式阻尼
-    double vel_limit{b601_config::dm::default_joint_velocity_rad_s};      // rad/s，用于限速与 POS_VEL 模式的 vlim
-    double mit_velocity_limit{0.0};  // MIT 帧速度目标的关节单位上限
-    double torque_limit{0.0};   // N·m，>0 时对力矩命令做限幅（mit_torque 模式用）
-    double min_pos{0.0};        // 软限位下限（rad），超出即夹紧
-    double max_pos{0.0};        // 软限位上限
-    // 静止零位漂移许用值（rad/m，逐关节）：手臂静止顶在机械停止位上时实测值可能略微越界
-    // （2026-11-21 实测 joint2 读到 +0.026）。只用于 on_activate 的超限检查，
-    // 不参与 write() 的夹紧 —— 命令永远夹在真实限位内。
-    double limit_tolerance{b601_config::dm::static_tolerance};
+    double vel_limit{0.0};      // rad/s，用于限速与 POS_VEL 模式的 vlim
+    double target_slew{0.0};   // 关节位置目标每秒变化量（rad/s 或 m/s）
+    double torque_limit{0.0};  // MIT 总输出限幅（N·m 或 N）
+    double min_pos{0.0};       // 关节位置下限（rad 或 m）
+    double max_pos{0.0};       // 关节位置上限
     bool has_position_limit{false};
     bool has_command{false};    // 该关节是否有命令接口（finger_right 没有）
     int reject_count{0};        // 被合理性检查拦掉的次数
@@ -166,7 +162,6 @@ private:
   double watchdog_timeout_{b601_config::dm::watchdog_timeout};
   // 全局速度缩放（0~1）：同时作用于「每周期限速」与「POS_VEL 的 vlim」。
   // 首次上真机时调到 0.1，确认方向/幅值都对之后再放开。默认就取保守值。
-  double velocity_scale_{b601_config::dm::velocity_scale};
 
   // 电机力矩符号约定：达妙电机上报/接收的 torq 与「关节正方向力矩」反号
   // （2026-11-20 实测：用 +1 拟合重力会得到负质量）。统一在插件里做一次转换，

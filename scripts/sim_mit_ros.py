@@ -215,11 +215,7 @@ class Harness(Node):
 def state_machine_test(node, joints, args) -> int:
     """验证「指令层 + 整组 done + 变刚度」的状态机本身（不看轨迹，看 kp/done 的时序）。
 
-    步骤：
-      A 等 1 s：应是等待档（done=1，kp≈kp_free）
-      B 发一个新目标（+0.2 rad）：done→0，kp 线性升到 kp_track；到位后 3 s 内 done→1，kp 落回 kp_free
-      C 在 done=1 时发半个死区的位移：**不许**重新索权（done 仍为 1、kp 不升）
-      D 再发两个死区的位移：必须重新索权（done→0、kp 升起）
+    检查高低刚度切换、整组到位和相同目标的重发。
     """
     fixture = SETTINGS["state_machine"]
     from rcl_interfaces.msg import ParameterType
@@ -227,14 +223,14 @@ def state_machine_test(node, joints, args) -> int:
 
     client = node.create_client(GetParameters, f"/{args.controller}/get_parameters")
     if not client.wait_for_service(timeout_sec=fixture["parameter_timeout_sec"]):
-        print("❌ 读不到控制器的 target_deadband 参数服务")
+        print("❌ 读不到控制器的 settle_band_min 参数服务")
         return 1
     future = client.call_async(GetParameters.Request(
-        names=["target_deadband", "kp_move", "settle_band_max"]))
+        names=["settle_band_min", "kp_move", "settle_band_max"]))
     rclpy.spin_until_future_complete(node, future, timeout_sec=fixture["parameter_timeout_sec"])
     response = future.result() if future.done() else None
     if response is None or not response.values:
-        print("❌ 读不到控制器的 target_deadband")
+        print("❌ 读不到控制器的 settle_band_min")
         return 1
     def first_joint(value):
         if value.type == ParameterType.PARAMETER_DOUBLE:
@@ -244,13 +240,13 @@ def state_machine_test(node, joints, args) -> int:
         raise ValueError("预期逐关节浮点参数")
 
     try:
-        deadband, kp_move, max_band = map(first_joint, response.values)
+        min_band, kp_move, max_band = map(first_joint, response.values)
     except ValueError as error:
         print(f"❌ {error}")
         return 1
     kp_threshold = kp_move * fixture["kp_fraction"]
-    if deadband <= 0.0:
-        print("❌ 该测试要求 target_deadband 为正")
+    if min_band <= 0.0:
+        print("❌ 该测试要求 settle_band_min 为正")
         return 1
 
     n = len(joints)
@@ -322,7 +318,7 @@ def state_machine_test(node, joints, args) -> int:
         print(f"  B2 大位移 {fixture['large_step_rad']:g} rad → band={s['band'][0]:.4f}（cap {max_band:g}）"
               f"{'✅' if cap_ok else '❌'}")
         ok = ok and cap_ok
-    s = wait_state(lambda s: s["done"], fixture["settle_timeout_sec"], "B2 到位")
+    s = wait_state(lambda s: s["done"], fixture["settle_timeout_sec"] + fixture["large_step_rad"] / PROJECT["target_slew"]["revolute"], "B2 到位")
     if s is None:
         ok = False
 
@@ -340,44 +336,27 @@ def state_machine_test(node, joints, args) -> int:
         ok = False
     else:
         el = time.monotonic() - t3
-        # 慢的 joint3：0.6/0.5 = 1.2 s 斜坡 + 3 s 判定 ≈ 4.2 s；快的 joint1 只需 0.1+3 = 3.1 s
+        # joint3 的目标位移更大，整组到位必须等这个关节跟上。
         slow_ok = el > fixture["mixed_min_sec"]
         print(f"  B3 混合目标→ 整组 done 用时 {el:.2f}s "
               f"{'✅ 由慢关节决定' if slow_ok else '❌ 偏快'}")
         ok = ok and slow_ok
 
-    # 回到"已到位"状态，才能验死区（否则 C 的前提不成立）
-    hold = list(node.q())
-    node.send(hold)
-    if wait_state(lambda s: s["done"], fixture["mixed_settle_timeout_sec"], "回到 done") is None:
-        ok = False
-
-    # C：小于死区的目标变化不应重新索权
-    s_now = snapshot()
-    reference = [node.q()[i] + (s_now["err_cmd"][i] if s_now else 0.0) for i in range(n)]
-    tiny = reference.copy()
-    tiny_delta = deadband * 0.5
-    tiny[0] += tiny_delta
-    seq_before = snapshot()["seq"] if snapshot() else -1
+    # 重发 B3 的原目标，等控制器处理这一帧，再检查是否重新跟踪。
+    if s is None:
+        return 1
+    seq = s["seq"]
+    node.send(mix)
+    repeated = wait_state(lambda state: state["seq"] > seq, fixture["claim_timeout_sec"], "接收重发目标")
+    unchanged = repeated is not None and repeated["done"]
+    print(f"  相同目标重发，{'保持到位' if unchanged else '重新跟踪或超时'}")
+    ok = ok and unchanged
+    tiny = mix.copy()
+    tiny[0] += min_band / 2
     node.send(tiny)
-    node.spin_for(fixture["warmup_sec"])
-    s = snapshot()
-    # 判据用 done：seq 是"收到过几帧"（每帧都 +1，与是否重新索权无关），
-    #   kp 可能还在从上一段 TRACK 回落；**只有 done 反映"是否重新索权"**。
-    claimed = not s["done"]
-    print(f"  C 发 +{tiny_delta:g} rad（< 死区 {deadband:g}）：done={s['done']} seq={s['seq']}（前 {seq_before}）"
-          f"→ {'❌ 不该重新索权' if claimed else '✅ 正确忽略'}")
-    ok = ok and not claimed
-
-    # D：超过死区的目标变化必须重新索权
-    real = reference.copy()
-    real_delta = deadband * 2.0
-    real[0] += real_delta
-    node.send(real)
-    s = wait_state(lambda s: not s["done"], fixture["claim_timeout_sec"], "D 重新索权")
-    print(f"  D 发 +{real_delta:g} rad（> 死区 {deadband:g}）："
-          f"{'✅ 重新索权（done=0）' if s else '❌ 没有索权'}")
-    ok = ok and s is not None
+    changed = wait_state(lambda state: not state["done"], fixture["claim_timeout_sec"], "微小目标进入跟踪")
+    print(f"  微小目标 {min_band / 2:g} rad，{'已接受' if changed else '未接受'}")
+    ok = ok and changed is not None
     return 0 if ok else 1
 
 
@@ -588,7 +567,7 @@ def main() -> int:
             cfg.pop(base_name, None)
             per_joint_keys = ("kp_hold", "kd_hold", "kp_move", "kd_move", "friction",
                               "torque_limit", "kp_free", "kd_free", "free_enabled",
-                              "target_deadband", "settle_band_min", "settle_band_max")
+                              "settle_band_min", "settle_band_min", "settle_band_max")
             new_names = []
             offset = 0
             for idx, count in enumerate(parts):
@@ -720,8 +699,6 @@ def main() -> int:
             params = config[args.controller]["ros__parameters"]
             params["free_enabled"] = [args.state_machine_test] * len(params["joints"])
 
-            if args.state_machine_test:
-                params["target_slew"] = SETTINGS["state_machine"]["reference_slew_rad_s"]
             if args.mit_frame_test:
                 fixture = SETTINGS["mit_frame"]
                 params.update(gravity_scale=fixture["gravity_scale"], use_gravity=True,

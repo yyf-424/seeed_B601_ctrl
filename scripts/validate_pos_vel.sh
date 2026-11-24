@@ -18,11 +18,9 @@ plan = cfg["validation"]["pos_vel_five_poses"]
 poses = [",".join(f"{name}={value}" for name, value in zip(cfg["robot"]["arm_joints"], target, strict=True))
          for target in plan["targets"]]
 print(";".join(poses))
-print(plan["slew_rad_s"])
 print(plan["sample_sec"])
-print(plan["max_delta_rad"])
 PY
 )"
 mapfile -t trial <<< "$plan"
-exec ./scripts/dm_pose_steps.py "${args[@]}" --poses "${trial[0]}" --slew "${trial[1]}" \
-  --sample-sec "${trial[2]}" --max-delta "${trial[3]}"
+exec ./scripts/dm_pose_steps.py "${args[@]}" --poses "${trial[0]}" \
+  --sample-sec "${trial[1]}"

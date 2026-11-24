@@ -85,20 +85,18 @@ private:
   std::vector<double> kp_free_;        // 等待（无权威）档刚度
   std::vector<double> kd_free_;
   std::vector<bool> free_enabled_;     // 该关节是否参与等待模式（夹爪也参与，决策⑭）
-  std::vector<double> target_deadband_;   // 视为「同一指令」的门限（来自实例的逐关节配置）
   std::vector<double> settle_band_min_;
   std::vector<double> settle_band_max_;
   std::vector<double> settle_band_;    // 每周期按本次指令位移算出来的实际误差带
   double settle_band_pct_{b601_config::mit::settle_band_pct};
   double settle_sec_{b601_config::mit::settle_sec};
-  double target_slew_{b601_config::mit::target_slew};            // 关节单位/s，目标斜率上限
+  std::vector<double> target_slew_;  // 各关节位置目标斜率
   double kp_up_sec_{b601_config::mit::kp_up_sec};
   double kp_down_sec_{b601_config::mit::kp_down_sec};
   double q_ref_lpf_hz_{b601_config::mit::q_ref_lpf_hz};
   double track_timeout_sec_{b601_config::mit::track_timeout_sec};      // 0 = 关闭（被挡场景前期不做，决策⑩）
   std::vector<double> kp_move_;
   std::vector<double> kd_move_;
-  std::vector<double> torque_limit_;         // N：逐关节上限（必须 ≤ 该关节 URDF max_effort）
   std::atomic<double> move_threshold_{b601_config::mit::move_threshold};  // 关节单位
   std::atomic<double> hold_threshold_{b601_config::mit::hold_threshold};  // 关节单位
   double vel_hold_threshold_{b601_config::mit::vel_hold_threshold};           // 关节单位/s

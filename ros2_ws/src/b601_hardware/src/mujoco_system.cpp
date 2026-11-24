@@ -59,8 +59,6 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_init(
       logger(), "未知 command_mode='%s'，回落 pos_vel", command_mode_.c_str());
     command_mode_ = "pos_vel";
   }
-  velocity_scale_ = std::clamp(get_double(hp, "velocity_scale", velocity_scale_, "hardware"),
-    b601_config::dm::minimum_velocity_scale, 1.0);
   effort_sign_ = get_double(hp, "effort_sign", effort_sign_, "hardware");
   if (effort_sign_ != 1.0 && effort_sign_ != -1.0) {
     RCLCPP_WARN(logger(), "effort_sign=%.2f 不是 ±1，按符号处理", effort_sign_);
@@ -108,9 +106,8 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_init(
       };
     jm.kp = num("kp", 0.0);
     jm.kd = num("kd", 0.0);
-    jm.vel_limit = num("vel_limit", b601_config::dm::default_joint_velocity_rad_s);
-    jm.mit_velocity_limit = std::clamp(
-      num("mit_velocity_limit", jm.vel_limit * velocity_scale_), 0.0, jm.vel_limit);
+    jm.vel_limit = num("vel_limit", jm.vel_limit);
+    jm.target_slew = num("target_slew", jm.target_slew);
     jm.torque_limit = num("torque_limit", 0.0);
     const auto lo = p.find("min_pos");
     const auto hi = p.find("max_pos");
@@ -136,8 +133,8 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_init(
   }
 
   RCLCPP_INFO(
-    logger(), "初始化完成：model=%s mode=%s velocity_scale=%.2f 关节数=%zu",
-    model_path_.c_str(), command_mode_.c_str(), velocity_scale_, joints_.size());
+    logger(), "初始化完成：model=%s mode=%s 关节数=%zu",
+    model_path_.c_str(), command_mode_.c_str(), joints_.size());
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -173,11 +170,12 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_configure(
       model_->actuator_biastype[actuator] = mjBIAS_AFFINE;
       mju_zero(model_->actuator_biasprm + mjNBIAS * actuator, mjNBIAS);
       model_->actuator_ctrllimited[actuator] = 0;
-      if (jm.torque_limit > 0.0) {
-        model_->actuator_forcelimited[actuator] = 1;
-        model_->actuator_forcerange[2 * actuator] = -jm.torque_limit;
-        model_->actuator_forcerange[2 * actuator + 1] = jm.torque_limit;
-      }
+    }
+    if (actuator >= 0 && jm.torque_limit > 0.0) {
+      model_->actuator_ctrllimited[actuator] = 0;
+      model_->actuator_forcelimited[actuator] = 1;
+      model_->actuator_forcerange[2 * actuator] = -jm.torque_limit;
+      model_->actuator_forcerange[2 * actuator + 1] = jm.torque_limit;
     }
     jm.passthrough = (jm.actuator < 0) ||
       (is_prismatic_finger && command_mode_ != "mit_torque" &&
@@ -352,7 +350,7 @@ void MujocoSystemHardware::apply_impedance_inside_physics()
     }
     double pos_des = jm.cmd_position;
     double velocity_des = std::clamp(
-      jm.cmd_velocity, -jm.mit_velocity_limit, jm.mit_velocity_limit);
+      jm.cmd_velocity, -jm.vel_limit, jm.vel_limit);
     if (jm.has_position_limit) {
       pos_des = std::clamp(pos_des, jm.min_pos, jm.max_pos);
       if ((pos_des <= jm.min_pos && velocity_des < 0.0) ||
@@ -373,11 +371,8 @@ void MujocoSystemHardware::apply_impedance_inside_physics()
     }
     const double q = data_->qpos[jm.qpos_adr];
     const double qd = data_->qvel[jm.dof_adr];
-    double tau = jm.cmd_kp * (pos_des - q) + jm.cmd_kd * (velocity_des - qd) +
+    const double tau = jm.cmd_kp * (pos_des - q) + jm.cmd_kd * (velocity_des - qd) +
       effort_sign_ * jm.cmd_effort;
-    if (jm.torque_limit > 0.0) {
-      tau = std::clamp(tau, -jm.torque_limit, jm.torque_limit);
-    }
     data_->ctrl[jm.actuator] = tau;
   }
 }
@@ -387,8 +382,7 @@ double MujocoSystemHardware::applied_effort(const JointMap & joint) const
   if (joint.actuator < 0) {
     return 0.0;
   }
-  return joint.implicit_impedance ? data_->qfrc_actuator[joint.dof_adr] :
-         data_->ctrl[joint.actuator];
+  return data_->actuator_force[joint.actuator];
 }
 
 void MujocoSystemHardware::step_sim(double dt)
@@ -543,16 +537,13 @@ hardware_interface::return_type MujocoSystemHardware::write(
       if (jm.has_position_limit) {
         target = std::clamp(target, jm.min_pos, jm.max_pos);
       }
-      const double max_step = jm.vel_limit * velocity_scale_ * dt;
+      const double max_step = jm.target_slew * dt;
       if (std::isfinite(jm.cmd_sent)) {
         target = std::clamp(target, jm.cmd_sent - max_step, jm.cmd_sent + max_step);
       }
       jm.cmd_sent = target;
       const double err = target - jm.state_position;
       tau = jm.kp * err - jm.kd * jm.state_velocity + data_->qfrc_bias[jm.dof_adr];
-    }
-    if (jm.torque_limit > 0.0) {
-      tau = std::clamp(tau, -jm.torque_limit, jm.torque_limit);
     }
     data_->ctrl[jm.actuator] = tau;
   }

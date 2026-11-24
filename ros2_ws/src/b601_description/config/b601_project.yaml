@@ -44,7 +44,6 @@ robot:
 #   min_pos / max_pos     URDF limit 与 ros2_control 软限位，一改全改
 #   max_velocity          关节单位（rad/s 或 m/s），MoveIt 时间参数化与安全节点都用它
 #   max_effort            关节单位力矩，同时作为真机 torque_limit
-#   max_acceleration      MoveIt 规划用
 #   startup               上电/启动姿态（mock 初值 + 真机"以为在哪儿" + 安全节点警告基线）
 #   motor.*               仅 hardware:=dm 生效；scale 把电机 rad 换成关节单位
 #   control               false = 没有命令接口（mimic 从动指）
@@ -56,7 +55,7 @@ robot:
 #   · joint5: 实测 −0.730/+1.800 → 下限收到 −0.73（原来是 −1.57，比实测宽 0.84 ≈ 48°）
 #   · joint6/夹爪: 沿用更窄的一侧
 # 角速度（2026-11-21 按需求放宽）：joint1..6 统一 6.0 rad/s；夹爪 0.05 m/s 不变。
-#   ⚠ 安全节点的急停线 = estop_vel_ratio(1.0) × max_velocity → 现在 joint1..6 都是 6.0 rad/s，
+#   ⚠ 安全节点的急停线 = max_velocity → 现在 joint1..6 都是 6.0 rad/s，
 #     警告线 4.8 rad/s。放宽速度就放宽了急停门限，这是刻意的取舍，别再回头当成 bug。
 # ---------------------------------------------------------------------------
 joints:
@@ -69,7 +68,6 @@ joints:
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
     max_effort: 24.0
-    max_acceleration: 4.0
     startup: 0.0
     control: true
     motor:
@@ -93,7 +91,6 @@ joints:
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
     max_effort: 24.0
-    max_acceleration: 4.0
     startup: -0.3
     control: true
     motor:
@@ -117,7 +114,6 @@ joints:
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
     max_effort: 24.0
-    max_acceleration: 4.0
     startup: -0.6
     control: true
     motor:
@@ -141,7 +137,6 @@ joints:
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.37
     max_effort: 10.0
-    max_acceleration: 8.0
     startup: 0.0
     control: true
     motor:
@@ -165,7 +160,6 @@ joints:
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.37
     max_effort: 10.0
-    max_acceleration: 8.0
     startup: 0.0
     control: true
     motor:
@@ -189,7 +183,6 @@ joints:
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.37
     max_effort: 10.0
-    max_acceleration: 8.0
     startup: 0.0
     control: true
     motor:
@@ -210,7 +203,6 @@ joints:
     type: prismatic
     # 夹爪开合是正常操作：不产生"接近限位/离开启动位形"警告，但越限照样急停
     warn_near_limit: false
-    static_tolerance: 0.002      # m：夹爪总行程只有 0.05 m
     warn_pose_deviation: false
     warn_pos_margin: 0.005
     min_pos: 0.0
@@ -219,7 +211,6 @@ joints:
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.05
     max_effort: 10.0
-    max_acceleration: 0.2
     startup: 0.0
     control: true
     motor:
@@ -239,7 +230,6 @@ joints:
     label: 夹爪从动指
     type: prismatic
     warn_near_limit: false
-    static_tolerance: 0.002      # m：夹爪总行程只有 0.05 m
     warn_pose_deviation: false
     warn_pos_margin: 0.005
     min_pos: -0.05
@@ -248,7 +238,6 @@ joints:
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.05
     max_effort: 10.0
-    max_acceleration: 0.2
     startup: 0.0
     control: false
 
@@ -267,8 +256,6 @@ hardware:
     command_sign: 1.0           # 力矩**命令**：与关节正方向同号（实测；与 effort_sign 不同！）
                                 # ⚠ 2026-11-21：曾把反馈的 -1 误用到命令上 → PD 正反馈，
                                 #   真机首个 0.05 rad 动作 joint5 冲到 10.26 rad/s（被急停拦下）
-    velocity_scale: 0.2         # 全局速度缩放，首次上电建议 0.1
-    mit_arm_velocity_limit: 5.0  # 六轴 MIT 帧速度字段，rad/s
     watchdog_timeout: 0.5       # 超时无新命令 → 原地保持
     can_timeout_ms: 0           # 电机侧 CAN 超时报警（0 = 不设）
     max_write_failures: 20      # 连续写失败这么多次即停用硬件
@@ -303,6 +290,10 @@ hardware:
 # 控制器（ros2_control）
 # 位置模式用 arm/gripper；力控模式用 mit。同一时刻只加载其中一套。
 # ---------------------------------------------------------------------------
+target_slew:
+  revolute: 0.08   # rad/s
+  prismatic: 0.02  # m/s
+
 controllers:
   update_rate: 200
 
@@ -362,35 +353,30 @@ controllers:
     profiles:
       # 电机侧 MIT 初始配置，基于历史手臂参数并按协议范围约束阻尼。
       standard_mit:
-        # torque_limit 一律 ≤ 该关节 URDF 的 max_effort。
-        # 2026-11-23 按「MIT 模式下的电机力矩上限」定：**j1-j3(4340P)=24 N·m、j4-j7(4310)=10 N·m**
-        # （之前用的 10/7 是软件保守值，j3 斜坡期撞到 99% 限幅反而拖慢跟踪）。
-        # 历史上控制器写死 10，对 j4–j6 其实早就被插件按 7 夹断了 —— 现在显式取更严者。
         # kp_free/kd_free = **等待档**（上层无权威、可手推）；kd_free 取临界阻尼 2√(kp_free·I)：
         #   I=[0.111,0.414,0.297,0.047,0.021,0.0106] → ζ=1 时 [0.36,0.70,0.60,0.24,0.16,0.11]
         per_joint:
           joint1: {kp_hold: 6.0, kd_hold: 1.63, kp_move: 115.0, kd_move: 5.0, kp_free: 0.3, kd_free: 0.36,
-                   friction: 0.0,      torque_limit: 24.0, target_deadband: 0.01,
+                   friction: 0.0,
                    settle_band_min: 0.01, settle_band_max: 0.05}
           joint2: {kp_hold: 6.0, kd_hold: 3.15, kp_move: 265.0, kd_move: 5.0, kp_free: 0.3, kd_free: 0.70,
-                   friction: -0.45533, torque_limit: 24.0, target_deadband: 0.01,
+                   friction: -0.45533,
                    settle_band_min: 0.01, settle_band_max: 0.05}
           joint3: {kp_hold: 6.0, kd_hold: 2.67, kp_move: 190.0, kd_move: 5.0, kp_free: 0.3, kd_free: 0.60,
-                   friction: 0.0,      torque_limit: 24.0, target_deadband: 0.01,
+                   friction: 0.0,
                    settle_band_min: 0.01, settle_band_max: 0.05}
           joint4: {kp_hold: 2.0, kd_hold: 0.37, kp_move: 200.0, kd_move: 3.4, kp_free: 0.3, kd_free: 0.24,
-                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.01,
+                   friction: 0.0,
                    settle_band_min: 0.01, settle_band_max: 0.05}
           joint5: {kp_hold: 1.0, kd_hold: 0.21, kp_move: 36.0, kd_move: 1.2, kp_free: 0.3, kd_free: 0.16,
-                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.01,
+                   friction: 0.0,
                    settle_band_min: 0.01, settle_band_max: 0.05}
           joint6: {kp_hold: 0.8, kd_hold: 0.13, kp_move: 28.0, kd_move: 0.82, kp_free: 0.3, kd_free: 0.11,
-                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.01,
+                   friction: 0.0,
                    settle_band_min: 0.01, settle_band_max: 0.05}
         # 电机 MIT 协议 Kd 范围为 [0, 5]。手臂五姿态真机已运行，夹爪驱动器增益量化见测试报告。
         group:
           # ---- 指令层（Phase 1）：决定"怎么走"和"到没到" ----
-          target_slew: 0.08            # 关节单位/s：目标一律斜坡推进，实物不跳变
           settle_band_pct: 0.05       # 误差带 = 5% × 本次指令位移（再夹到逐关节的 min/max）
           settle_sec: 3.0             # 全部关节连续在带内这么久 → 整组 done
           kp_up_sec: 0.8              # free → track 的刚度上升时间（线性速率）
@@ -419,10 +405,9 @@ controllers:
         per_joint:
           finger_left: {kp_hold: 65000.0, kd_hold: 12000.0, kp_move: 65000.0, kd_move: 12000.0,
                         kp_free: 50.0, kd_free: 2.0,
-                        friction: 0.0, torque_limit: 10.0, target_deadband: 0.0001,
+                        friction: 0.0,
                         settle_band_min: 0.0005, settle_band_max: 0.0025}
         group:
-          target_slew: 0.02           # m/s：夹爪合拢速度（真机 vel 上限 0.05）
           settle_band_pct: 0.05
           settle_sec: 2.0
           kp_up_sec: 0.5
@@ -461,8 +446,8 @@ controllers:
 # default_*_scaling 是教学默认：只用 20% 极限速度，便于观察
 # ---------------------------------------------------------------------------
 moveit:
-  default_velocity_scaling_factor: 0.2
-  default_acceleration_scaling_factor: 0.2
+  default_velocity_scaling_factor: 1.0
+  default_acceleration_scaling_factor: 1.0
   trajectory_execution:
     allowed_execution_duration_scaling: 1.5
     allowed_goal_duration_margin: 0.5
@@ -583,9 +568,8 @@ recenter:
 #   只有急停会动硬件；正常与警告都允许继续驱动机械臂。
 #
 #   ESTOP 触发条件（只看这两类，别往里加别的，否则会误停）：
-#     · 角度越限：pos < min_pos - angle.estop_margin  或  pos > max_pos + angle.estop_margin
-#     · 角速度越限：|vel| > velocity.estop_ratio × max_velocity
-#                   （如配 velocity.estop_absolute 则取两者更严的那个）
+#     · 角度越限：pos < min_pos 或 pos > max_pos
+#     · 角速度越限：|vel| > max_velocity
 #   WARNING 触发条件（不下发任何停机动作）：
 #     · 角度接近限位（距限位 < 该关节的 warn_pos_margin，默认 angle.warn_margin）
 #       —— 每个关节可在 joints 段用 warn_near_limit / warn_pos_margin 单独开关与调值
@@ -618,21 +602,9 @@ safety:
 
   angle:
     warn_margin: 0.12            # rad（夹爪按 m 解释，见 joint 单位）
-    estop_margin: 0.0            # 0 = 一到硬限位就急停
-    # 【静止零位漂移许用值】rad / m。手臂静止顶在机械停止位上时，实测值可能比配置限位
-    # 多出一点点（2026-11-21 实测 joint2 顶停止位读到 +0.026，被激活检查拦下）。
-    # 这个量只作为**静止态的容差**给两处用：
-    #   ① 硬件插件 on_activate 的"超限拒绝使能"检查；
-    #   ② 安全节点的"角度越限急停"判定。
-    # 它**不**放宽命令夹紧（命令永远夹在真实限位内），也**不**影响速度保护。
-    # 真正的越限保护仍由"物理停止位 + 速度急停"兜底，所以 0.05 是安全的。
-    # 逐关节可在 joints.<name>.static_tolerance 覆盖（夹爪单位是 m，必须给更小的值）
-    static_tolerance: 0.05
 
   velocity:
     warn_ratio: 0.80
-    estop_ratio: 1.00
-    estop_absolute: 0.0          # rad/s，0 = 不启用绝对上限
 
   pose:
     warn_on_deviation: true
@@ -660,9 +632,8 @@ tools:
   dm_mit_move:
     ready_timeout_sec: 15.0
     poll_sec: 0.1
-    slew: 0.2
     rate: 50.0
-    max_delta: 0.15
+
     tolerance: 0.05
     settle: 1.0
     log_interval_sec: 1.0
@@ -715,7 +686,6 @@ tools:
     temp_limit: 27.0
     hold_only: 0.0
     state_machine:
-      reference_slew_rad_s: 0.5
       parameter_timeout_sec: 5.0
       warmup_sec: 1.0
       claim_timeout_sec: 2.0
@@ -731,7 +701,6 @@ tools:
         joint3: 0.6
       mixed_settle_timeout_sec: 14.0
       mixed_min_sec: 3.6
-      deadband_observation_sec: 1.0
     mit_frame:
       warmup_sec: 0.7
       hold_sec: 0.5
@@ -785,7 +754,6 @@ tools:
     kp_move: 60.0
     move_threshold_rad: 0.08
     hold_threshold_rad: 0.03
-    torque_limit_nm: 15.0
     substeps: 10
     snapshot_divider: 20
     start_rad:
@@ -852,9 +820,6 @@ tools:
     gripper_overrun_m: 0.01
     dual_fault_speed_ratio: 2.0
     normal_speed_ratio: 0.5
-    gripper_encoder_noise_m: 1.9e-06
-    measured_static_drift_rad: 0.0261
-    static_overrun_rad: 0.06
     limit_encoder_noise_rad: 1.0e-06
   dm_first_move:
     state_timeout_sec: 5.0
@@ -875,10 +840,10 @@ tools:
     dx: 0.0
     dy: 0.0
     dz: 0.02
-    scaling: 0.15
+    scaling: 1.0
     tol: 0.01
     ang_tol: 0.15
-    max_delta: 0.5
+
     planning_time_sec: 5.0
     server_timeout_sec: 15.0
     execution_request_timeout_sec: 10.0
@@ -895,10 +860,9 @@ tools:
     settled_window_sec: 0.4
     minimum_settle_timeout_sec: 6.0
     step_poll_sec: 0.02
-    slew: 0.15
     settle: 1.5
     sample_sec: 1.0
-    max_delta: 0.6
+
     minimum_move_duration_sec: 1.5
     goal_time_tolerance_sec: 2.0
     server_timeout_sec: 10.0
@@ -913,8 +877,6 @@ tools:
     probe_timeout_sec: 25
 implementation:
   dm:
-    default_joint_velocity_rad_s: 5.0
-    minimum_velocity_scale: 0.01
     minimum_log_rate_hz: 1.0
     mode_read_timeout_ms: 500
     feedback_poll_ms: 10
@@ -928,7 +890,6 @@ implementation:
     write_period_min_sec: 0.0001
     write_period_max_sec: 0.1
   mujoco:
-    velocity_scale: 1.0
     effort_sign: 1.0
     verbose: 0
     physics_wait_cycles: 2000
@@ -938,7 +899,6 @@ implementation:
     startup_log_steps: 20
     diagnostic_log_steps: 200
   mit:
-    legacy_torque_default: 20.0
     gravity_scale_max: 1.5
     friction_scale_max: 2.0
     settle_sec_min: 0.05
@@ -1599,22 +1559,22 @@ nodes:
     tol: 0.01
     ang_tol: 0.1
     allowed_planning_time: 5.0
-    velocity_scaling: 0.2
-    acceleration_scaling: 0.2
+    velocity_scaling: 1.0
+    acceleration_scaling: 1.0
     server_timeout_sec: 10.0
     request_timeout_sec: 20.0
     result_grace_sec: 180.0
     planning_attempts: 10
   trajectory_utils:
-    limit_margin_rad: 0.02
+
     goal_request_timeout_sec: 15.0
     goal_request_attempts: 2
 
 validation:
   pos_vel_five_poses:
-    slew_rad_s: 0.15
+
     sample_sec: 1.0
-    max_delta_rad: 0.62
+
     targets:
     - [0.00, -0.50, -0.60, 0.00, 0.00, 0.00]
     - [0.40, -0.90, -1.10, 0.40, 0.30, 0.50]
@@ -1630,8 +1590,6 @@ validation:
     - 0.0
     - 0.0
     - 0.0
-    arm_slew_rad_s: 0.08
-    gripper_slew_m_s: 0.008
     publish_rate_hz: 50
     poses:
     - name: P1
@@ -1705,7 +1663,6 @@ validation:
     output_dir: .verify/mit_6plus1_five_poses_current
     hardware_retest:
       output_dir: .verify/mit_hardware_five_poses
-      gripper_tracking_ceiling_m: 0.0025
       arm_step_error_fraction: 0.05
       arm_min_error_band_rad: 0.01
       joint_error_bands:
@@ -1713,9 +1670,6 @@ validation:
           step_error_fraction: 0.1
           min_error_band_rad: 0.05
       gripper_max_error_m: 0.003
-      gripper_slew_m_s: 0.001
-      gripper_measured_speed_ceiling_m_s: 0.008
-      arm_measured_speed_ceiling_rad_s: 1.5
       initial_arm_tolerance_rad: 0.05
       initial_gripper_tolerance_m: 0.003
       minimum_motion_samples: 10
@@ -1724,17 +1678,11 @@ validation:
       small_step_rad: 0.035
       small_min_actual_rad: 0.018
       small_max_error_rad: 0.08
-      small_slew_rad_s: 0.04
-      approach_slew_rad_s: 0.06
-      park_slew_rad_s: 0.045
       park_settle_sec: 3.0
-      park_fine_max_rad: 0.035
-      park_fine_slew_rad_s: 0.025
+
       park_fine_settle_sec: 2.5
       state_average_sec: 0.35
       observation_pause_sec: 0.5
       readonly_duration_sec: 4.0
       ros_domain_id: 191
-      estop_arm_speed_rad_s: 0.65
-      gripper_torque_ceiling_nm: 0.5
       gripper_parking_target_m: 0.0

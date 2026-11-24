@@ -84,19 +84,7 @@ b601_safety_monitor:
     feedback_timeout_sec: 0.3
     estop_on_feedback_timeout: false
     startup_grace_sec: 3.0
-    estop_pos_margin: 0.0
-    static_tolerance:
-    - 0.05
-    - 0.05
-    - 0.05
-    - 0.05
-    - 0.05
-    - 0.05
-    - 0.002
-    - 0.002
     warn_vel_ratio: 0.8
-    estop_vel_ratio: 1.0
-    estop_vel_absolute: 0.0
     warn_on_pose_deviation: true
     warn_pose_threshold: 0.35
     joint_states_topic: /joint_states

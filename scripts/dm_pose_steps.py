@@ -16,8 +16,7 @@
 
 安全：
     · 目标必须先过 `trajectory_utils.check_limits`（越界直接拒发，不截断）；
-    · 单关节位移不得超过 `--max-delta`（默认 0.6 rad，防手误写错一位数）；
-    · 轨迹按 `--slew`（默认 0.15 rad/s）算时长，绝不做阶跃；
+    · 轨迹按统一目标斜率计算时长；
     · 全程盯 `/b601_safety/status`：EMERGENCY_STOP 立刻停止后续姿态。
 """
 
@@ -150,8 +149,8 @@ class PoseSteps(Node):
             rclpy.spin_once(self, timeout_sec=SETTINGS["step_poll_sec"])
 
     def run_pose(self, index: int, total: int, target: dict[str, float],
-                 slew: float, settle: float, sample_sec: float,
-                 max_delta: float, preview_start: dict[str, float] | None) -> tuple[bool, dict[str, tuple]]:
+                 settle: float, sample_sec: float,
+                 preview_start: dict[str, float] | None) -> tuple[bool, dict[str, tuple]]:
         start = {n: self.current[n] for n in tu.ARM_JOINTS} if preview_start is None else preview_start
         want = {n: target.get(n, start[n]) for n in tu.ARM_JOINTS}
 
@@ -160,14 +159,9 @@ class PoseSteps(Node):
             for p in problems:
                 self.get_logger().error(f"[{index}/{total}] 拒发：{p}")
             return False, {}
-        over = [n for n in tu.ARM_JOINTS if abs(want[n] - start[n]) > max_delta + 1e-9]
-        if over:
-            self.get_logger().error(
-                f"[{index}/{total}] 拒发：{', '.join(over)} 位移超过 --max-delta {max_delta} rad")
-            return False, {}
-
         move = max(abs(want[n] - start[n]) for n in tu.ARM_JOINTS)
-        dur = max(move / max(slew, PROJECT["implementation"]["mit"]["slew_min"]),
+        slew = PROJECT["target_slew"]["revolute"]
+        dur = max(move / slew,
                   SETTINGS["minimum_move_duration_sec"])
         self.get_logger().info(
             f"[{index}/{total}] " + ", ".join(f"{n}={want[n]:+.3f}" for n in tu.ARM_JOINTS)
@@ -246,10 +240,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="真机多姿态定位精度测试（稳态误差判据）")
     ap.add_argument("--poses", required=True, help="姿态用 ; 分隔，例：joint2=-0.9;joint1=0.3,joint5=0.2")
     ap.add_argument("--controller", default=PROJECT["controllers"]["arm"]["name"])
-    ap.add_argument("--slew", type=float, default=SETTINGS["slew"], help="轨迹平均速率 rad/s（默认 0.15，很慢）")
     ap.add_argument("--settle", type=float, default=SETTINGS["settle"], help="到位后等待稳定时间 s")
     ap.add_argument("--sample-sec", type=float, default=SETTINGS["sample_sec"], help="稳态采样时长 s")
-    ap.add_argument("--max-delta", type=float, default=SETTINGS["max_delta"], help="单关节允许的最大位移 rad")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不发指令")
     args = ap.parse_args()
 
@@ -275,8 +267,7 @@ def main() -> int:
         preview_start = {n: node.current[n] for n in tu.ARM_JOINTS} if args.dry_run else None
         for i, target in enumerate(poses, 1):
             ok, stats = node.run_pose(
-                i, len(poses), target, args.slew, args.settle, args.sample_sec,
-                args.max_delta, preview_start)
+                i, len(poses), target, args.settle, args.sample_sec, preview_start)
             if args.dry_run:
                 if not ok:
                     failures += 1

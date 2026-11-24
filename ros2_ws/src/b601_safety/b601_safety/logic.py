@@ -67,22 +67,15 @@ class SafetyLimits:
     # 逐关节：是否启用"离开启动位形"警告
     warn_pose_deviation_joint: list[bool] = True
 
-    estop_pos_margin: float | None = None
-    # 静止零位漂移容差（rad/m）：手臂顶在机械停止位上时实测值可能略微越界，
-    # 这段时间内不判越限（否则刚上电就被自己的零位漂移急停）。真实越限仍由
-    # 物理停止位 + 速度急停兜底。
-    static_tolerance: float | list[float] | None = None
     warn_vel_ratio: float | None = None
-    estop_vel_ratio: float | None = None
-    estop_vel_absolute: float | None = None
     # 全局总开关 + 偏差阈值
     warn_on_pose_deviation: bool | None = None
     warn_pose_threshold: float | None = None
 
     def __post_init__(self) -> None:
         missing = [name for name in (
-            "warn_pos_margin", "estop_pos_margin", "static_tolerance", "warn_vel_ratio",
-            "estop_vel_ratio", "estop_vel_absolute", "warn_on_pose_deviation", "warn_pose_threshold",
+            "warn_pos_margin", "warn_vel_ratio",
+            "warn_on_pose_deviation", "warn_pose_threshold",
         ) if getattr(self, name) is None]
         if missing:
             from b601_description.project_config import load_project_config
@@ -90,16 +83,14 @@ class SafetyLimits:
             cfg = load_project_config()["safety"]
             angle, velocity, pose = cfg["angle"], cfg["velocity"], cfg["pose"]
             defaults = {
-                "warn_pos_margin": angle["warn_margin"], "estop_pos_margin": angle["estop_margin"],
-                "static_tolerance": angle["static_tolerance"], "warn_vel_ratio": velocity["warn_ratio"],
-                "estop_vel_ratio": velocity["estop_ratio"], "estop_vel_absolute": velocity["estop_absolute"],
+                "warn_pos_margin": angle["warn_margin"],
+                "warn_vel_ratio": velocity["warn_ratio"],
                 "warn_on_pose_deviation": pose["warn_on_deviation"], "warn_pose_threshold": pose["warn_deviation"],
             }
             for name in missing:
                 setattr(self, name, defaults[name])
         n = len(self.names)
         self.warn_pos_margin = [float(v) for v in _broadcast(self.warn_pos_margin, n)]
-        self.static_tolerance = [float(v) for v in _broadcast(self.static_tolerance, n)]
         self.warn_near_limit = [bool(v) for v in _broadcast(self.warn_near_limit, n)]
         self.warn_pose_deviation_joint = [
             bool(v) for v in _broadcast(self.warn_pose_deviation_joint, n)
@@ -112,10 +103,7 @@ class SafetyLimits:
             return None
 
     def velocity_estop_threshold(self, i: int) -> float:
-        limit = self.estop_vel_ratio * self.vel_max[i]
-        if self.estop_vel_absolute > 0.0:
-            limit = min(limit, self.estop_vel_absolute)
-        return limit
+        return self.vel_max[i]
 
     def velocity_warn_threshold(self, i: int) -> float:
         return self.warn_vel_ratio * self.vel_max[i]
@@ -166,10 +154,8 @@ def evaluate(
             continue
 
         # ---- 急停条件 ①：角度越限 ----
-        # 实际判据 = 限位 + 急停外扩 + 静止零位漂移容差
-        slack = limits.estop_pos_margin + limits.static_tolerance[i]
-        low_limit = limits.pos_min[i] - slack
-        high_limit = limits.pos_max[i] + slack
+        low_limit = limits.pos_min[i]
+        high_limit = limits.pos_max[i]
         over_low = pos < low_limit - EPS
         over_high = pos > high_limit + EPS
         if over_low or over_high:

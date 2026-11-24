@@ -28,22 +28,11 @@ OBSERVED = [*NAMES, ROBOT["mimic_joint"]]
 CRITERIA = PLAN["criteria"]
 
 
-def target_deadbands():
-    mit = CONFIG["controllers"]["mit"]
-    return {
-        name: mit["profiles"][instance["profile"]]["per_joint"][name]["target_deadband"]
-        for instance in mit["instances"].values()
-        for name in instance["joints"]
-    }
-
-
 class FivePoseHarness(Harness):
     def __init__(self):
         super().__init__("b601_mit_arm", OBSERVED)
         self.gripper = self.create_publisher(JointState, "/b601_mit_gripper/joint_target", 10)
         self.gripper_ff = []
-        deadbands = target_deadbands()
-        self.arm_deadbands = [deadbands[name] for name in ROBOT["arm_joints"]]
         self.create_subscription(
             Float64MultiArray, "/b601_mit_gripper/ff", self.on_gripper_ff, 10)
 
@@ -52,17 +41,6 @@ class FivePoseHarness(Harness):
 
     def command(self, values):
         self.pub.publish(JointState(name=NAMES[:6], position=values[:6]))
-        self.gripper.publish(JointState(name=[NAMES[6]], position=values[6:7]))
-
-    def command_path(self, values, goal, *, terminal):
-        arm_values = values[:6]
-        # Leave the last arm update outside the controller's deadband so that
-        # the exact endpoint triggers an update of the entire arm group.
-        if terminal or any(
-            abs(target - value) > deadband
-            for target, value, deadband in zip(goal, arm_values, self.arm_deadbands)
-        ):
-            self.pub.publish(JointState(name=NAMES[:6], position=arm_values))
         self.gripper.publish(JointState(name=[NAMES[6]], position=values[6:7]))
 
     def check(self):
@@ -95,16 +73,13 @@ def validate_configuration(controllers_file=None):
         assert params["joints"] == joints and params["motor_impedance"] and not params["free_enabled"]
         assert params["gravity_scale"] == params["friction_scale"] == params["task_torque_timeout_sec"] == 0
         assert not params["use_gravity"]
-    deadbands = target_deadbands()
-    deadband = [deadbands[name] for name in NAMES]
-    assert tool_cfg["b601_mit_arm"]["ros__parameters"]["target_deadband"] == deadband[:-1]
     prior = PLAN["start"]
     for pose in PLAN["poses"]:
         for i, name in enumerate(NAMES):
             bound = CONFIG["joints"][name]
             target = pose["target"][i]
             assert bound["min_pos"] <= target <= bound["max_pos"], (pose["name"], name, target)
-            assert abs(target - prior[i]) > deadband[i]
+            assert target != prior[i]
         prior = pose["target"]
 
 
@@ -188,8 +163,8 @@ def follow_plan(node, writer):
         displacement = [end - start for start, end in zip(previous, target)]
         beginning = node.average(node.samples[-PLAN["steady_sample_count"]:])
         duration = 1.875 * max(
-            max(map(abs, displacement[:6])) / PLAN["arm_slew_rad_s"],
-            abs(displacement[6]) / PLAN["gripper_slew_m_s"],
+            max(map(abs, displacement[:6])) / CONFIG["target_slew"]["revolute"],
+            abs(displacement[6]) / CONFIG["target_slew"]["prismatic"],
         )
         steps = math.ceil(duration * PLAN["publish_rate_hz"])
         tick = time.monotonic()
@@ -201,7 +176,7 @@ def follow_plan(node, writer):
             reference = target if terminal else [
                 start + delta * blend for start, delta in zip(previous, displacement)
             ]
-            node.command_path(reference, target, terminal=terminal)
+            node.command(reference)
             tick += 1 / PLAN["publish_rate_hz"]
             node.hold(max(0.0, tick - time.monotonic()))
         node.hold(PLAN["settle_sec"])

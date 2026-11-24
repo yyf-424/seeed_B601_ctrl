@@ -39,9 +39,6 @@
         <command_interface name="effort"/>
         <command_interface name="kp"/>
         <command_interface name="kd"/>
-        <xacro:if value="${hardware != 'mock' and 'mit_arm_velocity_limit' in cfg['hardware']['dm']}">
-          <param name="mit_velocity_limit">${cfg['hardware']['dm']['mit_arm_velocity_limit']}</param>
-        </xacro:if>
       </xacro:if>
       <xacro:if value="${dm_command_mode == 'mit_torque'}">
         <command_interface name="effort"/>
@@ -77,14 +74,13 @@
         <param name="kp">${mt['kp']}</param>
         <param name="kd">${mt['kd']}</param>
         <param name="vel_limit">${jc['max_velocity']}</param>
+        <param name="target_slew">${cfg['target_slew'][jc['type']]}</param>
         <param name="min_pos">${jc['min_pos']}</param>
         <param name="max_pos">${jc['max_pos']}</param>
         <param name="torque_limit">${jc['max_effort']}</param>
         <!-- 反馈跳变门限（rad/周期）：显式钉死，避免放宽 vel_limit 时把坏帧守卫也放松 -->
         <param name="feedback_jump_limit">${jc['feedback_jump_limit']}</param>
-        <!-- 静止零位漂移许用值：手臂顶在机械停止位上时实测值可能略微越界（实测 0.026）。
              只用激活检查，命令夹紧仍按真实限位。夹爪单位是 m，真值里单独给 0.002。 -->
-        <param name="limit_tolerance">${jc.get('static_tolerance', cfg['safety']['angle']['static_tolerance'])}</param>
       </xacro:if>
 
       <!-- 仿真后端共享的物理参数：kp/kd 用作插件内部 PD，min/max_pos 作软限位，
@@ -94,6 +90,7 @@
         <param name="kp">${mt['kp']}</param>
         <param name="kd">${mt['kd']}</param>
         <param name="vel_limit">${jc['max_velocity']}</param>
+        <param name="target_slew">${cfg['target_slew'][jc['type']]}</param>
         <param name="min_pos">${jc['min_pos']}</param>
         <param name="max_pos">${jc['max_pos']}</param>
         <param name="torque_limit">${jc['max_effort']}</param>
@@ -147,7 +144,6 @@
           <!-- 命令与反馈的符号**不同**：反馈反号(-1)，命令同号(+1) -->
           <param name="command_sign">${HW['command_sign']}</param>
           <!-- 全局速度缩放：首次上真机用 0.1，确认后再放开 -->
-          <param name="velocity_scale">${HW['velocity_scale']}</param>
           <!-- 超过该时长没有新命令 → 原地保持当前位置 -->
           <param name="watchdog_timeout">${HW['watchdog_timeout']}</param>
           <!-- 电机侧 CAN 超时报警（0 = 不设置） -->
@@ -158,9 +154,7 @@
           <param name="feedback_wait_ms">${HW['feedback_wait_ms']}</param>
           <param name="request_feedback">${HW['request_feedback']}</param>
           <param name="feedback_divider">${HW['feedback_divider']}</param>
-          <!-- 静止零位漂移许用值（rad/m）：手臂顶在机械停止位上时实测值可能略微越界，
                激活检查按 [min_pos - tol, max_pos + tol] 判。命令夹紧仍按真实限位。 -->
-          <param name="limit_tolerance">${CFG['safety']['angle']['static_tolerance']}</param>
           <param name="mode_switch_timeout_ms">${HW['mode_switch_timeout_ms']}</param>
           <!-- CSV 记录（速度/MIT 数据留痕）：留空 = 关闭。
                开启后每采样周期写一行，含电机原始 pos/vel/torq 与过滤后的关节状态、命令值。 -->
@@ -185,7 +179,6 @@
           </xacro:unless>
           <param name="command_mode">${eff_mode}</param>
           <!-- 仿真里不需要额外收紧限速（1.0 = 只用 vel_limit × dt） -->
-          <param name="velocity_scale">${CFG['implementation']['mujoco']['velocity_scale']}</param>
           <!-- ⚠ 仿真后端的力矩符号与真机**不同**：
                达妙电机的 tau 命令与关节正方向力矩反号 → 真机用 effort_sign=-1；
                而 MuJoCo 的执行器直接吃"关节约定"的力矩 → 这里必须是 +1。
@@ -248,8 +241,6 @@
           <param name="initial_value">${initial_positions['finger_left']}</param>
         </state_interface>
         <param name="initial_position">${initial_positions['finger_left']}</param>
-        <!-- 静止零位漂移许用值（夹爪单位 m，真值里给 0.002） -->
-        <param name="limit_tolerance">${J['finger_left'].get('static_tolerance', CFG['safety']['angle']['static_tolerance'])}</param>
         <state_interface name="velocity">
           <param name="initial_value">0.0</param>
         </state_interface>
@@ -264,6 +255,7 @@
           <param name="kp">${FLM['kp']}</param>
           <param name="kd">${FLM['kd']}</param>
           <param name="vel_limit">${FL['max_velocity']}</param>
+          <param name="target_slew">${CFG['target_slew'][FL['type']]}</param>
           <param name="min_pos">${FL['min_pos']}</param>
           <param name="max_pos">${FL['max_pos']}</param>
           <param name="torque_limit">${FL['max_effort']}</param>
@@ -273,6 +265,7 @@
           <param name="kp">${FLM['kp']}</param>
           <param name="kd">${FLM['kd']}</param>
           <param name="vel_limit">${FL['max_velocity']}</param>
+          <param name="target_slew">${CFG['target_slew'][FL['type']]}</param>
           <param name="min_pos">${FL['min_pos']}</param>
           <param name="max_pos">${FL['max_pos']}</param>
           <param name="torque_limit">${FL['max_effort']}</param>
@@ -293,8 +286,6 @@
         <state_interface name="velocity">
           <param name="initial_value">0.0</param>
         </state_interface>
-        <!-- 静止零位漂移许用值（夹爪单位 m，真值里给 0.002） -->
-        <param name="limit_tolerance">${J['finger_right'].get('static_tolerance', CFG['safety']['angle']['static_tolerance'])}</param>
       </joint>
     </ros2_control>
   </xacro:macro>

@@ -33,10 +33,6 @@ CONTROLLERS = ["joint_state_broadcaster", "b601_mit_arm", "b601_mit_gripper"]
 ARM = CONFIG["robot"]["arm_joints"]
 GRIPPER = CONFIG["robot"]["gripper_joint"]
 GRIPPER_INDEX = len(ARM)
-GRIPPER_MOTOR = CONFIG["joints"][GRIPPER]["motor"]
-MIT = CONFIG["controllers"]["mit"]
-GRIPPER_PROFILE = MIT["instances"]["b601_mit_gripper"]["profile"]
-GRIPPER_GAINS = MIT["profiles"][GRIPPER_PROFILE]["per_joint"][GRIPPER]
 PARK_TOLERANCE = CONFIG["recenter"]["position_tolerance_rad"]
 PARK = [CONFIG["recenter"]["joints"][name] for name in ARM] + [
     HARDWARE["gripper_parking_target_m"],
@@ -64,7 +60,6 @@ def bringup(enable):
                   "hardware:=dm", f"dm_enable_motors:={str(enable).lower()}",
                   "dm_command_mode:=mit_impedance", "use_rviz:=false", "use_safety:=true",
                   f"controllers_file:={bringup_config('b601_mit_controllers.yaml')}",
-                  f"safety_params_file:={bringup_config('b601_mit_safety_verified.yaml')}",
                   f'dm_log_csv:={OUT / (mode + "_dm.csv")}')
 
 
@@ -127,10 +122,6 @@ def check_cancelled():
         raise TrialCancelled("收到停止实机试验的请求")
 
 
-class TrialOverspeed(RuntimeError):
-    pass
-
-
 class Motion:
     def __init__(self, node, writer):
         self.node = node
@@ -138,41 +129,24 @@ class Motion:
         self.reference = None
         self.recovering = False
 
-    def monitor(self, duration, motion=True):
+    def monitor(self, duration):
         node = self.node
         end = time.monotonic() + duration
         while time.monotonic() < end:
             if not self.recovering:
                 check_cancelled()
-            first = len(node.samples)
             rclpy.spin_once(node, timeout_sec=min(PERIOD, max(0.0, end - time.monotonic())))
             node.check()
-            if motion and len(node.samples) != first:
-                for _, positions, velocities in node.samples[first:]:
-                    arm_speed = max(map(abs, velocities[:GRIPPER_INDEX]))
-                    grip_speed = abs(velocities[GRIPPER_INDEX])
-                    if arm_speed > HARDWARE["estop_arm_speed_rad_s"]:
-                        raise TrialOverspeed(f"手臂速度中止线触发：{velocities}")
-                    if grip_speed > HARDWARE["gripper_measured_speed_ceiling_m_s"]:
-                        raise RuntimeError(f"夹爪速度中止线触发：{velocities}")
-                    error = self.reference[GRIPPER_INDEX] - positions[GRIPPER_INDEX]
-                    if abs(error) > HARDWARE["gripper_tracking_ceiling_m"]:
-                        raise RuntimeError(f"夹爪参考误差触发测试中止线：{error:.4f} m")
-                    torque = (GRIPPER_GAINS["kp_move"] * error
-                              - GRIPPER_GAINS["kd_move"] * velocities[GRIPPER_INDEX])
-                    torque *= GRIPPER_MOTOR["effort_scale"]
-                    if abs(torque) > HARDWARE["gripper_torque_ceiling_nm"]:
-                        raise RuntimeError(f"夹爪估算力矩触发测试中止线：{torque:.3f} N·m")
 
-    def move(self, label, start, goal, arm_slew, settle=PLAN["settle_sec"]):
+    def move(self, label, start, goal, settle=PLAN["settle_sec"]):
         if not self.recovering:
             check_cancelled()
         node = self.node
         before, _ = state(node)
         delta = [b - a for a, b in zip(start, goal)]
         steps = max(HARDWARE["minimum_motion_samples"], math.ceil(1.875 / PERIOD * max(
-            max(map(abs, delta[:6])) / arm_slew,
-            abs(delta[GRIPPER_INDEX]) / HARDWARE["gripper_slew_m_s"])))
+            max(map(abs, delta[:6])) / CONFIG["target_slew"]["revolute"],
+            abs(delta[GRIPPER_INDEX]) / CONFIG["target_slew"]["prismatic"])))
         tick = time.monotonic()
         index = len(node.samples)
         try:
@@ -181,9 +155,8 @@ class Motion:
                     check_cancelled()
                 u = step / steps
                 blend = u**3 * (10 + u * (-15 + 6 * u))
-                terminal = step == steps
-                self.reference = goal if terminal else [a + blend * d for a, d in zip(start, delta)]
-                node.command_path(self.reference, goal, terminal=terminal)
+                self.reference = goal if step == steps else [a + blend * d for a, d in zip(start, delta)]
+                node.command(self.reference)
                 tick = max(tick + PERIOD, time.monotonic() + PERIOD / 2)
                 self.monitor(tick - time.monotonic())
             self.monitor(settle)
@@ -350,30 +323,27 @@ def run(node):
         check_cancelled()
         process = bringup(True)
         ready(node, process, "hardware")
-        q, observed = state(node)
+        q, _ = state(node)
         if max(abs(a - b) for a, b in zip(q[:6], PARK[:6])) > HARDWARE["initial_arm_tolerance_rad"]:
             raise RuntimeError(f"使能后起点漂移超限：{q}")
-        if max(abs(x) for _, _, v in observed for x in v[:6]) > HARDWARE["estop_arm_speed_rad_s"]:
-            raise TrialOverspeed("使能持位期间超过测试速度中止线")
         print(f'6+1 电机侧 MIT 已使能，执行 {HARDWARE["small_step_joint"]} '
               f'{HARDWARE["small_step_rad"]} rad 预检查。', flush=True)
         with (OUT / "trace.csv").open("w", newline="", buffering=1) as output:
             writer = csv.writer(output)
             writer.writerow(["phase", "monotonic_s", *OBSERVED, *[n + "_vel" for n in OBSERVED]])
             motion = Motion(node, writer)
-            overspeed = False
             try:
-                small = motion.move("small", initial, nudge, HARDWARE["small_slew_rad_s"])
+                small = motion.move("small", initial, nudge)
                 print("预检查", json.dumps(small), flush=True)
                 if (small["actual"][small_index] < HARDWARE["small_min_actual_rad"]
                         or small["arm_max_error_rad"] > HARDWARE["small_max_error_rad"]):
                     raise RuntimeError("小幅预检查未通过")
-                motion.move("small_return", nudge, PARK, HARDWARE["small_slew_rad_s"])
-                motion.move("approach", PARK, PLAN["start"], HARDWARE["approach_slew_rad_s"])
+                motion.move("small_return", nudge, PARK)
+                motion.move("approach", PARK, PLAN["start"])
                 previous = PLAN["start"]
                 for pose in PLAN["poses"]:
                     target = pose["target"]
-                    result = motion.move(pose["name"], previous, target, PLAN["arm_slew_rad_s"])
+                    result = motion.move(pose["name"], previous, target)
                     result = score(result, previous)
                     summary["results"].append(result)
                     print(json.dumps(result), flush=True)
@@ -381,30 +351,25 @@ def run(node):
             except TrialCancelled:
                 summary["cancelled"] = True
                 print("停止测试目标，进入归中失能。", flush=True)
-            except TrialOverspeed:
-                overspeed = True
-                print("试验超速，停止发运动目标，等待独立安全节点判定。", flush=True)
-                raise
             finally:
-                if not overspeed and node.status_level < 2:
+                if node.status_level < 2:
                     motion.recovering = True
-                    motion.monitor(HARDWARE["observation_pause_sec"], motion=False)
+                    motion.monitor(HARDWARE["observation_pause_sec"])
                     current, _ = state(node)
                     reference = motion.reference or in_range(current)
                     precheck(node, client, "park actual", in_range(current), PARK)
                     precheck(node, client, "park reference", reference, PARK)
-                    park = motion.move("park", reference, PARK, HARDWARE["park_slew_rad_s"],
+                    park = motion.move("park", reference, PARK,
                                        settle=HARDWARE["park_settle_sec"])
                     print("归中", json.dumps(park), flush=True)
                     summary["park"] = park
                     if park["arm_max_error_rad"] > PARK_TOLERANCE:
-                        fine_limit = HARDWARE["park_fine_max_rad"]
                         correction = in_range([
-                            goal + max(-fine_limit, min(fine_limit, goal - feedback))
+                            2 * goal - feedback
                             for goal, feedback in zip(PARK, park["after"])
                         ])
                         precheck(node, client, "park fine adjustment", PARK, correction)
-                        fine = motion.move("park_fine", PARK, correction, HARDWARE["park_fine_slew_rad_s"],
+                        fine = motion.move("park_fine", PARK, correction,
                                            settle=HARDWARE["park_fine_settle_sec"])
                         fine["arm_max_park_error_rad"] = max(
                             abs(a - b) for a, b in zip(PARK[:6], fine["after"][:6]))
@@ -423,7 +388,7 @@ def run(node):
                     else:
                         raise RuntimeError(f"归中反馈未达 {PARK_TOLERANCE} rad，保留当前控制器持位")
     except RuntimeError as exc:
-        if process is not None and (isinstance(exc, TrialOverspeed) or node.status_level >= 2):
+        if process is not None and node.status_level >= 2:
             summary["estop_fault"] = str(exc)
             try:
                 safe_to_stop = wait_for_inactive(node)

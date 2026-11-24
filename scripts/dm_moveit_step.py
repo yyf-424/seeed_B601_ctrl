@@ -19,8 +19,7 @@
     ./scripts/dm_moveit_step.py --execute --dz 0.02   # 真的执行
     ./scripts/dm_moveit_step.py --execute --dz 0.02 --scaling 0.1   # 更慢
 
-安全：默认 plan_only=true。轨迹里只要有任一关节增量超过 --max-delta（默认 0.5 rad），
-      即使加了 --execute 也会拒绝执行并打印原因。
+默认只规划。确认路径后，可按保存的同一份轨迹执行。
 """
 
 import argparse
@@ -170,8 +169,6 @@ def main() -> int:
     ap.add_argument("--scaling", type=float, default=SETTINGS["scaling"], help="速度/加速度缩放")
     ap.add_argument("--tol", type=float, default=SETTINGS["tol"])
     ap.add_argument("--ang-tol", type=float, default=SETTINGS["ang_tol"])
-    ap.add_argument("--max-delta", type=float, default=SETTINGS["max_delta"],
-                    help="任一关节规划增量超过此值就拒绝执行（rad）")
     ap.add_argument("--frame", default="base_link")
     args = ap.parse_args()
 
@@ -187,9 +184,6 @@ def main() -> int:
             deltas = [abs(b - a) for a, b in zip(d["points"][0]["p"], d["points"][-1]["p"])] if d["points"] else []
             print(f"载入 {args.execute_from}: {len(d['points'])} 点 / {total:.2f}s / "
                   f"最大关节增量 {max(deltas) if deltas else 0:.3f} rad")
-            if deltas and max(deltas) > args.max_delta:
-                print(f"⚠ 超过 --max-delta {args.max_delta}，拒绝执行")
-                return 1
             if not node.exec_client.wait_for_server(timeout_sec=SETTINGS["server_timeout_sec"]):
                 print("❌ 等不到 /execute_trajectory")
                 return 1
@@ -264,11 +258,6 @@ def main() -> int:
               f"缩放 {args.scaling:.2f}")
         for n, a, b, d in zip(names, first, last, deltas):
             print(f"  {n:<8} {a:+.4f} → {b:+.4f}   Δ={b - a:+.4f} rad ({(b - a) * 57.2958:+.1f}°)")
-
-        worst = max(deltas) if deltas else 0.0
-        if worst > args.max_delta:
-            print(f"\n⚠ 最大关节增量 {worst:.3f} rad 超过阈值 {args.max_delta} → 拒绝执行")
-            return 1
 
         # 存盘，供 --execute-from 精确复现
         import json

@@ -46,10 +46,9 @@ def render(cfg):
     gains = {key: [profile["per_joint"][name][key] for name in arm_joints]
              for key in ("kp_hold", "kd_hold", "kp_move", "kd_move")}
     joint_defaults = {key: profile["per_joint"][arm_joints[0]][key]
-                      for key in ("target_deadband", "settle_band_min", "settle_band_max")}
+                      for key in ("settle_band_min", "settle_band_max")}
     groups = {
-        "dm": {**dm, **dm["temperature"], **cfg["implementation"]["dm"],
-               "static_tolerance": cfg["safety"]["angle"]["static_tolerance"]},
+        "dm": {**dm, **dm["temperature"], **cfg["implementation"]["dm"]},
         "mujoco": {**dm["thermal"], **cfg["implementation"]["mujoco"]},
         "mit": {**profile["group"], **gains, **joint_defaults, **cfg["implementation"]["mit"],
                 "gravity_m_s2": cfg["model"]["gravity_m_s2"]},

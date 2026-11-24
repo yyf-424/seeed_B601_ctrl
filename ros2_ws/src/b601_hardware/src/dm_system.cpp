@@ -111,9 +111,9 @@ hardware_interface::CallbackReturn DmSystemHardware::on_init(
   RCLCPP_INFO(
     logger(),
     "初始化完成：device=%s baud=%d mode=%s enable_motors=%s watchdog=%.2fs "
-    "velocity_scale=%.2f request_feedback=%s divider=%d 关节数=%zu",
+    "request_feedback=%s divider=%d 关节数=%zu",
     device_.c_str(), baudrate_, command_mode_.c_str(), enable_motors_ ? "true" : "false",
-    watchdog_timeout_, velocity_scale_, request_feedback_ ? "true" : "false",
+    watchdog_timeout_, request_feedback_ ? "true" : "false",
     feedback_divider_, joints_.size());
 
   if (command_mode_ == "mit") {
@@ -181,12 +181,6 @@ void DmSystemHardware::parse_hardware_parameters()
     RCLCPP_WARN(logger(), "command_sign=%.2f 不是 ±1，按符号处理", command_sign_);
     command_sign_ = command_sign_ < 0.0 ? -1.0 : 1.0;
   }
-  velocity_scale_ = get_double(p, "velocity_scale", velocity_scale_, where);
-  if (velocity_scale_ <= 0.0 || velocity_scale_ > 1.0) {
-    RCLCPP_WARN(
-      logger(), "velocity_scale=%.3f 超出 (0,1]，夹到合法范围", velocity_scale_);
-    velocity_scale_ = std::clamp(velocity_scale_, b601_config::dm::minimum_velocity_scale, 1.0);
-  }
   request_feedback_ = get_bool(p, "request_feedback", request_feedback_, where);
   feedback_divider_ = std::max(1, get_int(p, "feedback_divider", feedback_divider_, where));
   mode_switch_timeout_ms_ =
@@ -253,15 +247,11 @@ bool DmSystemHardware::parse_joint_config(
   cfg.kp = get_double(p, "kp", 0.0, where);
   cfg.kd = get_double(p, "kd", 0.0, where);
   cfg.vel_limit = get_double(p, "vel_limit", cfg.vel_limit, where);
-  cfg.mit_velocity_limit = std::clamp(
-    get_double(p, "mit_velocity_limit", cfg.vel_limit * velocity_scale_, where),
-    0.0, cfg.vel_limit);
+  cfg.target_slew = get_double(p, "target_slew", cfg.target_slew, where);
   cfg.torque_limit = get_double(p, "torque_limit", cfg.torque_limit, where);
   if (p.find("min_pos") != p.end() && p.find("max_pos") != p.end()) {
     cfg.min_pos = get_double(p, "min_pos", 0.0, where);
     cfg.max_pos = get_double(p, "max_pos", 0.0, where);
-    // 静止零位漂移许用值（rad/m）：只用于 on_activate 的超限检查
-    cfg.limit_tolerance = get_double(p, "limit_tolerance", b601_config::dm::static_tolerance, where);
     // 反馈跳变门限（rad/周期）：0 = 按 vel_limit 自动推算（vel_limit·0.08+0.05）。
     // ⚠ 放宽 vel_limit 会顺带放松这道守卫，所以要"跑得快但守得紧"就显式钉死它。
     cfg.feedback_jump_limit = get_double(p, "feedback_jump_limit", 0.0, where);
@@ -523,23 +513,14 @@ hardware_interface::CallbackReturn DmSystemHardware::on_activate(
     if (!joint.has_position_limit || joint.motor_id == 0) {
       continue;
     }
-    // 静止漂移容差：静止顶在机械停止位上时读数可能略微越界（零位漂移，实测约 0.026 rad）。
-    // 只在这里放宽；write() 的夹紧仍按真实限位，所以命令下不去。
-    const double tol = joint.limit_tolerance;
-    if (joint.state_pos < joint.min_pos - tol || joint.state_pos > joint.max_pos + tol) {
+    if (joint.state_pos < joint.min_pos || joint.state_pos > joint.max_pos) {
       RCLCPP_ERROR(
         logger(),
-        "%s 当前 %.4f rad 不在软限位 [%.3f, %.3f] 内（含静止漂移容差 %.3f）—— 拒绝使能。"
+        "%s 当前 %.4f rad 不在软限位 [%.3f, %.3f] 内—— 拒绝使能。"
         "请先用**手**把手臂移回限位内再重新激活（或用 direction/zero_offset 修正映射，"
         "或确认后放宽 min_pos/max_pos）。",
-        joint.name.c_str(), joint.state_pos, joint.min_pos, joint.max_pos, tol);
+        joint.name.c_str(), joint.state_pos, joint.min_pos, joint.max_pos);
       out_of_range = true;
-    } else if (joint.state_pos < joint.min_pos || joint.state_pos > joint.max_pos) {
-      RCLCPP_WARN(
-        logger(),
-        "%s 当前 %.4f rad 略微越出软限位 [%.3f, %.3f]（在静止漂移容差 %.3f 内，允许激活；"
-        "命令会把它拉回限位内）",
-        joint.name.c_str(), joint.state_pos, joint.min_pos, joint.max_pos, tol);
     }
   }
   if (out_of_range) {
@@ -772,14 +753,20 @@ void DmSystemHardware::command_motor(JointConfig & joint, double target, double 
   // 关节目标 → 电机目标（上面映射的逆运算）
   const double motor_target = (target - joint.zero_offset) / (joint.direction * joint.scale);
   // vel_limit 是关节单位，POS_VEL 模式的 vlim 要换成电机单位（rad/s）
-  const double motor_vel_limit = std::abs(joint.scale) * joint.vel_limit * velocity_scale_;
+  const double motor_vel_limit = joint.vel_limit / std::abs(joint.scale);
 
   std::int32_t rc = 0;
   if (command_mode_ == "mit") {
     // MIT：位置 + 速度前馈 0 + kp/kd 阻抗 + 力矩前馈 0
+    const double kp = std::clamp(joint.kp, 0.0, 500.0);
+    const double kd = std::clamp(joint.kd, 0.0, 5.0);
+    const double pd = (kp * (target - joint.state_pos) - kd * joint.state_vel) /
+      (joint.effort_scale * joint.scale);
+    const double scale = std::abs(pd) > joint.torque_limit ?
+      joint.torque_limit / std::abs(pd) : 1.0;
     rc = motor_handle_send_mit(
-      joint.handle, static_cast<float>(motor_target), 0.0F, static_cast<float>(joint.kp),
-      static_cast<float>(joint.kd), 0.0F);
+      joint.handle, static_cast<float>(motor_target), 0.0F, static_cast<float>(kp * scale),
+      static_cast<float>(kd * scale), 0.0F);
   } else {
     // POS_VEL：电机内部做位置环，我们给速度和位置上限
     rc = motor_handle_send_pos_vel(
@@ -830,7 +817,7 @@ hardware_interface::return_type DmSystemHardware::write(
     if (command_mode_ == "mit_impedance") {
       double pos_des = joint.cmd;
       double velocity_des = std::clamp(
-        joint.cmd_velocity, -joint.mit_velocity_limit, joint.mit_velocity_limit);
+        joint.cmd_velocity, -joint.vel_limit, joint.vel_limit);
       if (!std::isfinite(pos_des) || !std::isfinite(velocity_des) ||
         !std::isfinite(joint.cmd_kp) || !std::isfinite(joint.cmd_kd) ||
         !std::isfinite(joint.cmd_effort))
@@ -846,10 +833,6 @@ hardware_interface::return_type DmSystemHardware::write(
           velocity_des = 0.0;
         }
       }
-      double ff = joint.cmd_effort;
-      if (joint.torque_limit > 0.0) {
-        ff = std::clamp(ff, -joint.torque_limit, joint.torque_limit);
-      }
       const double position_scale = joint.direction * joint.scale;
       const double pos_motor = (pos_des - joint.zero_offset) / position_scale;
       const double velocity_motor = velocity_des / position_scale;
@@ -857,10 +840,16 @@ hardware_interface::return_type DmSystemHardware::write(
       const double gain_scale = joint.effort_scale * joint.scale;
       const double kp_motor = std::clamp(joint.cmd_kp * gain_scale, 0.0, 500.0);
       const double kd_motor = std::clamp(joint.cmd_kd * gain_scale, 0.0, 5.0);
+      // 使用最新反馈估算电机端 PD 与前馈的总关节力矩。超限时同比缩放整帧。
+      const double pd = (kp_motor * (pos_des - joint.state_pos) +
+        kd_motor * (velocity_des - joint.state_vel)) / gain_scale;
+      const double peak = std::max(std::abs(pd + joint.cmd_effort), std::abs(joint.cmd_effort));
+      const double scale = peak > joint.torque_limit ? joint.torque_limit / peak : 1.0;
       const std::int32_t rc = motor_handle_send_mit(
         joint.handle, static_cast<float>(pos_motor), static_cast<float>(velocity_motor),
-        static_cast<float>(kp_motor), static_cast<float>(kd_motor),
-        static_cast<float>(command_sign_ * joint.direction * ff * joint.effort_scale));
+        static_cast<float>(kp_motor * scale), static_cast<float>(kd_motor * scale),
+        static_cast<float>(command_sign_ * joint.direction * joint.cmd_effort *
+        joint.effort_scale * scale));
       if (rc != 0) {
         ++consecutive_write_failures_;
         RCLCPP_WARN_THROTTLE(
@@ -904,10 +893,10 @@ hardware_interface::return_type DmSystemHardware::write(
       target = std::clamp(target, joint.min_pos, joint.max_pos);
     }
 
-    // 安全 2：限速 —— 每周期最多相对"上次真正下发的目标"移动 vel_limit × dt。
+    // 安全 2：限速 —— 每周期最多相对"上次真正下发的目标"移动 target_slew × dt。
     //   基准必须是 command_sent（我们实际写进电机的值），不能是 joint.cmd
-    //   （控制器本周期刚写进来的期望值），否则限速形同虚设。
-    const double max_step = joint.vel_limit * velocity_scale_ * dt;
+    //   （控制器本周期刚写进来的期望值），这样每个后端使用同一个输入斜率。
+    const double max_step = joint.target_slew * dt;
     if (std::isfinite(joint.command_sent)) {
       target = std::clamp(target, joint.command_sent - max_step, joint.command_sent + max_step);
     }
@@ -968,7 +957,6 @@ bool DmSystemHardware::open_log_file()
   log_file_ << "# B601 DmSystemHardware log\n";
   log_file_ << "# device=" << device_ << " command_mode=" << command_mode_
             << " enable_motors=" << (enable_motors_ ? "true" : "false")
-            << " velocity_scale=" << velocity_scale_
             << " effort_sign=" << effort_sign_ << " command_sign=" << command_sign_
             << " log_rate_hz=" << log_rate_hz_ << "\n";
   log_file_ << "# 列说明：t=秒(自开始)；每关节 7 列 = "

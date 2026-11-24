@@ -301,12 +301,12 @@ def main() -> int:
         # j1-j3(4340P)=24 N·m、j4-j7(4310)=10 N·m，之前这里写死 27/7 已过时。
         eff = j.effort if j.effort else 10.0
         w(f'    <motor name="{jn}_motor" joint="{jn}" gear="1" '
-          f'ctrlrange="{-eff:.1f} {eff:.1f}" ctrllimited="true"/>')
+          f'forcerange="{-eff:.1f} {eff:.1f}" forcelimited="true"/>')
     # 夹爪：prismatic，关节 effort 单位是 N，执行器 gear=1 即直接给力（上限同样取 URDF effort）
     fj = next(x for x in joints if x.name == "finger_left")
     feff = fj.effort if fj.effort else 10.0
     w(f'    <motor name="finger_left_motor" joint="finger_left" gear="1" '
-      f'ctrlrange="{-feff:.1f} {feff:.1f}" ctrllimited="true"/>')
+      f'forcerange="{-feff:.1f} {feff:.1f}" forcelimited="true"/>')
     w('  </actuator>')
     w('')
     w('  <!-- 传感器：便于和真机 /joint_states 对照 -->')

@@ -45,7 +45,6 @@ from controller_manager_msgs.srv import (
 )
 from diagnostic_msgs.msg import DiagnosticStatus, KeyValue
 from lifecycle_msgs.msg import State as LifecycleState
-from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -97,10 +96,7 @@ class SafetyMonitor(Node):
         all_params = yaml.safe_load(path.read_text(encoding="utf-8"))
         defaults = next(iter(all_params.values()))["ros__parameters"]
         for name, value in defaults.items():
-            if name == "static_tolerance":
-                self.declare_parameter(name, value, ParameterDescriptor(dynamic_typing=True))
-            else:
-                self.declare_parameter(name, value)
+            self.declare_parameter(name, value)
 
         names = list(self.get_parameter("joint_names").value)
         pos_min = _as_float_list(self.get_parameter("pos_min").value)
@@ -131,11 +127,7 @@ class SafetyMonitor(Node):
             warn_pos_margin=warn_margin,
             warn_near_limit=warn_near,
             warn_pose_deviation_joint=warn_pose,
-            estop_pos_margin=float(self.get_parameter("estop_pos_margin").value),
-            static_tolerance=self.get_parameter("static_tolerance").value,
             warn_vel_ratio=float(self.get_parameter("warn_vel_ratio").value),
-            estop_vel_ratio=float(self.get_parameter("estop_vel_ratio").value),
-            estop_vel_absolute=float(self.get_parameter("estop_vel_absolute").value),
             warn_on_pose_deviation=bool(self.get_parameter("warn_on_pose_deviation").value),
             warn_pose_threshold=float(self.get_parameter("warn_pose_threshold").value),
         )

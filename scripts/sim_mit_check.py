@@ -50,7 +50,7 @@ class Sim:
     def __init__(self, xml, gravity_source="truth", kp_hold=SETTINGS["kp_hold"], kd_hold=None,
                  kp_move=SETTINGS["kp_move"], kd_move=None,
                  move_thr=SETTINGS["move_threshold_rad"], hold_thr=SETTINGS["hold_threshold_rad"],
-                 friction_scale=SETTINGS["friction_scale"], torque_limit=SETTINGS["torque_limit_nm"],
+                 friction_scale=SETTINGS["friction_scale"],
                  sub_steps=SETTINGS["substeps"]):
         import mujoco
         self.mj = mujoco
@@ -67,7 +67,6 @@ class Sim:
         self.kd_move = np.array(kd_move if kd_move is not None else KD_MOVE, float)
         self.move_thr, self.hold_thr = move_thr, hold_thr
         self.friction_scale = friction_scale
-        self.torque_limit = torque_limit
         self.sub_steps = sub_steps
         self.kp = np.full(6, kp_hold)
         self.kd = np.array(kd_hold if kd_hold is not None else KD_HOLD, float)
@@ -144,7 +143,6 @@ class Sim:
         self.kd += (kd_t - self.kd) * min(1.0, dt / 0.35)
         kd = self.kd
         tau = self.kp * err + kd * (-qd) + self.gravity_torque()
-        tau = np.clip(tau, -self.torque_limit, self.torque_limit)
         for _ in range(self.sub_steps):
             d.ctrl[:6] = tau
             if ext_force:

@@ -14,7 +14,7 @@
 // 控制方式：
 //   command_mode = mit_torque  → 命令是力矩，直接写进 MuJoCo 的力矩执行器（纯力矩，最真实）
 //   command_mode = pos_vel/mit → 命令是位置，插件内部做 PD（kp/kd 取 URDF 的 <param>），
-//                                再写力矩执行器；带每周期限速（velocity_scale × vel_limit）
+//                                再写力矩执行器；带每周期限速（target_slew）
 //
 // 关节与执行器：
 //   MJCF 里有 8 个关节（6 臂 + 2 指），但只有 6 个力矩执行器。
@@ -82,8 +82,8 @@ private:
     int actuator{-1};          // -1 = 无执行器（手指）
     double kp{0.0};            // pos_vel/mit 模式内部 PD
     double kd{0.0};
-    double vel_limit{b601_config::dm::default_joint_velocity_rad_s};
-    double mit_velocity_limit{0.0};  // MIT 帧速度目标的关节单位上限
+    double vel_limit{0.0};
+    double target_slew{0.0};  // 关节位置目标每秒变化量
     double torque_limit{0.0};
     double min_pos{0.0};
     double max_pos{0.0};
@@ -124,7 +124,6 @@ private:
   // 配置
   std::string model_path_;
   std::string command_mode_{"pos_vel"};
-  double velocity_scale_{b601_config::mujoco::velocity_scale};        // 位置模式下的每周期限速缩放（1.0 = 不额外收紧）
   // 力矩命令符号：与真机插件保持**同一约定**。
   // b601_mit_controller 输出的 τ_cmd 是"−g"约定，dm 插件靠 effort_sign=−1 翻成关节正方向；
   // 仿真后端如果直接用原值，重力前馈就会变成"重力放大"——2026-11-21 实测：

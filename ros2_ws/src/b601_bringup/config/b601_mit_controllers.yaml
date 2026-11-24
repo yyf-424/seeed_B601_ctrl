@@ -37,6 +37,13 @@ b601_mit_arm:
     - joint4
     - joint5
     - joint6
+    target_slew:
+    - 0.08
+    - 0.08
+    - 0.08
+    - 0.08
+    - 0.08
+    - 0.08
     state_interfaces:
     - position
     - velocity
@@ -75,13 +82,6 @@ b601_mit_arm:
     - 0.0
     - 0.0
     - 0.0
-    torque_limit:
-    - 24.0
-    - 24.0
-    - 24.0
-    - 10.0
-    - 10.0
-    - 10.0
     kp_free:
     - 0.3
     - 0.3
@@ -97,13 +97,6 @@ b601_mit_arm:
     - 0.16
     - 0.11
     free_enabled: false
-    target_deadband:
-    - 0.01
-    - 0.01
-    - 0.01
-    - 0.01
-    - 0.01
-    - 0.01
     settle_band_min:
     - 0.01
     - 0.01
@@ -118,7 +111,6 @@ b601_mit_arm:
     - 0.05
     - 0.05
     - 0.05
-    target_slew: 0.08
     settle_band_pct: 0.05
     settle_sec: 3.0
     kp_up_sec: 0.8
@@ -181,6 +173,8 @@ b601_mit_gripper:
     - joint4
     - joint5
     - joint6
+    target_slew:
+    - 0.02
     state_interfaces:
     - position
     - velocity
@@ -194,20 +188,15 @@ b601_mit_gripper:
     - 12000.0
     friction:
     - 0.0
-    torque_limit:
-    - 10.0
     kp_free:
     - 50.0
     kd_free:
     - 2.0
     free_enabled: false
-    target_deadband:
-    - 0.0001
     settle_band_min:
     - 0.0005
     settle_band_max:
     - 0.0025
-    target_slew: 0.02
     settle_band_pct: 0.05
     settle_sec: 2.0
     kp_up_sec: 0.5
