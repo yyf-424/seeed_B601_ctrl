@@ -41,6 +41,11 @@ from rclpy.time import Time
 from shape_msgs.msg import SolidPrimitive
 from tf2_ros import Buffer, TransformListener
 
+from project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["tools"]["dm_moveit_step"]
+
 
 def traj_to_dict(rt):
     """把 RobotTrajectory 存成 JSON（不引入外部依赖，方便人工核对）。"""
@@ -85,7 +90,7 @@ class MoveItStep(Node):
         # 复用同一条轨迹执行：这一步是"预览即执行"的关键
         self.exec_client = ActionClient(self, ExecuteTrajectory, "/execute_trajectory")
 
-    def lookup_ee(self, base="base_link", tip="end_link", timeout=5.0):
+    def lookup_ee(self, base="base_link", tip="end_link", timeout=SETTINGS["tf_timeout_sec"]):
         import time
         t0 = time.time()
         while time.time() - t0 < timeout:
@@ -98,7 +103,7 @@ class MoveItStep(Node):
                 p.orientation = tf.transform.rotation
                 return p
             except Exception:  # noqa: BLE001 - TF 还没到就是等
-                rclpy.spin_once(self, timeout_sec=0.1)
+                rclpy.spin_once(self, timeout_sec=SETTINGS["poll_sec"])
         return None
 
     def build_goal(self, target: Pose, frame: str, tol: float, ang_tol: float,
@@ -135,7 +140,7 @@ class MoveItStep(Node):
         req.group_name = "arm"
         req.goal_constraints.append(constraints)
         req.num_planning_attempts = 10
-        req.allowed_planning_time = 5.0
+        req.allowed_planning_time = SETTINGS["planning_time_sec"]
         req.max_velocity_scaling_factor = float(scaling)
         req.max_acceleration_scaling_factor = float(scaling)
         req.start_state.is_diff = True
@@ -153,19 +158,19 @@ class MoveItStep(Node):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dx", type=float, default=0.0)
-    ap.add_argument("--dy", type=float, default=0.0)
-    ap.add_argument("--dz", type=float, default=0.02, help="默认抬高 2 cm")
+    ap.add_argument("--dx", type=float, default=SETTINGS["dx"])
+    ap.add_argument("--dy", type=float, default=SETTINGS["dy"])
+    ap.add_argument("--dz", type=float, default=SETTINGS["dz"], help="默认抬高 2 cm")
     ap.add_argument("--execute", action="store_true",
                     help="规划后立刻执行同一条轨迹（不重规划）")
     ap.add_argument("--save", default="",
                     help="把规划结果存成 JSON（默认存到 .verify/plan_<时间>.json）")
     ap.add_argument("--execute-from", default="",
                     help="直接执行某个 plan JSON（不规划），用于\"预览→确认→执行\"")
-    ap.add_argument("--scaling", type=float, default=0.15, help="速度/加速度缩放")
-    ap.add_argument("--tol", type=float, default=0.01)
-    ap.add_argument("--ang-tol", type=float, default=0.15)
-    ap.add_argument("--max-delta", type=float, default=0.5,
+    ap.add_argument("--scaling", type=float, default=SETTINGS["scaling"], help="速度/加速度缩放")
+    ap.add_argument("--tol", type=float, default=SETTINGS["tol"])
+    ap.add_argument("--ang-tol", type=float, default=SETTINGS["ang_tol"])
+    ap.add_argument("--max-delta", type=float, default=SETTINGS["max_delta"],
                     help="任一关节规划增量超过此值就拒绝执行（rad）")
     ap.add_argument("--frame", default="base_link")
     args = ap.parse_args()
@@ -185,19 +190,19 @@ def main() -> int:
             if deltas and max(deltas) > args.max_delta:
                 print(f"⚠ 超过 --max-delta {args.max_delta}，拒绝执行")
                 return 1
-            if not node.exec_client.wait_for_server(timeout_sec=15.0):
+            if not node.exec_client.wait_for_server(timeout_sec=SETTINGS["server_timeout_sec"]):
                 print("❌ 等不到 /execute_trajectory")
                 return 1
             exec_goal = ExecuteTrajectory.Goal()
             exec_goal.trajectory = rt
             send = node.exec_client.send_goal_async(exec_goal)
-            rclpy.spin_until_future_complete(node, send, timeout_sec=10.0)
+            rclpy.spin_until_future_complete(node, send, timeout_sec=SETTINGS["execution_request_timeout_sec"])
             handle = send.result()
             if handle is None or not handle.accepted:
                 print("❌ 执行请求被拒绝")
                 return 1
             fut = handle.get_result_async()
-            rclpy.spin_until_future_complete(node, fut, timeout_sec=total + 25.0)
+            rclpy.spin_until_future_complete(node, fut, timeout_sec=total + SETTINGS["replay_result_grace_sec"])
             ex = fut.result()
             if ex is None or ex.result.error_code.val != MoveItErrorCodes.SUCCESS:
                 code = None if ex is None else ex.result.error_code.val
@@ -220,21 +225,21 @@ def main() -> int:
         print(f"目标末端:              ({target.position.x:+.4f}, {target.position.y:+.4f}, "
               f"{target.position.z:+.4f})  Δ=({args.dx:+.3f},{args.dy:+.3f},{args.dz:+.3f}) m")
 
-        if not node.client.wait_for_server(timeout_sec=15.0):
+        if not node.client.wait_for_server(timeout_sec=SETTINGS["server_timeout_sec"]):
             print("❌ 等不到 /move_action：先起 ros2 launch b601_moveit_config move_group.launch.py")
             return 1
 
         goal = node.build_goal(target, args.frame, args.tol, args.ang_tol,
                               True, args.scaling)  # 永远先只规划
         send = node.client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(node, send, timeout_sec=15.0)
+        rclpy.spin_until_future_complete(node, send, timeout_sec=SETTINGS["server_timeout_sec"])
         handle = send.result()
         if handle is None or not handle.accepted:
             print("❌ MoveGroup 拒绝请求")
             return 1
 
         result_future = handle.get_result_async()
-        rclpy.spin_until_future_complete(node, result_future, timeout_sec=30.0)
+        rclpy.spin_until_future_complete(node, result_future, timeout_sec=SETTINGS["result_timeout_sec"])
         res = result_future.result()
         if res is None:
             print("❌ 等结果超时")
@@ -279,19 +284,19 @@ def main() -> int:
             return 0
 
         # ---- 用刚规划出的同一条轨迹执行 ----
-        if not node.exec_client.wait_for_server(timeout_sec=10.0):
+        if not node.exec_client.wait_for_server(timeout_sec=SETTINGS["execution_request_timeout_sec"]):
             print("❌ 等不到 /execute_trajectory")
             return 1
         exec_goal = ExecuteTrajectory.Goal()
         exec_goal.trajectory = res.result.planned_trajectory
         send = node.exec_client.send_goal_async(exec_goal)
-        rclpy.spin_until_future_complete(node, send, timeout_sec=10.0)
+        rclpy.spin_until_future_complete(node, send, timeout_sec=SETTINGS["execution_request_timeout_sec"])
         handle = send.result()
         if handle is None or not handle.accepted:
             print("❌ 执行请求被拒绝")
             return 1
         fut = handle.get_result_async()
-        rclpy.spin_until_future_complete(node, fut, timeout_sec=total + 20.0)
+        rclpy.spin_until_future_complete(node, fut, timeout_sec=total + SETTINGS["execution_result_grace_sec"])
         ex = fut.result()
         if ex is None:
             print("❌ 执行超时")

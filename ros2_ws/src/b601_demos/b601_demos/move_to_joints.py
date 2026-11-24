@@ -39,6 +39,11 @@ from b601_demos.trajectory_utils import (
     spin_until,
 )
 
+from b601_description.project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["nodes"]["move_to_joints"]
+
 
 class MoveToJoints(Node):
     """单目标点（点对点）轨迹发送器。"""
@@ -47,8 +52,8 @@ class MoveToJoints(Node):
         super().__init__("b601_move_to_joints")
 
         self.declare_parameter("controller", "b601_arm_controller")
-        self.declare_parameter("target", [0.0, -0.3, -0.6, 0.0, 0.0, 0.0])
-        self.declare_parameter("duration", 3.0)
+        self.declare_parameter("target", SETTINGS["target"])
+        self.declare_parameter("duration", SETTINGS["duration"])
 
         self.controller = self.get_parameter("controller").value
         self.target = [float(v) for v in self.get_parameter("target").value]
@@ -84,7 +89,7 @@ class MoveToJoints(Node):
 
     def send(self):
         self.get_logger().info(f"等待 action server /{self.controller}/follow_joint_trajectory ...")
-        if not self.client.wait_for_server(timeout_sec=10.0):
+        if not self.client.wait_for_server(timeout_sec=SETTINGS["server_timeout_sec"]):
             self.get_logger().error(
                 "等不到 action server。检查："
                 "① spawner 是否成功加载了 controller  "
@@ -96,7 +101,7 @@ class MoveToJoints(Node):
         # 不等待就直接发单点轨迹时，控制器只能拿"当前"自己插值，起手会顿一下。
         deadline = self.get_clock().now().nanoseconds + 3_000_000_000
         while self.start_positions is None and self.get_clock().now().nanoseconds < deadline:
-            rclpy.spin_once(self, timeout_sec=0.1)
+            rclpy.spin_once(self, timeout_sec=SETTINGS["state_poll_sec"])
 
         # 起点：有真实状态就从当前姿态出发，否则退化成单点轨迹
         if self.start_positions is not None:
@@ -128,7 +133,7 @@ class MoveToJoints(Node):
 
         self.get_logger().info("轨迹已接受，等待执行完成 ...")
         result = spin_until(
-            self, goal_handle.get_result_async(), float(self.duration) + 20.0, "等待执行结果"
+            self, goal_handle.get_result_async(), float(self.duration) + SETTINGS["result_grace_sec"], "等待执行结果"
         )
         if result is None:
             return 1

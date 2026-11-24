@@ -7,21 +7,8 @@
 
 真值：ros2_ws/src/b601_description/config/b601_project.yaml
 
-派生（带 DO NOT EDIT 头，手改会被下一次 sync 覆盖）：
-    b601_description/config/initial_positions.yaml     上电/启动姿态
-    b601_bringup/config/b601_controllers.yaml          位置模式控制器
-    b601_moveit_config/config/joint_limits.yaml        MoveIt 速度/加速度
-    b601_safety/config/safety_params.yaml              安全监控节点参数
-    b601_bringup/config/b601_mit_controllers.yaml      MIT 力控（变刚度）控制器实例
-
-    b601_bringup/config/b601_mit_controllers.yaml      MIT 力控（变刚度）控制器实例
-      —— 由真值的 control.mit 段生成（实例表 + 按关节名的 profile），
-         规划见 docs/changes/2026-11-22-01-per-joint-controller-and-variable-stiffness.md
-
-不派生的（运行时直接读真值，因此永远同步）：
-    b601_description/urdf/inc/b601_links.xacro         关节 limit
-    b601_description/urdf/inc/ros2_control.xacro       命令/状态接口 + 电机参数
-    b601_demos/b601_demos/trajectory_utils.py          越界拒发用的限位表
+生成控制器、安全监控、硬件、初始位置和 MoveIt 所需的参数文件，并同步 SRDF 命名姿态。
+xacro、演示节点及命令行工具直接读取真值。MuJoCo 模型由 gen_mjcf.py 从 URDF 和场景配置生成。
 
 为什么用「生成」而不是让每个包都去读同一个 yaml：
     controller_manager / MoveIt 只认标准的 yaml 参数文件格式，必须落盘；
@@ -33,6 +20,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 import difflib
+import re
 import sys
 from pathlib import Path
 
@@ -418,6 +406,22 @@ def render_mit_controllers(cfg: dict) -> str:
     return head + dump_yaml(data)
 
 
+def render_moveit_controllers(cfg: dict) -> str:
+    controllers = [cfg["controllers"][name] for name in ("arm", "gripper")]
+    simple = {"controller_names": [ctrl["name"] for ctrl in controllers]}
+    for ctrl in controllers:
+        simple[ctrl["name"]] = {
+            "type": "FollowJointTrajectory", "action_ns": "follow_joint_trajectory",
+            "default": True, "joints": ctrl["joints"],
+        }
+    return GENERATED_NOTE + dump_yaml({
+        "moveit_controller_manager": "moveit_simple_controller_manager/MoveItSimpleControllerManager",
+        "moveit_manage_controllers": False,
+        "moveit_simple_controller_manager": simple,
+        "trajectory_execution": cfg["moveit"]["trajectory_execution"],
+    })
+
+
 def render_hardware_dm(cfg: dict) -> str:
     dm = cfg["hardware"]["dm"]
     joints = [joint for joint in cfg["joints"].values() if joint["control"]]
@@ -437,7 +441,34 @@ def render_hardware_dm(cfg: dict) -> str:
     }})
 
 
+def render_srdf(cfg: dict, path: Path) -> str:
+    """保持 SRDF 拓扑，替换从真值派生的命名位置。"""
+    values = dict(cfg["moveit"]["named_arm_poses"])
+    arm = cfg["robot"]["arm_joints"]
+    finger = cfg["robot"]["gripper_joint"]
+    values["home"] = {name: cfg["joints"][name]["startup"] for name in arm}
+    presets = cfg["nodes"]["gripper_control"]["presets"]
+    values["open"] = {finger: presets["open"]}
+    values["closed"] = {finger: presets["close"]}
+
+    def group(match):
+        name = match.group("name")
+        return match.group("open") + re.sub(
+            r'(?P<field><joint name="(?P<joint>[^"]+)" value=")[^"]+(?P<end>"/>)',
+            lambda joint: joint.group("field") + str(values[name][joint.group("joint")]) +
+            joint.group("end"),
+            match.group("joints"),
+        ) + match.group("close")
+
+    return re.sub(
+        r'(?P<open><group_state name="(?P<name>[^"]+)"[^>]*>)(?P<joints>.*?)(?P<close></group_state>)',
+        group, path.read_text(encoding="utf-8"), flags=re.DOTALL,
+    )
+
+
 def render_all(cfg: dict) -> dict[Path, str]:
+    moveit = WS_SRC / "b601_moveit_config" / "config"
+    srdf = moveit / "b601_dm.srdf"
     verified = deepcopy(cfg)
     plan = verified["validation"]["mit_five_poses"]["hardware_retest"]
     verified["safety"]["velocity"]["estop_absolute"] = plan["estop_arm_speed_rad_s"]
@@ -456,6 +487,10 @@ def render_all(cfg: dict) -> dict[Path, str]:
             render_safety_params(verified),
         WS_SRC / "b601_bringup" / "config" / "hardware_dm.yaml":
             render_hardware_dm(cfg),
+        srdf: render_srdf(cfg, srdf),
+        moveit / "moveit_controllers.yaml": render_moveit_controllers(cfg),
+        moveit / "kinematics.yaml": GENERATED_NOTE + dump_yaml(cfg["moveit"]["kinematics"]),
+        moveit / "ompl_planning.yaml": GENERATED_NOTE + dump_yaml(cfg["moveit"]["ompl_planning"]),
     }
 
 

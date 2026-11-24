@@ -32,6 +32,11 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
+from project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["tools"]["dm_record"]
+
 # 安全状态话题是 transient_local（锁存）：晚加入的订阅者也应立刻拿到"当前状态"。
 # 用默认 volatile 订阅会收不到（状态不变时发布者不会重复发）—— 2026-11-21 实测踩过。
 STATUS_QOS = QoSProfile(
@@ -61,7 +66,8 @@ def load_limits():
             float(params["warn_vel_ratio"]),
         )
     except Exception:  # noqa: BLE001 —— 没有配置就不做超阈值统计，不影响录制
-        return None, None, 1.0, 0.8
+        velocity = PROJECT["safety"]["velocity"]
+        return None, None, velocity["estop_ratio"], velocity["warn_ratio"]
 
 
 class Recorder(Node):
@@ -128,7 +134,7 @@ class Recorder(Node):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="录制 /joint_states（含速度）到 CSV")
-    parser.add_argument("--duration", type=float, default=10.0, help="秒；0 = 直到 Ctrl-C")
+    parser.add_argument("--duration", type=float, default=SETTINGS["duration"], help="秒；0 = 直到 Ctrl-C")
     parser.add_argument("--out", default="", help="输出 CSV（默认 .verify/run_<时间戳>.csv）")
     parser.add_argument("--joints", default="", help="只记录这些关节（逗号分隔，默认全部）")
     args = parser.parse_args()
@@ -144,7 +150,7 @@ def main() -> int:
     t_end = time.monotonic() + args.duration if args.duration > 0 else None
     try:
         while rclpy.ok() and (t_end is None or time.monotonic() < t_end):
-            rclpy.spin_once(node, timeout_sec=0.1)
+            rclpy.spin_once(node, timeout_sec=SETTINGS["poll_sec"])
     except KeyboardInterrupt:
         pass
     finally:

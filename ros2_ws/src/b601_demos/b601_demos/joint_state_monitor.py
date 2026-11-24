@@ -25,7 +25,12 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 
-ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
+from b601_description.project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["nodes"]["joint_state_monitor"]
+
+ARM_JOINTS = tuple(PROJECT["robot"]["arm_joints"])
 
 
 class JointStateMonitor(Node):
@@ -35,7 +40,7 @@ class JointStateMonitor(Node):
         super().__init__("b601_joint_state_monitor")
 
         self.declare_parameter("topic", "/joint_states")
-        self.declare_parameter("rate_hz", 1.0)
+        self.declare_parameter("rate_hz", SETTINGS["rate_hz"])
 
         topic = self.get_parameter("topic").value
         rate_hz = float(self.get_parameter("rate_hz").value)
@@ -47,7 +52,7 @@ class JointStateMonitor(Node):
         self.subscription = self.create_subscription(
             JointState, topic, self._on_joint_state, 10
         )
-        self.timer = self.create_timer(1.0 / max(rate_hz, 0.1), self._report)
+        self.timer = self.create_timer(1.0 / max(rate_hz, SETTINGS["minimum_rate_hz"]), self._report)
 
         self.get_logger().info(
             f"b601_joint_state_monitor 已启动：订阅 {topic}，每 {rate_hz:.1f} Hz 打印一次"
@@ -61,7 +66,7 @@ class JointStateMonitor(Node):
         if self.latest is None:
             self.get_logger().warn(
                 "还没收到 /joint_states —— 检查 bringup 是否起了 joint_state_broadcaster",
-                throttle_duration_sec=5.0,
+                throttle_duration_sec=SETTINGS["warning_throttle_sec"],
             )
             return
 

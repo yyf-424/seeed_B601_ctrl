@@ -27,17 +27,16 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from builtin_interfaces.msg import Duration
 
-ARM_JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+from project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["tools"]["dm_first_move"]
+
+ARM_JOINTS = PROJECT["robot"]["arm_joints"]
 def load_limits():
     """限位从统一真值读（唯一真值原则）：历史上这里抄过一份旧表
     （joint4 −1.87 / joint5 −1.57），比真值宽，和 URDF/MoveIt 打架。"""
-    import yaml
-    from pathlib import Path
-    truth = Path(__file__).resolve().parent.parent / \
-        "ros2_ws/src/b601_description/config/b601_project.yaml"
-    with truth.open(encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    j = cfg["joints"]
+    j = PROJECT["joints"]
     return {n: (float(j[n]["min_pos"]), float(j[n]["max_pos"])) for n in ARM_JOINTS}
 
 
@@ -57,22 +56,22 @@ class FirstMove(Node):
         if all(n in values for n in ARM_JOINTS):
             self.current = [values[n] for n in ARM_JOINTS]
 
-    def wait_state(self, timeout=5.0):
+    def wait_state(self, timeout=SETTINGS["state_timeout_sec"]):
         import time
         t0 = time.time()
         while self.current is None and time.time() - t0 < timeout:
-            rclpy.spin_once(self, timeout_sec=0.1)
+            rclpy.spin_once(self, timeout_sec=SETTINGS["poll_sec"])
         return self.current is not None
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--joint", default="joint1", choices=ARM_JOINTS)
-    ap.add_argument("--delta", type=float, default=0.05, help="增量（rad），带符号")
+    ap.add_argument("--joint", default=ARM_JOINTS[0], choices=ARM_JOINTS)
+    ap.add_argument("--delta", type=float, default=SETTINGS["delta"], help="增量（rad），带符号")
     ap.add_argument("--set", default="",
                     help="多关节绝对目标，如 joint2=-0.3,joint3=-0.6（给定时忽略 --joint/--delta）")
-    ap.add_argument("--duration", type=float, default=6.0, help="到位时间（s）")
-    ap.add_argument("--controller", default="b601_arm_controller")
+    ap.add_argument("--duration", type=float, default=SETTINGS["duration"], help="到位时间（s）")
+    ap.add_argument("--controller", default=PROJECT["controllers"]["arm"]["name"])
     args = ap.parse_args()
 
     rclpy.init()
@@ -117,7 +116,7 @@ def main() -> int:
                   f"(Δ={target[i]-start[i]:+.4f} rad = {(target[i]-start[i]) * 57.2958:+.1f}°)")
         print(f"     用时 {args.duration:.1f}s；未列出的关节保持不动")
 
-        if not node.client.wait_for_server(timeout_sec=10.0):
+        if not node.client.wait_for_server(timeout_sec=SETTINGS["action_timeout_sec"]):
             print(f"❌ 等不到 action server /{args.controller}/follow_joint_trajectory")
             return 1
 
@@ -130,18 +129,18 @@ def main() -> int:
             sec = int(t)
             pt.time_from_start = Duration(sec=sec, nanosec=int((t - sec) * 1e9))
             goal.trajectory.points.append(pt)
-        goal.goal_time_tolerance.sec = 2
+        goal.goal_time_tolerance.sec = SETTINGS["goal_time_tolerance_sec"]
 
         print("\n发送轨迹 ...（如果方向不对或异常，立刻 Ctrl-C / 断电）")
         send = node.client.send_goal_async(goal, feedback_callback=lambda f: None)
-        rclpy.spin_until_future_complete(node, send, timeout_sec=10.0)
+        rclpy.spin_until_future_complete(node, send, timeout_sec=SETTINGS["action_timeout_sec"])
         handle = send.result()
         if handle is None or not handle.accepted:
             print("❌ 轨迹被拒绝")
             return 1
 
         result_future = handle.get_result_async()
-        rclpy.spin_until_future_complete(node, result_future, timeout_sec=args.duration + 15.0)
+        rclpy.spin_until_future_complete(node, result_future, timeout_sec=args.duration + SETTINGS["result_grace_sec"])
         result = result_future.result()
         if result is None:
             print("❌ 等待结果超时")
@@ -154,7 +153,7 @@ def main() -> int:
 
         # 回读最终实测值，算跟踪误差
         node.current = None
-        if node.wait_state(timeout=3.0):
+        if node.wait_state(timeout=SETTINGS["final_state_timeout_sec"]):
             final = node.current
             err = [abs(a - b) for a, b in zip(final, target)]
             print("\n✅ 执行成功")

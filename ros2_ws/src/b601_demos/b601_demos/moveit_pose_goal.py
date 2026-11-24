@@ -49,6 +49,11 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from shape_msgs.msg import SolidPrimitive
 
+from b601_description.project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["nodes"]["moveit_pose_goal"]
+
 
 def rpy_to_quaternion(roll, pitch, yaw):
     """欧拉角 → 四元数（roll-pitch-yaw，等价于 tf2 的 RPY 约定）。
@@ -75,18 +80,18 @@ class MoveItPoseGoal(Node):
         self.declare_parameter("frame_id", "base_link")
         # 默认点是用 /compute_ik 实测扫出来的可达点（工具朝下时 z 必须 ≲0.15 m，
         # 这个臂的展长比看上去短：0.32 + 0.30 m 连杆 + 0.155 m 末端偏置）
-        self.declare_parameter("x", 0.25)
-        self.declare_parameter("y", 0.00)
-        self.declare_parameter("z", 0.15)
-        self.declare_parameter("roll", 0.0)
-        self.declare_parameter("pitch", 1.57)
-        self.declare_parameter("yaw", 0.0)
-        self.declare_parameter("tol", 0.01)
-        self.declare_parameter("ang_tol", 0.1)
+        self.declare_parameter("x", SETTINGS["x"])
+        self.declare_parameter("y", SETTINGS["y"])
+        self.declare_parameter("z", SETTINGS["z"])
+        self.declare_parameter("roll", SETTINGS["roll"])
+        self.declare_parameter("pitch", SETTINGS["pitch"])
+        self.declare_parameter("yaw", SETTINGS["yaw"])
+        self.declare_parameter("tol", SETTINGS["tol"])
+        self.declare_parameter("ang_tol", SETTINGS["ang_tol"])
         self.declare_parameter("plan_only", False)
-        self.declare_parameter("allowed_planning_time", 5.0)
-        self.declare_parameter("velocity_scaling", 0.2)
-        self.declare_parameter("acceleration_scaling", 0.2)
+        self.declare_parameter("allowed_planning_time", SETTINGS["allowed_planning_time"])
+        self.declare_parameter("velocity_scaling", SETTINGS["velocity_scaling"])
+        self.declare_parameter("acceleration_scaling", SETTINGS["acceleration_scaling"])
 
         self.client = ActionClient(self, MoveGroup, "/move_action")
 
@@ -156,7 +161,7 @@ class MoveItPoseGoal(Node):
         request = MotionPlanRequest()
         request.group_name = cfg["group"]
         request.goal_constraints.append(constraints)
-        request.num_planning_attempts = 10
+        request.num_planning_attempts = SETTINGS["planning_attempts"]
         request.allowed_planning_time = cfg["allowed_planning_time"]
         request.max_velocity_scaling_factor = cfg["velocity_scaling"]
         request.max_acceleration_scaling_factor = cfg["acceleration_scaling"]
@@ -186,14 +191,14 @@ class MoveItPoseGoal(Node):
             f"plan_only={cfg['plan_only']}"
         )
 
-        if not self.client.wait_for_server(timeout_sec=10.0):
+        if not self.client.wait_for_server(timeout_sec=SETTINGS["server_timeout_sec"]):
             self.get_logger().error(
                 "等不到 /move_action 服务器 —— 先启动：ros2 launch b601_moveit_config demo.launch.py"
             )
             return 1
 
         send_future = self.client.send_goal_async(self._build_goal())
-        if spin_until(self, send_future, 20.0, "发送 MoveGroup 目标") is None:
+        if spin_until(self, send_future, SETTINGS["request_timeout_sec"], "发送 MoveGroup 目标") is None:
             return 1
         handle = send_future.result()
         if handle is None or not handle.accepted:
@@ -202,7 +207,7 @@ class MoveItPoseGoal(Node):
 
         self.get_logger().info("规划中 ...")
         plan_timeout = float(self.get_parameter("allowed_planning_time").value)
-        result = spin_until(self, handle.get_result_async(), plan_timeout + 180.0,
+        result = spin_until(self, handle.get_result_async(), plan_timeout + SETTINGS["result_grace_sec"],
                             "等待规划/执行结果")
         if result is None:
             return 1

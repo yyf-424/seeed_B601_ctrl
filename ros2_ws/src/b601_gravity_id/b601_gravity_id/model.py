@@ -34,8 +34,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
-GRAVITY = np.array([0.0, 0.0, -9.81])
+from b601_description.project_config import load_project_config
+
+PROJECT = load_project_config()
+ARM_JOINTS = tuple(PROJECT["robot"]["arm_joints"])
+GRAVITY = np.array([0.0, 0.0, -PROJECT["model"]["gravity_m_s2"]])
 
 
 # --------------------------------------------------------------------------- URDF

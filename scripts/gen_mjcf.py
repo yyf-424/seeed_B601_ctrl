@@ -25,6 +25,8 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+from project_config import load_project_config
+
 
 def rpy_to_quat(r, p, y):
     """URDF 的 rpy（R = Rz·Ry·Rx）→ MuJoCo 的 wxyz 四元数"""
@@ -151,6 +153,8 @@ def main() -> int:
     sys.path.insert(0, "ros2_ws/src/b601_gravity_id")
     from b601_gravity_id.model import expand_xacro
 
+    project = load_project_config()
+    settings = project["simulation"]
     root = ET.fromstring(expand_xacro(hardware="mock"))
     links = {el.get("name"): Link(el) for el in root.findall("link")}
     joints = [JointEl(el) for el in root.findall("joint")]
@@ -164,34 +168,22 @@ def main() -> int:
     w('<!-- 本文件由 scripts/gen_mjcf.py 从 URDF 自动生成，请勿手改 -->')
     w('<mujoco model="b601_dm">')
     w('  <compiler angle="radian" autolimits="true"/>')
-    w('  <!-- 1 ms 步长、implicitfast 积分器：机械臂这种刚性系统稳定且快 -->')
-    w('  <option timestep="0.001" integrator="implicitfast" iterations="50"/>')
-    w('  <visual>')
-    w('    <global offwidth="1280" offheight="720"/>')
-    w('    <headlight ambient="0.35 0.35 0.35" diffuse="0.7 0.7 0.7" specular="0.1 0.1 0.1"/>')
-    w('  </visual>')
-    w('  <asset>')
-    w('    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.25 0.4 0.55" '
-      'rgb2="0.05 0.06 0.09" width="512" height="3072"/>')
-    w('    <texture name="grid" type="2d" builtin="checker" mark="edge" rgb1="0.22 0.28 0.31" '
-      'rgb2="0.10 0.14 0.16" markrgb="0.72 0.78 0.80" width="300" height="300"/>')
-    w('    <material name="ground" texture="grid" texuniform="true" texrepeat="6 6" reflectance="0.1"/>')
-    w('    <material name="seeed_yellow" rgba="0.73 0.84 0.12 1"/>')
-    w('    <material name="dark_grey" rgba="0.24 0.27 0.27 1"/>')
-    w('    <material name="silver" rgba="0.83 0.84 0.83 1"/>')
-    w('    <material name="matte_black" rgba="0.07 0.07 0.07 1"/>')
-    w('    <material name="accent_blue" rgba="0.10 0.45 0.85 1"/>')
-    w('  </asset>')
-    w('  <worldbody>')
-    w('    <light pos="0.6 -0.4 1.6" dir="-0.4 0.3 -1" directional="true"/>')
-    w('    <geom name="floor" type="plane" size="1.5 1.5 0.05" material="ground" '
-      'friction="1.0 0.01 0.001"/>')
-    w('    <camera name="overview" pos="0.75 -0.75 0.75" xyaxes="1 1 0 -0.4 0.4 1" fovy="45"/>')
+    def empty_element(tag, attrib):
+        attributes = " ".join(f'{key}="{value}"' for key, value in attrib.items())
+        return f"<{tag} {attributes}/>"
 
-    color = {"base_link": "dark_grey", "link1": "seeed_yellow", "link2": "seeed_yellow",
-             "link3": "seeed_yellow", "link4": "silver", "link5": "silver",
-             "link6": "matte_black", "end_link": "accent_blue",
-             "finger_left_link": "matte_black", "finger_right_link": "matte_black"}
+    options = dict(settings["options"])
+    options["gravity"] = f'0 0 -{project["model"]["gravity_m_s2"]}'
+    w("  " + empty_element("option", options))
+    for group, elements in settings["scene"].items():
+        w(f"  <{group}>")
+        for element in elements:
+            tag, attributes = next(iter(element.items()))
+            w("    " + empty_element(tag, attributes))
+        if group != "worldbody":
+            w(f"  </{group}>")
+
+    color = settings["materials_by_link"]
 
     def emit_body(link_name: str, indent: int, extra_xyz=None, extra_rpy=None, depth=0):
         """递归输出 body；fixed 关节的变换折叠进子 body 的 pos/quat"""
@@ -213,7 +205,8 @@ def main() -> int:
                 mimic = f' <!-- mimic {j.mimic} x{j.mimic_mult} -->'
             joint_line = (f'{pad}  <joint name="{j.name}" type="{jt}" '
                           f'axis="{axis[0]:.6f} {axis[1]:.6f} {axis[2]:.6f}"{lim} '
-                          f'damping="0.02" armature="0.01"/>{mimic}')
+                          f'damping="{settings["joint_damping"]}" '
+                          f'armature="{settings["joint_armature"]}"/>{mimic}')
 
         q = mat_to_quat(R)
         w(f'{pad}<body name="{link_name}" pos="{pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f}" '

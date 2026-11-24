@@ -35,7 +35,12 @@ from b601_demos.trajectory_utils import (
     spin_until,
 )
 
-PRESETS = {"open": 0.045, "close": 0.0}
+from b601_description.project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["nodes"]["gripper_control"]
+
+PRESETS = SETTINGS["presets"]
 
 
 class Gripper(Node):
@@ -46,7 +51,7 @@ class Gripper(Node):
         # 必须开 dynamic_typing —— 否则 `-p preset:=0.02` 被 ROS 解析成 double，
         # 与声明的 string 类型冲突（2026-11-21 实测：InvalidParameterType）。
         self.declare_parameter("preset", "open", ParameterDescriptor(dynamic_typing=True))
-        self.declare_parameter("duration", 1.0)
+        self.declare_parameter("duration", SETTINGS["duration"])
         self.declare_parameter("controller", "b601_gripper_controller")
 
         raw_preset = self.get_parameter("preset").value
@@ -57,7 +62,8 @@ class Gripper(Node):
             self.target = PRESETS[raw_preset]
         else:
             self.target = float(raw_preset)
-        self.target = min(max(self.target, 0.0), 0.05)
+        limits = PROJECT["joints"][GRIPPER_JOINT]
+        self.target = min(max(self.target, limits["min_pos"]), limits["max_pos"])
 
         self.current = None
         self.create_subscription(JointState, "/joint_states", self._on_state, 10)
@@ -76,7 +82,7 @@ class Gripper(Node):
             self.current = values[GRIPPER_JOINT]
 
     def run(self) -> int:
-        if not self.client.wait_for_server(timeout_sec=10.0):
+        if not self.client.wait_for_server(timeout_sec=SETTINGS["server_timeout_sec"]):
             self.get_logger().error("夹爪 controller 的 action server 不可用")
             return 1
 
@@ -98,7 +104,7 @@ class Gripper(Node):
             self.get_logger().error("夹爪轨迹被拒绝")
             return 1
 
-        result = spin_until(self, handle.get_result_async(), self.duration + 20.0,
+        result = spin_until(self, handle.get_result_async(), self.duration + SETTINGS["result_grace_sec"],
                             "等待夹爪结果")
         if result is None:
             return 1

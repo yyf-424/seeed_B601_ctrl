@@ -38,6 +38,11 @@ from sensor_msgs.msg import JointState
 
 from b601_demos import trajectory_utils as tu
 
+from project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["tools"]["dm_pose_steps"]
+
 STATUS_QOS = QoSProfile(
     depth=1,
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -97,10 +102,10 @@ class PoseSteps(Node):
             if kv.key == "state":
                 self.safety = kv.value
 
-    def wait_ready(self, timeout: float = 15.0) -> bool:
+    def wait_ready(self, timeout: float = SETTINGS["ready_timeout_sec"]) -> bool:
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
-            rclpy.spin_once(self, timeout_sec=0.1)
+            rclpy.spin_once(self, timeout_sec=SETTINGS["ready_poll_sec"])
             if self.current and self.safety != "UNKNOWN":
                 return True
         return False
@@ -111,7 +116,8 @@ class PoseSteps(Node):
         j = cfg["joints"][name]
         return float(j["max_pos"]) - float(j["min_pos"])
 
-    def wait_settled(self, timeout: float, pos_tol: float = 5e-4, need: float = 0.4) -> bool:
+    def wait_settled(self, timeout: float, pos_tol: float = SETTINGS["settled_position_tol_rad"],
+                     need: float = SETTINGS["settled_window_sec"]) -> bool:
         """等到所有关节位置连续 need 秒不再变化 —— 这才是"稳态"。
 
         为什么要主动判：JTC 的 goal 在轨迹时间结束时就算完成，但机械臂还会再走
@@ -125,12 +131,12 @@ class PoseSteps(Node):
         good = 0.0
         ref = dict(self.current)
         while time.monotonic() - t0 < timeout:
-            rclpy.spin_once(self, timeout_sec=0.02)
+            rclpy.spin_once(self, timeout_sec=SETTINGS["step_poll_sec"])
             if not self.current:
                 continue
             moved = max(abs(self.current[n] - ref[n]) for n in tu.ARM_JOINTS)
             if moved < pos_tol:
-                good += 0.02
+                good += SETTINGS["step_poll_sec"]
             else:
                 good = 0.0
                 ref = dict(self.current)
@@ -141,7 +147,7 @@ class PoseSteps(Node):
     def spin_for(self, seconds: float) -> None:
         t0 = time.monotonic()
         while time.monotonic() - t0 < seconds:
-            rclpy.spin_once(self, timeout_sec=0.02)
+            rclpy.spin_once(self, timeout_sec=SETTINGS["step_poll_sec"])
 
     def run_pose(self, index: int, total: int, target: dict[str, float],
                  slew: float, settle: float, sample_sec: float,
@@ -161,7 +167,8 @@ class PoseSteps(Node):
             return False, {}
 
         move = max(abs(want[n] - start[n]) for n in tu.ARM_JOINTS)
-        dur = max(move / max(slew, 1e-3), 1.5)
+        dur = max(move / max(slew, PROJECT["implementation"]["mit"]["slew_min"]),
+                  SETTINGS["minimum_move_duration_sec"])
         self.get_logger().info(
             f"[{index}/{total}] " + ", ".join(f"{n}={want[n]:+.3f}" for n in tu.ARM_JOINTS)
             + f"  最大位移 {move:.3f} rad，时长 {dur:.1f}s（{slew:.2f} rad/s）")
@@ -176,9 +183,9 @@ class PoseSteps(Node):
             [0.0, dur])
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = traj
-        goal.goal_time_tolerance = tu.duration(2.0)
+        goal.goal_time_tolerance = tu.duration(SETTINGS["goal_time_tolerance_sec"])
 
-        if not self.client.wait_for_server(timeout_sec=10.0):
+        if not self.client.wait_for_server(timeout_sec=SETTINGS["server_timeout_sec"]):
             self.get_logger().error(f"[{index}/{total}] 等不到 action server")
             return False, {}
         # ⚠ 必须等 **action 结果**，不能只看 goal 被接受：
@@ -187,12 +194,12 @@ class PoseSteps(Node):
         #   pose 3 抢掉，报出 8–15% 的假超标）。之前"全过"其实是运气：那时等停稳固定
         #   耗 6 s，恰好比轨迹 4 s 长。
         handle = tu.send_goal_with_retry(
-            self, self.client, goal, f"pose {index}/{total}", timeout_sec=dur + 40.0)
+            self, self.client, goal, f"pose {index}/{total}", timeout_sec=dur + SETTINGS["result_grace_sec"])
         if handle is None or not handle.accepted:
             self.get_logger().error(f"[{index}/{total}] goal 未接受")
             return False, {}
         result = tu.spin_until(
-            self, handle.get_result_async(), timeout_sec=dur + 40.0,
+            self, handle.get_result_async(), timeout_sec=dur + SETTINGS["result_grace_sec"],
             what=f"pose {index}/{total} 结果")
         if result is None:
             self.get_logger().error(f"[{index}/{total}] 等不到 action 结果（轨迹可能仍在跑）")
@@ -208,9 +215,9 @@ class PoseSteps(Node):
             return False, {}
 
         # 稳态判定：先确认真的停稳（速度连续低于阈值），再采样 sample_sec
-        if not self.wait_settled(timeout=max(settle, 6.0)):
+        if not self.wait_settled(timeout=max(settle, SETTINGS["minimum_settle_timeout_sec"])):
             self.get_logger().warn(f"[{index}/{total}] 等停稳超时，按当前状态采样（结果可能偏大）")
-        self.spin_for(settle * 0.5)
+        self.spin_for(settle * SETTINGS["settled_sample_ratio"])
         self._samples = []
         self._collect = True
         self.spin_for(sample_sec)
@@ -228,7 +235,7 @@ class PoseSteps(Node):
             err = abs(mean - want[n])
             rng = self.range_of(n) or 1.0
             pct = err / rng * 100.0
-            limit_pct = 5.0
+            limit_pct = SETTINGS["travel_error_pct"]
             stats[n] = (want[n], mean, err, pct, worst)
             if pct > limit_pct:
                 all_ok = False
@@ -238,11 +245,11 @@ class PoseSteps(Node):
 def main() -> int:
     ap = argparse.ArgumentParser(description="真机多姿态定位精度测试（稳态误差判据）")
     ap.add_argument("--poses", required=True, help="姿态用 ; 分隔，例：joint2=-0.9;joint1=0.3,joint5=0.2")
-    ap.add_argument("--controller", default="b601_arm_controller")
-    ap.add_argument("--slew", type=float, default=0.15, help="轨迹平均速率 rad/s（默认 0.15，很慢）")
-    ap.add_argument("--settle", type=float, default=1.5, help="到位后等待稳定时间 s")
-    ap.add_argument("--sample-sec", type=float, default=1.0, help="稳态采样时长 s")
-    ap.add_argument("--max-delta", type=float, default=0.6, help="单关节允许的最大位移 rad")
+    ap.add_argument("--controller", default=PROJECT["controllers"]["arm"]["name"])
+    ap.add_argument("--slew", type=float, default=SETTINGS["slew"], help="轨迹平均速率 rad/s（默认 0.15，很慢）")
+    ap.add_argument("--settle", type=float, default=SETTINGS["settle"], help="到位后等待稳定时间 s")
+    ap.add_argument("--sample-sec", type=float, default=SETTINGS["sample_sec"], help="稳态采样时长 s")
+    ap.add_argument("--max-delta", type=float, default=SETTINGS["max_delta"], help="单关节允许的最大位移 rad")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不发指令")
     args = ap.parse_args()
 
@@ -263,7 +270,7 @@ def main() -> int:
             print("❌ 等不到 /joint_states 或 /b601_safety/status（bringup 起来了吗）", file=sys.stderr)
             return 1
         print("起始位形：" + ", ".join(f"{n}={node.current[n]:+.3f}" for n in tu.ARM_JOINTS))
-        print(f"安全状态 {node.safety}；判据：每关节稳态误差 ≤ 行程的 {5.0:.0f}%")
+        print(f"安全状态 {node.safety}；判据：每关节稳态误差 ≤ 行程的 {SETTINGS['travel_error_pct']:.0f}%")
 
         preview_start = {n: node.current[n] for n in tu.ARM_JOINTS} if args.dry_run else None
         for i, target in enumerate(poses, 1):
@@ -283,11 +290,11 @@ def main() -> int:
             print("关节      目标      实测均值   误差(rad)  占行程%  采样抖动")
             for n in tu.ARM_JOINTS:
                 want, mean, err, pct, worst = stats[n]
-                mark = "✅" if pct <= 5.0 else "❌"
+                mark = "✅" if pct <= SETTINGS["travel_error_pct"] else "❌"
                 print(f"{mark}{n:9s} {want:+8.4f} {mean:+9.4f} {err:9.4f} {pct:8.2f} {worst:9.4f}")
             if not ok:
                 failures += 1
-                print(f"❌ 姿态 {i} 有超标关节（>5% 行程）")
+                print(f"❌ 姿态 {i} 有超标关节（>{SETTINGS['travel_error_pct']:g}% 行程）")
             if node.safety == "EMERGENCY_STOP":
                 print("🛑 已急停，停止后续姿态")
                 break
@@ -296,7 +303,7 @@ def main() -> int:
             print(f"\n（dry-run）计划 {len(poses)} 个姿态，全部通过限位/位移校验：{failures == 0}")
         else:
             verdict = "全部通过" if failures == 0 else f"{failures} 个姿态超标"
-            print(f"\n汇总：{verdict}（判据 5% 行程）")
+            print(f"\n汇总：{verdict}（判据 {SETTINGS['travel_error_pct']:g}% 行程）")
         return 0 if failures == 0 else 1
     except (KeyboardInterrupt, ExternalShutdownException):
         print("\n已中止")

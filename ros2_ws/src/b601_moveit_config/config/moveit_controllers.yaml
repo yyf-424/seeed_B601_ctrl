@@ -1,43 +1,31 @@
-# moveit_controllers.yaml —— MoveIt → ros2_control 的对接表
-#
-# MoveIt 规划完不直接碰电机，而是把轨迹发给 controller 的 FollowJointTrajectory action。
-# 这张表告诉 MoveIt：每个规划组该找哪个 action server。
-#
-# 名字必须与 b601_bringup/config/b601_controllers.yaml 里 spawn 的 controller 完全一致，
-# MoveIt 会连 /<controller 名>/<action_ns>。
-
+# ============================================================================
+# ⚠ 本文件由 scripts/sync_config.py 自动生成，请勿手工编辑。
+#    要改参数请改：ros2_ws/src/b601_description/config/b601_project.yaml
+#    改完执行：  ./scripts/sync_config.py
+# ============================================================================
 moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
-
-# controller 由 b601_bringup 的 launch 负责 spawn，MoveIt 只“用”不“管”，
-# 免得两个进程抢着切换 controller 状态。
 moveit_manage_controllers: false
-
 moveit_simple_controller_manager:
   controller_names:
-    - b601_arm_controller
-    - b601_gripper_controller
-
+  - b601_arm_controller
+  - b601_gripper_controller
   b601_arm_controller:
     type: FollowJointTrajectory
     action_ns: follow_joint_trajectory
     default: true
     joints:
-      - joint1
-      - joint2
-      - joint3
-      - joint4
-      - joint5
-      - joint6
-
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
   b601_gripper_controller:
     type: FollowJointTrajectory
     action_ns: follow_joint_trajectory
     default: true
     joints:
-      - finger_left
-
-# 轨迹执行的监控时间余量：控制器比“标称时长”慢多少还算成功。
-# 真机首调时放宽一点，避免因起停延迟判失败；调通后可收紧到 1.1 / 0.1。
+    - finger_left
 trajectory_execution:
   allowed_execution_duration_scaling: 1.5
   allowed_goal_duration_margin: 0.5

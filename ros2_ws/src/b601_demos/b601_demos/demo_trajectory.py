@@ -39,14 +39,13 @@ from b601_demos.trajectory_utils import (
     spin_until,
 )
 
+from b601_description.project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["nodes"]["demo_trajectory"]
+
 # 每一段的关节目标（joint1..joint6，rad）
-SEQUENCE = [
-    ("① 微微前倾", (0.0, -0.5, -0.8, 0.0, 0.0, 0.0)),
-    ("② 底座右转", (0.4, -0.5, -0.8, 0.0, 0.0, 0.0)),
-    ("③ 底座左转", (-0.4, -0.5, -0.8, 0.0, 0.0, 0.0)),
-    ("④ 腕部转动", (-0.4, -0.5, -0.8, 0.0, 0.5, 0.5)),
-    ("⑤ 回到零位", (0.0, -0.3, -0.6, 0.0, 0.0, 0.0)),
-]
+SEQUENCE = SETTINGS["sequence"]
 
 
 class DemoTrajectory(Node):
@@ -54,7 +53,7 @@ class DemoTrajectory(Node):
         super().__init__("b601_demo_trajectory")
 
         self.declare_parameter("controller", "b601_arm_controller")
-        self.declare_parameter("hold", 1.5)
+        self.declare_parameter("hold", SETTINGS["hold"])
         self.controller = self.get_parameter("controller").value
         self.hold = float(self.get_parameter("hold").value)
 
@@ -72,7 +71,7 @@ class DemoTrajectory(Node):
             self.start_positions = [values[name] for name in ARM_JOINTS]
 
     def run(self) -> int:
-        if not self.client.wait_for_server(timeout_sec=10.0):
+        if not self.client.wait_for_server(timeout_sec=SETTINGS["server_timeout_sec"]):
             self.get_logger().error("action server 不可用，先确认 bringup 与 spawner 正常")
             return 1
 
@@ -96,7 +95,7 @@ class DemoTrajectory(Node):
 
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = trajectory
-        goal.goal_time_tolerance.sec = 2
+        goal.goal_time_tolerance.sec = SETTINGS["goal_time_tolerance_sec"]
 
         goal_handle = send_goal_with_retry(self, self.client, goal, "发送轨迹")
         if goal_handle is None:
@@ -110,7 +109,7 @@ class DemoTrajectory(Node):
 
         total = float(trajectory.points[-1].time_from_start.sec
                       + trajectory.points[-1].time_from_start.nanosec / 1e9)
-        result = spin_until(self, goal_handle.get_result_async(), total + 20.0, "等待执行结果")
+        result = spin_until(self, goal_handle.get_result_async(), total + SETTINGS["result_grace_sec"], "等待执行结果")
         if result is None:
             return 1
         if result.result.error_code == FollowJointTrajectory.Result.SUCCESSFUL:

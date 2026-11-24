@@ -10,51 +10,14 @@
     - 限位来自 config/b601_project.yaml（唯一真值）；拼轨迹前先验证，越界直接拒绝
 """
 
-from pathlib import Path
-
 from builtin_interfaces.msg import Duration
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-# 与 b601_description/urdf/inc/b601_links.xacro 一一对应
-ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
-GRIPPER_JOINT = "finger_left"
+from b601_description.project_config import load_project_config
 
-
-def _load_project_config() -> dict:
-    """读唯一真值配置。
-
-    两条路径：
-      1) 已安装的 share 目录（ros2 launch / ros2 run 的常规情况）
-      2) 源码树（直接 python 跑脚本、或还没 build 时）
-    读不到就抛错 —— 宁可不发轨迹，也不要用一份抄来的旧限位去发指令。
-    """
-    import yaml
-
-    candidates = []
-    try:
-        from ament_index_python.packages import get_package_share_directory
-
-        candidates.append(
-            Path(get_package_share_directory("b601_description")) / "config" / "b601_project.yaml"
-        )
-    except Exception:  # 包还没 source / 没安装
-        pass
-    candidates.append(
-        Path(__file__).resolve().parents[2] / "b601_description" / "config" / "b601_project.yaml"
-    )
-
-    for path in candidates:
-        if path.is_file():
-            with path.open(encoding="utf-8") as f:
-                return yaml.safe_load(f)
-    raise RuntimeError(
-        "找不到 b601_project.yaml（全项目唯一参数真值）。"
-        "先 source ros2_ws/install/setup.bash，或在源码树里运行。"
-        "已尝试：" + ", ".join(str(p) for p in candidates)
-    )
-
-
-_PROJECT = _load_project_config()
+_PROJECT = load_project_config()
+ARM_JOINTS = tuple(_PROJECT["robot"]["arm_joints"])
+GRIPPER_JOINT = _PROJECT["robot"]["gripper_joint"]
 _JOINTS = _PROJECT["joints"]
 
 # 限位直接来自统一配置，不再在本文件抄一份（历史上抄过 ±2.8，和 URDF 的 ±2.60 打架）
@@ -63,7 +26,7 @@ JOINT_UPPER = {name: float(j["max_pos"]) for name, j in _JOINTS.items()}
 JOINT_VEL_MAX = {name: float(j["max_velocity"]) for name, j in _JOINTS.items()}
 
 # 安全余量：贴着硬限位发轨迹，控制器和编码器零点误差会让它被判越界
-SAFETY_MARGIN = 0.02
+SAFETY_MARGIN = _PROJECT["nodes"]["trajectory_utils"]["limit_margin_rad"]
 
 
 def check_limits(joint_names, positions, margin=SAFETY_MARGIN):
@@ -152,8 +115,8 @@ def spin_until(node, future, timeout_sec: float, what: str):
         return None
 
 
-def send_goal_with_retry(node, client, goal, what: str, timeout_sec: float = 15.0,
-                         attempts: int = 2, feedback_callback=None):
+def send_goal_with_retry(node, client, goal, what: str, timeout_sec: float = _PROJECT["nodes"]["trajectory_utils"]["goal_request_timeout_sec"],
+                         attempts: int = _PROJECT["nodes"]["trajectory_utils"]["goal_request_attempts"], feedback_callback=None):
     """发 goal 并等响应，失败自动重试一次（DDS 偶发丢响应）。
 
     返回 goal_handle；彻底失败返回 None。

@@ -22,6 +22,11 @@ import argparse
 import sys
 import time
 
+from project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["tools"]["dm_hand_calib"]
+
 # (阶段说明, 对应关节名建议)
 PHASES = [
     ("别动 —— 取基准", None),
@@ -34,18 +39,23 @@ PHASES = [
     ("开/合 夹爪手指", "gripper"),
 ]
 
-MOTORS = [(1, 0x11, "4340P", "joint1"), (2, 0x12, "4340P", "joint2"), (3, 0x13, "4340P", "joint3"),
-          (4, 0x14, "4310", "joint4"), (5, 0x15, "4310", "joint5"), (6, 0x16, "4310", "joint6"),
-          (7, 0x17, "4310", "gripper")]
+DM = PROJECT["hardware"]["dm"]
+MOTOR_JOINTS = [*PROJECT["robot"]["arm_joints"], PROJECT["robot"]["gripper_joint"]]
+MOTORS = [
+    (motor["id"], motor["feedback_id"], motor["model"],
+     "gripper" if name == PROJECT["robot"]["gripper_joint"] else name)
+    for name in MOTOR_JOINTS
+    for motor in [PROJECT["joints"][name]["motor"]]
+]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", default="/dev/ttyACM0")
-    ap.add_argument("--baud", type=int, default=921600)
-    ap.add_argument("--lead", type=float, default=10.0, help="准备时间（秒）")
-    ap.add_argument("--phase", type=float, default=5.0, help="每段时长（秒）")
-    ap.add_argument("--rate", type=float, default=20.0, help="采样频率 Hz")
+    ap.add_argument("--device", default=DM["device"])
+    ap.add_argument("--baud", type=int, default=DM["baudrate"])
+    ap.add_argument("--lead", type=float, default=SETTINGS["lead"], help="准备时间（秒）")
+    ap.add_argument("--phase", type=float, default=SETTINGS["phase"], help="每段时长（秒）")
+    ap.add_argument("--rate", type=float, default=SETTINGS["rate"], help="采样频率 Hz")
     args = ap.parse_args()
 
     from motorbridge import Controller

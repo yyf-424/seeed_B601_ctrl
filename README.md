@@ -21,6 +21,32 @@ source ros2_ws/install/setup.bash
 在归中位置开始。使能前完成探针回读、只读和方向核对。同一串口只运行一个控制程序。
 常规收工先核对归中再失能。触发急停时由安全节点立即停止。
 
+## 统一配置
+
+工程参数集中在 `ros2_ws/src/b601_description/config/b601_project.yaml`。该文件管理关节与电机参数、
+控制和安全门槛、URDF 形状与惯量、MoveIt 规划、仿真场景、演示节点和测试工具。ROS 运行时参数和
+脚本命令行选项可覆盖对应默认值。
+
+```bash
+./scripts/sync_config.py           # 同步生成的 ROS 参数文件和 SRDF 命名姿态
+./scripts/sync_config.py --check   # 检查派生文件同步状态
+```
+
+修改模型或仿真场景后，构建工作空间并加载其环境，再生成 MuJoCo 模型。
+
+```bash
+./scripts/build.sh
+source ros2_ws/install/setup.bash
+model="$(mktemp)"
+if python3 scripts/gen_mjcf.py > "$model"; then
+  cp "$model" ros2_ws/src/b601_mujoco/models/b601_arm.xml
+fi
+rm "$model"
+```
+
+位置回路使用 `./scripts/dm_park.sh` 核对归中并失能，`--keep-enabled` 用于只归中核对。
+关节端 MIT 验收脚本使用自身的归中和失能流程。
+
 ## 6+1 MIT 真机复测
 
 碰撞核对使用 Seeed 官方 `reBotArmController_ROS2` 中的 DM 模型资源，历史实测使用
