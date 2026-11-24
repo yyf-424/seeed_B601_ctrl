@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""bringup.launch.py —— 一个入口拉起“机器人 + ros2_control + 控制器 + 安全监控”。
+
+    # 1) 标准做法（先跑这个）
+    ros2 launch b601_bringup bringup.launch.py hardware:=mock
+
+    # 2) 真机（第一次一定先 enable_motors:=false 的只读模式）
+    ros2 launch b601_bringup bringup.launch.py hardware:=dm
+
+    # 3) 不想被安全节点盯着（不推荐，只用于排查安全节点本身）
+    ros2 launch b601_bringup bringup.launch.py use_safety:=false
+
+启动的节点（顺序即依赖顺序）：
+
+  ┌────────────────────────┐   /robot_description(std)   ┌──────────────────────┐
+  │ robot_state_publisher  │ ──────────────────────────► │  rviz2 (可选)        │
+  │  xacro → URDF → TF     │ ◄──────── /joint_states ─── │  RobotModel + TF     │
+  └────────────────────────┘                             └──────────────────────┘
+              ▲ /joint_states
+  ┌───────────┴────────────┐   ┌──────────────────────┐
+  │ joint_state_broadcaster│ ◄ │ controller_manager   │ ── 加载 b601_controllers.yaml
+  └────────────────────────┘   │  (ros2_control_node) │    ├─ b601_arm_controller
+                               └──────────────────────┘    └─ b601_gripper_controller
+                                          ▲
+                                          │ 硬件插件（hardware:=mock|dm|mujoco）
+                                     [ 物理世界 ]
+
+  ┌────────────────────────┐
+  │ b601_safety_monitor    │  订阅 /joint_states
+  │  正常/警告/急停 三档     │  发布 /b601_safety/status
+  │  急停 → 停控制器 + 失能  │  服务 /b601_safety/clear_estop
+  └────────────────────────┘
+
+默认值全部来自 config/b601_project.yaml（唯一真值），本文件不写死任何数字；
+launch 参数只是“临时覆盖”，要永久修改请改配置再跑 scripts/sync_config.py。
+"""
+
+import yaml
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.conditions import IfCondition
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
+
+
+def _load_project_config():
+    """读取唯一真值配置（launch 描述阶段就需要它的值做默认值）。"""
+    description_share = get_package_share_directory("b601_description")
+    with open(f"{description_share}/config/b601_project.yaml", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def generate_launch_description():
+    cfg = _load_project_config()
+    dm_cfg = cfg["hardware"]["dm"]
+    ctrls = cfg["controllers"]
+    safety_cfg = cfg["safety"]
+
+    description_share = FindPackageShare("b601_description")
+    bringup_share = FindPackageShare("b601_bringup")
+    safety_share = FindPackageShare("b601_safety")
+
+    hardware = LaunchConfiguration("hardware")
+    dm_device = LaunchConfiguration("dm_device")
+    dm_enable_motors = LaunchConfiguration("dm_enable_motors")
+    dm_command_mode = LaunchConfiguration("dm_command_mode")
+    dm_log_csv = LaunchConfiguration("dm_log_csv")
+    use_rviz = LaunchConfiguration("use_rviz")
+    use_safety = LaunchConfiguration("use_safety")
+    use_sim_time = LaunchConfiguration("use_sim_time")
+    controllers_file = LaunchConfiguration("controllers_file")
+    safety_params_file = LaunchConfiguration("safety_params_file")
+    initial_positions_file = LaunchConfiguration("initial_positions_file")
+    project_config_file = LaunchConfiguration("project_config_file")
+
+    # robot_description 是 xacro 现算出来的字符串，不是磁盘上的 URDF 文件。
+    # 这样 hardware 参数一变，硬件插件那一段就跟着变，不需要维护两份 URDF。
+    robot_description = ParameterValue(
+        Command(
+            [
+                "xacro ",
+                PathJoinSubstitution([description_share, "urdf", "b601_dm.urdf.xacro"]),
+                " hardware:=",
+                hardware,
+                " dm_device:=",
+                dm_device,
+                " dm_enable_motors:=",
+                dm_enable_motors,
+                " dm_command_mode:=",
+                dm_command_mode,
+                " dm_log_csv:=",
+                dm_log_csv,
+                " initial_positions_file:=",
+                initial_positions_file,
+                " project_config_file:=",
+                project_config_file,
+            ]
+        ),
+        value_type=str,
+    )
+
+    robot_state_publisher = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        output="screen",
+        parameters=[{"robot_description": robot_description, "use_sim_time": use_sim_time}],
+    )
+
+    # controller_manager：唯一“知道硬件存在”的节点。
+    # 它按 URDF 里的 <ros2_control> 加载硬件插件，按 controllers yaml 加载控制器。
+    controller_manager = Node(
+        package="controller_manager",
+        executable="ros2_control_node",
+        output="screen",
+        parameters=[
+            {"robot_description": robot_description, "use_sim_time": use_sim_time},
+            controllers_file,
+        ],
+    )
+
+    # 安全监控：独立节点，只读 /joint_states；急停时停控制器并把硬件置 INACTIVE。
+    safety_monitor = Node(
+        package="b601_safety",
+        executable="safety_monitor",
+        name=safety_cfg.get("node_name", "b601_safety_monitor"),
+        output="screen",
+        parameters=[safety_params_file, {"use_sim_time": use_sim_time}],
+        condition=IfCondition(use_safety),
+    )
+
+    # 控制器清单做成参数：位置模式用 JTC，MIT 模式换成 b601_mit_controller。
+    # 一个 spawner 进程可以按顺序加载多个控制器，比 OnProcessExit 串链简单得多。
+    controllers_arg = LaunchConfiguration("controllers")
+
+    def launch_spawners(context, *args, **kwargs):
+        names = controllers_arg.perform(context).split()
+        return [
+            Node(
+                package="controller_manager",
+                executable="spawner",
+                arguments=[*names, "--controller-manager", "/controller_manager"],
+                output="screen",
+            )
+        ]
+
+    rviz = Node(
+        package="rviz2",
+        executable="rviz2",
+        output="screen",
+        arguments=["-d", PathJoinSubstitution([description_share, "rviz", "b601_display.rviz"])],
+        parameters=[{"use_sim_time": use_sim_time}],
+        condition=IfCondition(use_rviz),
+    )
+
+    default_controllers = " ".join(
+        ["joint_state_broadcaster", ctrls["arm"]["name"], ctrls["gripper"]["name"]]
+    )
+
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                "hardware", default_value=str(cfg["hardware"].get("default_backend", "mock")),
+                description="硬件后端：mock（默认，无实物）| dm（真机）| mujoco（动力学仿真）",
+            ),
+            DeclareLaunchArgument(
+                "use_rviz", default_value="true", description="是否启动 rviz2",
+            ),
+            DeclareLaunchArgument(
+                "use_safety", default_value="true" if safety_cfg.get("enabled", True) else "false",
+                description="是否启动 b601_safety_monitor（默认开；关掉只用于排查安全节点本身）",
+            ),
+            DeclareLaunchArgument(
+                "dm_device", default_value=str(dm_cfg["device"]),
+                description="真机串口（hardware:=dm 时有效；换 USB 口后编号可能变化）",
+            ),
+            DeclareLaunchArgument(
+                "dm_enable_motors", default_value="true" if dm_cfg["enable_motors"] else "false",
+                description="真机是否真的使能电机。false = 只读模式（首调必须 false）",
+            ),
+            DeclareLaunchArgument(
+                "dm_command_mode", default_value=str(dm_cfg["command_mode"]),
+                description="控制模式：pos_vel（电机位置环）/ mit / mit_torque（纯力矩，重力补偿用）",
+            ),
+            DeclareLaunchArgument(
+                "dm_log_csv", default_value=str(dm_cfg.get("log_csv", "")),
+                description="真机 CSV 记录路径（速度/MIT 数据）；留空 = 关闭。"
+                            "例：dm_log_csv:=\"$PWD/.verify/run.csv\"",
+            ),
+            DeclareLaunchArgument(
+                "use_sim_time", default_value="false",
+                description="仿真后端（mujoco/gazebo）里设为 true",
+            ),
+            DeclareLaunchArgument(
+                "controllers_file",
+                default_value=PathJoinSubstitution(
+                    [bringup_share, "config", "b601_controllers.yaml"]),
+                description="controller_manager 要加载的控制器配置文件",
+            ),
+            DeclareLaunchArgument(
+                "controllers", default_value=default_controllers,
+                description="要加载并激活的控制器名（空格分隔）。MIT 模式用 "
+                            "'joint_state_broadcaster b601_mit_controller'",
+            ),
+            DeclareLaunchArgument(
+                "safety_params_file",
+                default_value=PathJoinSubstitution(
+                    [safety_share, "config", "safety_params.yaml"]),
+                description="安全监控参数（由 scripts/sync_config.py 生成，勿手改）",
+            ),
+            DeclareLaunchArgument(
+                "initial_positions_file",
+                default_value=PathJoinSubstitution(
+                    [description_share, "config", "initial_positions.yaml"]),
+                description="上电初值：mock 决定显示姿态，真机决定“以为关节在哪儿”",
+            ),
+            DeclareLaunchArgument(
+                "project_config_file",
+                default_value=PathJoinSubstitution(
+                    [description_share, "config", "b601_project.yaml"]),
+                description="全项目唯一参数真值（关节限位/电机参数/控制模式）",
+            ),
+
+            robot_state_publisher,
+            controller_manager,
+            safety_monitor,
+            rviz,
+
+            OpaqueFunction(function=launch_spawners),
+        ]
+    )

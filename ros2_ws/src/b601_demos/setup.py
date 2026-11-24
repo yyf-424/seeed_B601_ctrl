@@ -1,0 +1,31 @@
+from setuptools import find_packages, setup
+
+package_name = "b601_demos"
+
+setup(
+    name=package_name,
+    version="0.1.0",
+    packages=find_packages(exclude=["test"]),
+    data_files=[
+        ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
+        ("share/" + package_name, ["package.xml"]),
+    ],
+    install_requires=["setuptools"],
+    zip_safe=True,
+    maintainer="dave",
+    maintainer_email="dave@example.com",
+    description="B601 教学演示节点",
+    license="Apache-2.0",
+    tests_require=["pytest"],
+    entry_points={
+        "console_scripts": [
+            # 命令名 = 模块路径:入口函数
+            # 左边是 ros2 run 用的可执行名，右边是包里真正的节点实现
+            "joint_state_monitor = b601_demos.joint_state_monitor:main",
+            "move_to_joints = b601_demos.move_to_joints:main",
+            "demo_trajectory = b601_demos.demo_trajectory:main",
+            "gripper = b601_demos.gripper_control:main",
+            "moveit_pose_goal = b601_demos.moveit_pose_goal:main",
+        ],
+    },
+)

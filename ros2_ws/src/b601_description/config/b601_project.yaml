@@ -1,0 +1,428 @@
+# ============================================================================
+# b601_project.yaml —— B601_example 全项目唯一参数真值（single source of truth）
+#
+# 规矩（改之前先读）：
+#   1. 「关节限位 / 电机参数 / 启动姿态 / 控制器 / 规划限速 / 安全阈值」只允许在这里改。
+#   2. 改完必须跑：  ./scripts/sync_config.py          （生成所有派生文件）
+#      再跑：        ./scripts/verify.sh              （一致性检查会挡下没同步的状态）
+#   3. 下游文件带 "DO NOT EDIT" 标记，由脚本生成，手改会被下一次 sync 覆盖。
+#   4. xacro（URDF / ros2_control 接口）在运行时**直接读本文件**，不生成中间产物，
+#      所以只要本文件变了，模型立刻跟着变。
+#
+# 谁读这份配置：
+#   b601_description/urdf/inc/b601_links.xacro        关节 limit（lower/upper/effort/velocity）
+#   b601_description/urdf/inc/ros2_control.xacro      命令/状态接口 + 真机电机参数 + 软限位
+#   b601_bringup/config/b601_controllers.yaml          [生成] 控制器
+#   b601_moveit_config/config/joint_limits.yaml        [生成] MoveIt 速度/加速度限制
+#   b601_description/config/initial_positions.yaml     [生成] 上电/启动姿态
+#   b601_safety/config/safety_params.yaml              [生成] 安全监控节点参数
+#   b601_demos/b601_demos/trajectory_utils.py          运行时读 joints 限位做越界拒发
+# ============================================================================
+
+meta:
+  version: 1
+  updated: "2026-11-21"
+  note: >
+    改任何限位/增益/阈值之前，先想清楚它属于哪一层：模型事实放 joints，
+    控制器行为放 controllers，安全策略放 safety，规划器速度放 moveit。
+
+# ---------------------------------------------------------------------------
+# 机器人整体
+# ---------------------------------------------------------------------------
+robot:
+  name: b601_dm
+  # ros2_control 的 <ros2_control name="...">，也是 set_hardware_component_state 的服务参数
+  ros2_control_name: b601
+  # 六轴手臂关节（顺序 = 轨迹数组顺序 = MoveIt 规划组顺序）
+  arm_joints: [joint1, joint2, joint3, joint4, joint5, joint6]
+  gripper_joint: finger_left
+  mimic_joint: finger_right
+
+# ---------------------------------------------------------------------------
+# 关节：物理事实（URDF 限位）+ 电机映射（真机后端）+ 启动姿态
+#
+#   min_pos / max_pos     URDF limit 与 ros2_control 软限位，一改全改
+#   max_velocity          关节单位（rad/s 或 m/s），MoveIt 时间参数化与安全节点都用它
+#   max_effort            关节单位力矩，同时作为真机 torque_limit
+#   max_acceleration      MoveIt 规划用
+#   startup               上电/启动姿态（mock 初值 + 真机"以为在哪儿" + 安全节点警告基线）
+#   motor.*               仅 hardware:=dm 生效；scale 把电机 rad 换成关节单位
+#   control               false = 没有命令接口（mimic 从动指）
+#
+# 限位原则（2026-11-21 更新）：**上下限一律取保守值** = 官方值与 2026-11-20 手推实测值取交集
+#   · joint1: 实测 −2.597/+2.627 → 取 [−2.59, +2.60]（官方 ±2.8 越过停止位）
+#   · joint2/3: 实测下限 −3.436/−3.926 比官方 −3.14 更远 → 保留 −3.14（窄的一侧）
+#   · joint4: 实测 −1.560/+2.226 → 下限收到 −1.56（原来是 −1.87，比实测宽 0.31）
+#   · joint5: 实测 −0.730/+1.800 → 下限收到 −0.73（原来是 −1.57，比实测宽 0.84 ≈ 48°）
+#   · joint6/夹爪: 沿用更窄的一侧
+# 角速度（2026-11-21 按需求放宽）：joint1..6 统一 6.0 rad/s；夹爪 0.05 m/s 不变。
+#   ⚠ 安全节点的急停线 = estop_vel_ratio(1.0) × max_velocity → 现在 joint1..6 都是 6.0 rad/s，
+#     警告线 4.8 rad/s。放宽速度就放宽了急停门限，这是刻意的取舍，别再回头当成 bug。
+# ---------------------------------------------------------------------------
+joints:
+  joint1:
+    label: 底座回转
+    type: revolute
+    min_pos: -2.59
+    max_pos: 2.60
+    max_velocity: 6.0
+    # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
+    feedback_jump_limit: 0.21
+    max_effort: 27.0
+    max_acceleration: 4.0
+    startup: 0.0
+    control: true
+    motor:
+      id: 1
+      feedback_id: 17
+      model: "4340P"
+      direction: 1.0
+      scale: 1.0
+      zero_offset: 0.0
+      kp: 120.0
+      kd: 8.0
+
+  joint2:
+    label: 大臂抬起
+    type: revolute
+    min_pos: -3.14
+    max_pos: 0.0
+    max_velocity: 6.0
+    # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
+    feedback_jump_limit: 0.21
+    max_effort: 27.0
+    max_acceleration: 4.0
+    startup: -0.3
+    control: true
+    motor:
+      id: 2
+      feedback_id: 18
+      model: "4340P"
+      direction: 1.0
+      scale: 1.0
+      zero_offset: 0.0
+      kp: 120.0
+      kd: 8.0
+
+  joint3:
+    label: 小臂肘
+    type: revolute
+    min_pos: -3.14
+    max_pos: 0.0
+    max_velocity: 6.0
+    # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
+    feedback_jump_limit: 0.21
+    max_effort: 27.0
+    max_acceleration: 4.0
+    startup: -0.6
+    control: true
+    motor:
+      id: 3
+      feedback_id: 19
+      model: "4340P"
+      direction: 1.0
+      scale: 1.0
+      zero_offset: 0.0
+      kp: 120.0
+      kd: 8.0
+
+  joint4:
+    label: 腕部回转
+    type: revolute
+    min_pos: -1.56
+    max_pos: 1.57
+    max_velocity: 6.0
+    # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
+    feedback_jump_limit: 0.37
+    max_effort: 7.0
+    max_acceleration: 8.0
+    startup: 0.0
+    control: true
+    motor:
+      id: 4
+      feedback_id: 20
+      model: "4310"
+      direction: 1.0
+      scale: 1.0
+      zero_offset: 0.0
+      kp: 18.0
+      kd: 2.0
+
+  joint5:
+    label: 腕部俯仰
+    type: revolute
+    min_pos: -0.73
+    max_pos: 1.57
+    max_velocity: 6.0
+    # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
+    feedback_jump_limit: 0.37
+    max_effort: 7.0
+    max_acceleration: 8.0
+    startup: 0.0
+    control: true
+    motor:
+      id: 5
+      feedback_id: 21
+      model: "4310"
+      direction: 1.0
+      scale: 1.0
+      zero_offset: 0.0
+      kp: 18.0
+      kd: 2.0
+
+  joint6:
+    label: 末端自转
+    type: revolute
+    min_pos: -3.14
+    max_pos: 3.14
+    max_velocity: 6.0
+    # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
+    feedback_jump_limit: 0.37
+    max_effort: 7.0
+    max_acceleration: 8.0
+    startup: 0.0
+    control: true
+    motor:
+      id: 6
+      feedback_id: 22
+      model: "4310"
+      direction: 1.0
+      scale: 1.0
+      zero_offset: 0.0
+      kp: 18.0
+      kd: 2.0
+
+  # 主动指：prismatic，单位米。电机转 rad → 关节走 m，scale = 0.01 m/rad
+  finger_left:
+    label: 夹爪主动指
+    type: prismatic
+    # 夹爪开合是正常操作：不产生"接近限位/离开启动位形"警告，但越限照样急停
+    warn_near_limit: false
+    static_tolerance: 0.002      # m：夹爪总行程只有 0.05 m
+    warn_pose_deviation: false
+    warn_pos_margin: 0.005
+    min_pos: 0.0
+    max_pos: 0.05
+    max_velocity: 0.05
+    # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
+    feedback_jump_limit: 0.05
+    max_effort: 8.0
+    max_acceleration: 0.2
+    startup: 0.0
+    control: true
+    motor:
+      id: 7
+      feedback_id: 23
+      model: "4310"
+      direction: -1.0
+      scale: 0.01
+      zero_offset: 0.0
+      kp: 8.0
+      kd: 1.0
+
+  # 从动指：URDF 里是 mimic（multiplier=-1），没有命令接口，只有状态
+  finger_right:
+    label: 夹爪从动指
+    type: prismatic
+    warn_near_limit: false
+    static_tolerance: 0.002      # m：夹爪总行程只有 0.05 m
+    warn_pose_deviation: false
+    warn_pos_margin: 0.005
+    min_pos: -0.05
+    max_pos: 0.0
+    max_velocity: 0.05
+    # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
+    feedback_jump_limit: 0.05
+    max_effort: 8.0
+    max_acceleration: 0.2
+    startup: 0.0
+    control: false
+
+# ---------------------------------------------------------------------------
+# 硬件后端现场参数（hardware:=dm 时生效）
+# 静态结构（几个关节、限位）在 joints 里；现场差异（串口、安全阀）在这里。
+# ---------------------------------------------------------------------------
+hardware:
+  default_backend: mock          # mock | dm | mujoco（launch 的 hardware:= 可覆盖）
+  dm:
+    device: /dev/ttyACM0
+    baudrate: 921600
+    command_mode: pos_vel       # pos_vel | mit | mit_torque
+    enable_motors: false        # ⚠ 安全总闸：false = 只读模式
+    effort_sign: -1.0           # 力矩**反馈**：电机 torq 与关节正方向反号（实测）
+    command_sign: 1.0           # 力矩**命令**：与关节正方向同号（实测；与 effort_sign 不同！）
+                                # ⚠ 2026-11-21：曾把反馈的 -1 误用到命令上 → PD 正反馈，
+                                #   真机首个 0.05 rad 动作 joint5 冲到 10.26 rad/s（被急停拦下）
+    velocity_scale: 0.2         # 全局速度缩放，首次上电建议 0.1
+    watchdog_timeout: 0.5       # 超时无新命令 → 原地保持
+    can_timeout_ms: 0           # 电机侧 CAN 超时报警（0 = 不设）
+    max_write_failures: 20      # 连续写失败这么多次即停用硬件
+    feedback_wait_ms: 2000      # configure 阶段等首帧反馈上限
+    # ---- CSV 记录（速度/MIT 数据留痕）----
+    # 留空 = 关闭。填路径（如 .verify/run.csv）后，插件每采样周期写一行，包含
+    # 电机原始 pos/vel/torq（**过滤前**）、过滤后的关节状态、以及命令值
+    # （pos_vel/mit → 目标位置；mit_torque → 力矩命令）。用于事后分析"抽风"这类事件。
+    log_csv: ""
+    log_rate_hz: 200.0
+
+    request_feedback: true      # 达妙是应答式：不发请求帧就收不到任何反馈
+    feedback_divider: 1         # 每 N 个控制周期发一次请求帧（1 = 每周期）
+    mode_switch_timeout_ms: 1000  # ensure_mode 的等待上限
+
+# ---------------------------------------------------------------------------
+# 控制器（ros2_control）
+# 位置模式用 arm/gripper；力控模式用 mit。同一时刻只加载其中一套。
+# ---------------------------------------------------------------------------
+controllers:
+  update_rate: 200
+
+  joint_state_broadcaster:
+    type: joint_state_broadcaster/JointStateBroadcaster
+    params:
+      use_local_topics: false
+
+  arm:
+    name: b601_arm_controller
+    type: joint_trajectory_controller/JointTrajectoryController
+    joints: [joint1, joint2, joint3, joint4, joint5, joint6]
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+    params:
+      allow_nonzero_velocity_at_trajectory_end: true
+      allow_partial_joints_goal: false
+
+  gripper:
+    name: b601_gripper_controller
+    type: joint_trajectory_controller/JointTrajectoryController
+    joints: [finger_left]
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+    params:
+      allow_nonzero_velocity_at_trajectory_end: true
+      allow_partial_joints_goal: true
+
+  # MIT 力控（b601_mit_controller）暂【未】纳入统一配置：
+  #   它属于"重力补偿/力控"这条线，真机复测通过后再把 kp/kd/重力参数搬到这里统一管理。
+  #   在那之前 b601_bringup/config/b601_mit_controllers.yaml 仍是手写文件（不生成、不校验）。
+  #   TODO(后续): 迁入 controllers.mit + 在 sync_config.py 里恢复生成。
+
+# ---------------------------------------------------------------------------
+# MoveIt 规划限速（时间参数化的依据）
+# default_*_scaling 是教学默认：只用 20% 极限速度，便于观察
+# ---------------------------------------------------------------------------
+moveit:
+  default_velocity_scaling_factor: 0.2
+  default_acceleration_scaling_factor: 0.2
+  trajectory_execution:
+    allowed_execution_duration_scaling: 1.5
+    allowed_goal_duration_margin: 0.5
+    allowed_start_tolerance: 0.05
+
+# ---------------------------------------------------------------------------
+# 归中（recenter / 关机停放）姿态 —— 2026-11-21 实测校准
+#
+#   这是"竖直停放位"的**实测值**，不是凭想象写死的 0。校准依据：手臂静止停放在
+#   竖直位时，7 台电机的编码器实测值（原始角 = 关节角，zero_offset≈0、scale≈1）：
+#     joint1 +0.0036  joint2 −0.0109  joint3 −0.0162
+#     joint4 +0.0650  joint5 −0.1684  joint6 −0.0013   finger_left +0.0003
+#   · `scripts/dm_park.sh` 直接读这里作为归中目标（AGENTS §11.4 的执行体）；
+#   · 为什么必须校准：编码器零位会随插拔线束/电机重新初始化漂移
+#     （当天见过 j2 读到 +0.0261），用写死的 0 会把"其实已在位"判成"没到位"，
+#     或者反过来把真实偏移掩盖掉；
+#   · 换了机械臂/重新标定零位后，必须重新测一次并更新本节（含 raw_encoders 快照）。
+recenter:
+  calibrated_at: "2026-11-21"
+  note: "实测竖直停放位：原始编码器值 = 关节值（zero_offset≈0, scale≈1）"
+  joints:
+    joint1: +0.0036
+    joint2: -0.0109
+    joint3: -0.0162
+    joint4: +0.0650
+    joint5: -0.1684
+    joint6: -0.0013
+  raw_encoders:            # 同一时刻的电机原始读数快照（下次用来比对漂移）
+    joint1: +0.0036
+    joint2: -0.0109
+    joint3: -0.0162
+    joint4: +0.0650
+    joint5: -0.1684
+    joint6: -0.0013
+    finger_left: +0.0003
+
+# ---------------------------------------------------------------------------
+# 安全监控（b601_safety_monitor）
+#
+#   状态三档：NORMAL（正常）/ WARNING（警告）/ EMERGENCY_STOP（急停）
+#   只有急停会动硬件；正常与警告都允许继续驱动机械臂。
+#
+#   ESTOP 触发条件（只看这两类，别往里加别的，否则会误停）：
+#     · 角度越限：pos < min_pos - angle.estop_margin  或  pos > max_pos + angle.estop_margin
+#     · 角速度越限：|vel| > velocity.estop_ratio × max_velocity
+#                   （如配 velocity.estop_absolute 则取两者更严的那个）
+#   WARNING 触发条件（不下发任何停机动作）：
+#     · 角度接近限位（距限位 < 该关节的 warn_pos_margin，默认 angle.warn_margin）
+#       —— 每个关节可在 joints 段用 warn_near_limit / warn_pos_margin 单独开关与调值
+#     · 角速度达到 velocity.warn_ratio × max_velocity
+#     · 与启动姿态的偏差 > pose.warn_deviation（默认开：机械臂已离开启动位形）
+#     · /joint_states 断流（默认只警告；把 estop_on_feedback_timeout 设 true 才升级为急停）
+#
+#   ESTOP 动作（顺序执行，任一失败只记录不中断）：
+#     ① 查询 /controller_manager/list_controllers，拿到当前 active 的控制器
+#     ② /controller_manager/switch_controller 全部 deactivate（不再写命令）
+#     ③ /controller_manager/set_hardware_component_state 把硬件设为 INACTIVE
+#        → DmSystemHardware::on_deactivate() → disable_all()，即"全臂失能"
+#   状态锁存（latch），只有调用 clear_service 且实测状态已回到安全范围才解除。
+#   解除**不会**自动重新激活控制器 —— 必须人工重新 spawn，这是故意的。
+# ---------------------------------------------------------------------------
+safety:
+  enabled: true
+  node_name: b601_safety_monitor
+  status_topic: /b601_safety/status
+  clear_service: /b601_safety/clear_estop
+  evaluate_rate_hz: 100.0        # 状态评估频率（看门狗级）
+  publish_rate_hz: 20.0          # 状态话题发布频率（另加"状态一变立刻发"）
+  feedback_timeout_sec: 0.3      # 超过这么久没有 /joint_states 判为断流
+  estop_on_feedback_timeout: false
+  startup_grace_sec: 3.0         # 启动宽限：这段时间内不因"还没数据"报警
+
+  angle:
+    warn_margin: 0.12            # rad（夹爪按 m 解释，见 joint 单位）
+    estop_margin: 0.0            # 0 = 一到硬限位就急停
+    # 【静止零位漂移许用值】rad / m。手臂静止顶在机械停止位上时，实测值可能比配置限位
+    # 多出一点点（2026-11-21 实测 joint2 顶停止位读到 +0.026，被激活检查拦下）。
+    # 这个量只作为**静止态的容差**给两处用：
+    #   ① 硬件插件 on_activate 的"超限拒绝使能"检查；
+    #   ② 安全节点的"角度越限急停"判定。
+    # 它**不**放宽命令夹紧（命令永远夹在真实限位内），也**不**影响速度保护。
+    # 真正的越限保护仍由"物理停止位 + 速度急停"兜底，所以 0.05 是安全的。
+    # 逐关节可在 joints.<name>.static_tolerance 覆盖（夹爪单位是 m，必须给更小的值）
+    static_tolerance: 0.05
+
+  velocity:
+    warn_ratio: 0.80
+    estop_ratio: 1.00
+    estop_absolute: 0.0          # rad/s，0 = 不启用绝对上限
+
+  pose:
+    warn_on_deviation: true
+    warn_deviation: 0.35
+
+  estop:
+    # ["*"] = 停掉当前所有 active 控制器；也可以显式列出（只停这些）
+    deactivate_controllers: ["*"]
+    deactivate_hardware: true
+    hardware_component: b601     # 与 robot.ros2_control_name 一致（sync 时校验）
+    service_timeout_sec: 2.0
+    latch: true
+
+validation:
+  pos_vel_five_poses:
+    slew_rad_s: 0.15
+    sample_sec: 1.0
+    max_delta_rad: 0.62
+    targets:
+    - [0.00, -0.50, -0.60, 0.00, 0.00, 0.00]
+    - [0.40, -0.90, -1.10, 0.40, 0.30, 0.50]
+    - [-0.10, -1.25, -1.50, 0.10, -0.30, 0.00]
+    - [0.35, -0.75, -0.90, -0.30, 0.20, 0.40]
+    - [-0.20, -1.05, -1.30, 0.10, -0.30, -0.10]

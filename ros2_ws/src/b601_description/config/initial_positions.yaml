@@ -1,0 +1,19 @@
+# ============================================================================
+# ⚠ 本文件由 scripts/sync_config.py 自动生成，请勿手工编辑。
+#    要改参数请改：ros2_ws/src/b601_description/config/b601_project.yaml
+#    改完执行：  ./scripts/sync_config.py
+# ============================================================================
+# 上电/启动时的关节角（rad / m）。被 ros2_control.xacro 的 state_interface
+# initial_value 使用，决定
+#   - mock 后端启动后 /joint_states 的初值
+#   - 真机后端上电时认为关节在哪儿（必须与实测一致，否则第一次写命令会跳）
+#   - 安全节点判断「是否已离开启动位形」的基线
+initial_positions:
+  joint1: 0.0
+  joint2: -0.3
+  joint3: -0.6
+  joint4: 0.0
+  joint5: 0.0
+  joint6: 0.0
+  finger_left: 0.0
+  finger_right: 0.0

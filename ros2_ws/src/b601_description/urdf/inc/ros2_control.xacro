@@ -1,0 +1,261 @@
+<?xml version="1.0"?>
+<!--
+  ros2_control.xacro —— 把 URDF 接到 ros2_control 的“插座”。
+
+  一个 <ros2_control name="..."> 就是一份硬件资源，硬件插件由 hardware 参数选择：
+    hardware:=mock    → mock_components/GenericSystem（ros2_control 自带，无代码，先学会上层）
+    hardware:=dm      → b601_hardware/DmSystemHardware（真机，达妙电机 + USB-CAN 串口桥）
+    hardware:=mujoco  → b601_hardware/MujocoSystemHardware（MuJoCo 动力学后端，待实现）
+
+  三种后端共用同一套 command/state 接口约定，所以上面的控制器 / MoveIt / 演示节点
+  一行都不用改 —— 这就是本项目把“驱动”抽成可插拔的用意。
+
+  接口约定（对三个后端都成立）：
+    - 命令：每个手臂关节只有 position（mit_torque 模式换成 effort）
+    - 状态：position + velocity（dm/mujoco 另有 effort，标定与重力补偿要用）
+    - 夹爪：只有 finger_left 有命令接口，finger_right 是 mimic，只报状态
+
+  ⚠ 本文件不再写任何数字：
+    关节限位 / 电机 ID / kp / kd / scale / direction / 软限位 全部来自
+    config/b601_project.yaml 的 joints 段；
+    串口、看门狗、速度缩放等现场参数来自同一文件的 hardware.dm 段。
+    三个 dm_* xacro 参数如果传空字符串，也会回落到该配置（launch 默认就是这么传的）。
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- 单个手臂关节：接口 + （仅 dm 后端）电机参数 -->
+  <xacro:macro name="b601_arm_joint" params="name initial_position with_effort hardware cfg dm_command_mode">
+    <xacro:property name="jc" value="${cfg['joints'][name]}"/>
+    <xacro:property name="mt" value="${jc['motor']}"/>
+    <joint name="${name}">
+      <!-- 命令接口由控制模式决定：
+           mit_torque（重力补偿）→ effort，由 MIT 控制器给力矩；
+           其它模式              → position，由 JTC 等位置控制器给轨迹 -->
+      <xacro:if value="${dm_command_mode == 'mit_torque'}">
+        <command_interface name="effort"/>
+      </xacro:if>
+      <xacro:unless value="${dm_command_mode == 'mit_torque'}">
+        <command_interface name="position"/>
+      </xacro:unless>
+      <state_interface name="position">
+        <param name="initial_value">${initial_position}</param>
+      </state_interface>
+      <!-- 仿真后端（MujocoSystemHardware）用它决定仿真初值：
+           MJCF 的 qpos0 全是 0，而 joint3/joint4 的限位正好卡在 0 / 1.57，
+           从全 0 起步等于贴着限位，安全节点第一帧就会判越限。 -->
+      <param name="initial_position">${initial_position}</param>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <xacro:if value="${with_effort}">
+        <state_interface name="effort">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </xacro:if>
+
+      <xacro:if value="${hardware == 'dm'}">
+        <param name="motor_id">${mt['id']}</param>
+        <param name="feedback_id">${mt['feedback_id']}</param>
+        <param name="model">${mt['model']}</param>
+        <param name="direction">${mt['direction']}</param>
+        <param name="scale">${mt['scale']}</param>
+        <param name="zero_offset">${mt['zero_offset']}</param>
+        <param name="kp">${mt['kp']}</param>
+        <param name="kd">${mt['kd']}</param>
+        <param name="vel_limit">${jc['max_velocity']}</param>
+        <param name="min_pos">${jc['min_pos']}</param>
+        <param name="max_pos">${jc['max_pos']}</param>
+        <param name="torque_limit">${jc['max_effort']}</param>
+        <!-- 反馈跳变门限（rad/周期）：显式钉死，避免放宽 vel_limit 时把坏帧守卫也放松 -->
+        <param name="feedback_jump_limit">${jc['feedback_jump_limit']}</param>
+        <!-- 静止零位漂移许用值：手臂顶在机械停止位上时实测值可能略微越界（实测 0.026）。
+             只用激活检查，命令夹紧仍按真实限位。夹爪单位是 m，真值里单独给 0.002。 -->
+        <param name="limit_tolerance">${jc.get('static_tolerance', 0.05)}</param>
+      </xacro:if>
+
+      <!-- 仿真后端共享的物理参数：kp/kd 用作插件内部 PD，min/max_pos 作软限位，
+           torque_limit 直接作用力矩上限。缺了这些，仿真后端就是"没有控制、没有限位"。——
+           2026-11-21 实测：漏传导致 MuJoCo 里 kp=0、限位=0，手臂直接朝限位倒下去。 -->
+      <xacro:if value="${hardware == 'mujoco'}">
+        <param name="kp">${mt['kp']}</param>
+        <param name="kd">${mt['kd']}</param>
+        <param name="vel_limit">${jc['max_velocity']}</param>
+        <param name="min_pos">${jc['min_pos']}</param>
+        <param name="max_pos">${jc['max_pos']}</param>
+        <param name="torque_limit">${jc['max_effort']}</param>
+      </xacro:if>
+    </joint>
+  </xacro:macro>
+
+  <xacro:macro name="b601_ros2_control"
+               params="name hardware:='mock' initial_positions_file project_config_file
+                       dm_device:='' dm_enable_motors:='' dm_command_mode:='' dm_log_csv:=''">
+    <xacro:property name="CFG" value="${xacro.load_yaml(project_config_file)}"/>
+    <xacro:property name="J" value="${CFG['joints']}"/>
+    <xacro:property name="HW" value="${CFG['hardware']['dm']}"/>
+
+    <xacro:property name="initial_positions"
+                    value="${xacro.load_yaml(initial_positions_file)['initial_positions']}"/>
+    <!-- mock 后端由 ros2_control 自己算 effort 状态；真机/仿真后端由驱动上报实测值 -->
+    <xacro:property name="with_effort" value="${hardware != 'mock'}"/>
+
+    <!-- 现场参数：launch/CLI 传了就覆盖，没传（空串）就用统一配置里的值 -->
+    <xacro:property name="eff_device" value="${dm_device if dm_device != '' else HW['device']}"/>
+    <xacro:property name="eff_enable"
+                    value="${dm_enable_motors if dm_enable_motors != '' else HW['enable_motors']}"/>
+    <xacro:property name="eff_mode"
+                    value="${dm_command_mode if dm_command_mode != '' else HW['command_mode']}"/>
+    <xacro:property name="eff_log_csv"
+                    value="${dm_log_csv if dm_log_csv != '' else HW['log_csv']}"/>
+
+    <ros2_control name="${name}" type="system">
+      <hardware>
+        <xacro:if value="${hardware == 'mock'}">
+          <!-- 官方 mock 组件：收到 position 命令后直接把状态设成命令值，用来先打通上层 -->
+          <plugin>mock_components/GenericSystem</plugin>
+        </xacro:if>
+
+        <xacro:if value="${hardware == 'dm'}">
+          <plugin>b601_hardware/DmSystemHardware</plugin>
+          <!-- 串口：USB-CAN 桥。建议配 udev 规则固定成 /dev/b601，别写死 ttyACM 编号 -->
+          <param name="device">${eff_device}</param>
+          <param name="baudrate">${HW['baudrate']}</param>
+          <!-- pos_vel：电机内部位置环 + 速度上限（先跑通用这个）
+               mit    ：位置+速度+力矩混合，重力补偿/力控阶段用 -->
+          <param name="command_mode">${eff_mode}</param>
+          <!-- ⚠ 安全总闸：false = 只读模式。控制器照常运行、/joint_states 是真实反馈，
+               但绝不给电机发使能或运动命令。真机第一次上电一定先 false。 -->
+          <param name="enable_motors">${eff_enable}</param>
+          <!-- 力矩符号：达妙电机上报/接收的 torq 与关节正方向力矩反号（实测确认）。
+               插件用它把 /joint_states.effort 与 effort 命令统一到"关节约定"。 -->
+          <param name="effort_sign">${HW['effort_sign']}</param>
+          <!-- 命令与反馈的符号**不同**：反馈反号(-1)，命令同号(+1) -->
+          <param name="command_sign">${HW['command_sign']}</param>
+          <!-- 全局速度缩放：首次上真机用 0.1，确认后再放开 -->
+          <param name="velocity_scale">${HW['velocity_scale']}</param>
+          <!-- 超过该时长没有新命令 → 原地保持当前位置 -->
+          <param name="watchdog_timeout">${HW['watchdog_timeout']}</param>
+          <!-- 电机侧 CAN 超时报警（0 = 不设置） -->
+          <param name="can_timeout_ms">${HW['can_timeout_ms']}</param>
+          <!-- 连续写失败这么多次就主动停用硬件，避免失控 -->
+          <param name="max_write_failures">${HW['max_write_failures']}</param>
+          <!-- configure 阶段等首帧反馈的上限 -->
+          <param name="feedback_wait_ms">${HW['feedback_wait_ms']}</param>
+          <param name="request_feedback">${HW['request_feedback']}</param>
+          <param name="feedback_divider">${HW['feedback_divider']}</param>
+          <!-- 静止零位漂移许用值（rad/m）：手臂顶在机械停止位上时实测值可能略微越界，
+               激活检查按 [min_pos - tol, max_pos + tol] 判。命令夹紧仍按真实限位。 -->
+          <param name="limit_tolerance">${CFG['safety']['angle']['static_tolerance']}</param>
+          <param name="mode_switch_timeout_ms">${HW['mode_switch_timeout_ms']}</param>
+          <!-- CSV 记录（速度/MIT 数据留痕）：留空 = 关闭。
+               开启后每采样周期写一行，含电机原始 pos/vel/torq 与过滤后的关节状态、命令值。 -->
+          <param name="log_csv">${eff_log_csv}</param>
+          <param name="log_rate_hz">${HW['log_rate_hz']}</param>
+        </xacro:if>
+
+        <xacro:if value="${hardware == 'mujoco'}">
+          <!-- MuJoCo 动力学仿真后端：物理由 MuJoCo 算，控制器/安全节点/MoveIt 全在环。
+               model_path 用 $(find) 取安装后的绝对路径（插件里直接 mj_loadXML）。 -->
+          <plugin>b601_hardware/MujocoSystemHardware</plugin>
+          <param name="model_path">$(find b601_mujoco)/models/b601_arm.xml</param>
+          <param name="command_mode">${eff_mode}</param>
+          <!-- 仿真里不需要额外收紧限速（1.0 = 只用 vel_limit × dt） -->
+          <param name="velocity_scale">1.0</param>
+          <!-- ⚠ 仿真后端的力矩符号与真机**不同**：
+               达妙电机的 tau 命令与关节正方向力矩反号 → 真机用 effort_sign=-1；
+               而 MuJoCo 的执行器直接吃"关节约定"的力矩 → 这里必须是 +1。
+               （2026-11-21 实测：照抄 -1 会让 PD 变成正反馈，1 秒内甩到 7.5 rad/s 触发急停） -->
+          <param name="effort_sign">1.0</param>
+          <param name="verbose">0</param>
+        </xacro:if>
+      </hardware>
+
+      <!-- ==================================================== 六个手臂关节 -->
+      <!-- 限位与 kp/kd/vel_limit 全在 config/b601_project.yaml；
+           前三个是 4340P（大增益大扭矩），后三个 4310（小增益小扭矩） -->
+      <xacro:b601_arm_joint name="joint1" initial_position="${initial_positions['joint1']}"
+        with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
+        dm_command_mode="${eff_mode}"/>
+      <xacro:b601_arm_joint name="joint2" initial_position="${initial_positions['joint2']}"
+        with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
+        dm_command_mode="${eff_mode}"/>
+      <xacro:b601_arm_joint name="joint3" initial_position="${initial_positions['joint3']}"
+        with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
+        dm_command_mode="${eff_mode}"/>
+      <xacro:b601_arm_joint name="joint4" initial_position="${initial_positions['joint4']}"
+        with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
+        dm_command_mode="${eff_mode}"/>
+      <xacro:b601_arm_joint name="joint5" initial_position="${initial_positions['joint5']}"
+        with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
+        dm_command_mode="${eff_mode}"/>
+      <xacro:b601_arm_joint name="joint6" initial_position="${initial_positions['joint6']}"
+        with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
+        dm_command_mode="${eff_mode}"/>
+
+      <!-- ============================================================ 夹爪 -->
+      <!-- 夹爪关节是 prismatic（m），电机转的是 rad，单位换算靠 scale：
+           官方 DM 夹爪开合行程约 5 rad ↔ URDF 的 0.05 m → scale = 0.01 m/rad
+           direction = -1：电机负方向对应关节正方向（张开），与官方配置 open=-5.0 一致 -->
+      <xacro:property name="FL" value="${J['finger_left']}"/>
+      <xacro:property name="FLM" value="${FL['motor']}"/>
+      <joint name="finger_left">
+        <xacro:if value="${eff_mode == 'mit_torque'}">
+          <command_interface name="effort"/>
+        </xacro:if>
+        <xacro:unless value="${eff_mode == 'mit_torque'}">
+          <command_interface name="position"/>
+        </xacro:unless>
+        <state_interface name="position">
+          <param name="initial_value">${initial_positions['finger_left']}</param>
+        </state_interface>
+        <param name="initial_position">${initial_positions['finger_left']}</param>
+        <!-- 静止零位漂移许用值（夹爪单位 m，真值里给 0.002） -->
+        <param name="limit_tolerance">${J['finger_left'].get('static_tolerance', 0.05)}</param>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <xacro:if value="${hardware == 'dm'}">
+          <param name="motor_id">${FLM['id']}</param>
+          <param name="feedback_id">${FLM['feedback_id']}</param>
+          <param name="model">${FLM['model']}</param>
+          <param name="direction">${FLM['direction']}</param>
+          <param name="scale">${FLM['scale']}</param>
+          <param name="zero_offset">${FLM['zero_offset']}</param>
+          <param name="kp">${FLM['kp']}</param>
+          <param name="kd">${FLM['kd']}</param>
+          <param name="vel_limit">${FL['max_velocity']}</param>
+          <param name="min_pos">${FL['min_pos']}</param>
+          <param name="max_pos">${FL['max_pos']}</param>
+          <param name="torque_limit">${FL['max_effort']}</param>
+          <param name="feedback_jump_limit">${FL['feedback_jump_limit']}</param>
+        </xacro:if>
+        <xacro:if value="${hardware == 'mujoco'}">
+          <param name="kp">${FLM['kp']}</param>
+          <param name="kd">${FLM['kd']}</param>
+          <param name="vel_limit">${FL['max_velocity']}</param>
+          <param name="min_pos">${FL['min_pos']}</param>
+          <param name="max_pos">${FL['max_pos']}</param>
+          <param name="torque_limit">${FL['max_effort']}</param>
+        </xacro:if>
+      </joint>
+
+      <!-- 从动指：没有命令接口，只有状态（由 finger_left 的 mimic 关系决定） -->
+      <!-- 仿真后端需要它的限位来做运动学夹紧（否则物理会把它推过 0，安全节点判越限）。 -->
+      <xacro:property name="FR" value="${J['finger_right']}"/>
+      <joint name="finger_right">
+        <xacro:if value="${hardware == 'mujoco'}">
+          <param name="min_pos">${FR['min_pos']}</param>
+          <param name="max_pos">${FR['max_pos']}</param>
+        </xacro:if>
+        <state_interface name="position">
+          <param name="initial_value">${initial_positions['finger_right']}</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <!-- 静止零位漂移许用值（夹爪单位 m，真值里给 0.002） -->
+        <param name="limit_tolerance">${J['finger_right'].get('static_tolerance', 0.05)}</param>
+      </joint>
+    </ros2_control>
+  </xacro:macro>
+</robot>

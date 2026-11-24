@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>b601_description</name>
+  <version>0.1.0</version>
+  <description>
+    B601-DM 六轴机械臂 + 平行夹爪的机器人描述（xacro / URDF）与 ros2_control 配置。
+    整个示例项目的“唯一真值来源”：RViz、MoveIt、MuJoCo、真机驱动都从这里取模型。
+  </description>
+  <maintainer email="dave@example.com">dave</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher_gui</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,58 @@
+# ============================================================================
+# ⚠ 本文件由 scripts/sync_config.py 自动生成，请勿手工编辑。
+#    要改参数请改：ros2_ws/src/b601_description/config/b601_project.yaml
+#    改完执行：  ./scripts/sync_config.py
+# ============================================================================
+# MoveIt 规划限速：时间参数化的依据。速度上限 = URDF limit.velocity（同一个来源）。
+default_velocity_scaling_factor: 0.2
+default_acceleration_scaling_factor: 0.2
+joint_limits:
+  joint1:
+    has_velocity_limits: true
+    max_velocity: 6.0
+    has_acceleration_limits: true
+    max_acceleration: 4.0
+    has_deceleration_limits: true
+    max_deceleration: -4.0
+  joint2:
+    has_velocity_limits: true
+    max_velocity: 6.0
+    has_acceleration_limits: true
+    max_acceleration: 4.0
+    has_deceleration_limits: true
+    max_deceleration: -4.0
+  joint3:
+    has_velocity_limits: true
+    max_velocity: 6.0
+    has_acceleration_limits: true
+    max_acceleration: 4.0
+    has_deceleration_limits: true
+    max_deceleration: -4.0
+  joint4:
+    has_velocity_limits: true
+    max_velocity: 6.0
+    has_acceleration_limits: true
+    max_acceleration: 8.0
+    has_deceleration_limits: true
+    max_deceleration: -8.0
+  joint5:
+    has_velocity_limits: true
+    max_velocity: 6.0
+    has_acceleration_limits: true
+    max_acceleration: 8.0
+    has_deceleration_limits: true
+    max_deceleration: -8.0
+  joint6:
+    has_velocity_limits: true
+    max_velocity: 6.0
+    has_acceleration_limits: true
+    max_acceleration: 8.0
+    has_deceleration_limits: true
+    max_deceleration: -8.0
+  finger_left:
+    has_velocity_limits: true
+    max_velocity: 0.05
+    has_acceleration_limits: true
+    max_acceleration: 0.2
+    has_deceleration_limits: true
+    max_deceleration: -0.2

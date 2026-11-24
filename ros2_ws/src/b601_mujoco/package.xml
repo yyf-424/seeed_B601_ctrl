@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>b601_mujoco</name>
+  <version>0.1.0</version>
+  <description>
+    B601-DM 的 MuJoCo 模型（由 scripts/gen_mjcf.py 从 URDF 自动生成）。
+    由 b601_hardware/MujocoSystemHardware 在 hardware:=mujoco 时加载。
+  </description>
+  <maintainer email="dave@example.com">dave</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>b601_hardware</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

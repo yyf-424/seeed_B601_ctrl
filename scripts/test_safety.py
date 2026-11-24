@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""test_safety.py —— 安全判定的离线单测（不需要 ROS，不需要起节点）。
+
+    ./scripts/test_safety.py            # 跑判定矩阵
+    ./scripts/test_safety.py -v         # 打印每个用例的判定理由
+
+被测对象：ros2_ws/src/b601_safety/b601_safety/logic.py
+阈值来源：ros2_ws/src/b601_safety/config/safety_params.yaml（由 b601_project.yaml 生成）
+          —— 所以改了统一配置之后，这个测试会自动按新阈值判定。
+
+为什么要有这个测试：
+    "安全节点会不会误停 / 会不会该停不停" 是上真机前必须回答的问题，
+    而这个问题完全可以离线验证：喂一帧假数据，看判定结果对不对。
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LOGIC = REPO_ROOT / "ros2_ws" / "src" / "b601_safety" / "b601_safety" / "logic.py"
+PARAMS = REPO_ROOT / "ros2_ws" / "src" / "b601_safety" / "config" / "safety_params.yaml"
+
+
+def load_logic():
+    spec = importlib.util.spec_from_file_location("b601_safety_logic", LOGIC)
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses 解析注解时要去 sys.modules 找自己的模块，必须先登记再 exec
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_limits(logic, params_path: Path):
+    import yaml
+
+    with params_path.open(encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    params = next(iter(cfg.values()))["ros__parameters"]
+    return logic.SafetyLimits(
+        names=list(params["joint_names"]),
+        pos_min=[float(v) for v in params["pos_min"]],
+        pos_max=[float(v) for v in params["pos_max"]],
+        vel_max=[float(v) for v in params["vel_max"]],
+        startup=[float(v) for v in params["startup_pose"]],
+        warn_pos_margin=[float(v) for v in params["warn_pos_margin"]],
+        warn_near_limit=[bool(v) for v in params["warn_near_limit"]],
+        warn_pose_deviation_joint=[bool(v) for v in params["warn_pose_deviation_joint"]],
+        estop_pos_margin=float(params["estop_pos_margin"]),
+        # 静止零位漂移容差：生成的是逐关节列表（夹爪 m 单位更小）
+        static_tolerance=params["static_tolerance"],
+        warn_vel_ratio=float(params["warn_vel_ratio"]),
+        estop_vel_ratio=float(params["estop_vel_ratio"]),
+        estop_vel_absolute=float(params["estop_vel_absolute"]),
+        warn_on_pose_deviation=bool(params["warn_on_pose_deviation"]),
+        warn_pose_threshold=float(params["warn_pose_threshold"]),
+    ), params
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+
+    logic = load_logic()
+    limits, params = load_limits(logic, PARAMS)
+
+    startup = dict(zip(limits.names, limits.startup))
+    still = {n: 0.0 for n in limits.names}
+    cases = []
+
+    def case(name, expect, positions, velocities=None, note=""):
+        cases.append((name, expect, positions, velocities or still, note))
+
+    # 1) 就位在启动姿态，速度为 0 → 正常
+    case("启动姿态静止", logic.NORMAL, dict(startup))
+
+    # 2) 在限位内但明显离开启动位形 → 警告（不是急停）
+    p = dict(startup); p["joint2"] = startup["joint2"] - 0.6
+    case("离开启动位形 0.6rad", logic.WARNING, p, note="警告态必须允许继续驱动")
+
+    # 3) 接近 joint2 下限（-3.14）→ 警告
+    p = dict(startup); p["joint2"] = -3.05
+    case("接近下限 0.09rad", logic.WARNING, p)
+
+    # 4) 角速度达到上限的 85% → 警告
+    v = dict(still); v["joint1"] = 0.85 * limits.vel_max[0]
+    case("角速度 85% 上限", logic.WARNING, dict(startup), v)
+
+    # 5) 角速度越限 → 急停
+    v = dict(still); v["joint1"] = 1.05 * limits.vel_max[0]
+    case("角速度 105% 上限", logic.EMERGENCY_STOP, dict(startup), v)
+
+    # 6) 角度越限 → 急停（必须超过静止零位漂移容差 0.05 才算真越限）
+    p = dict(startup); p["joint1"] = limits.pos_max[0] + 0.10
+    case("角度越上限 0.10rad", logic.EMERGENCY_STOP, p)
+
+    # 7) 夹爪越限（m 单位）→ 急停
+    p = dict(startup); p["finger_left"] = limits.pos_max[-2] + 0.01
+    case("夹爪越限", logic.EMERGENCY_STOP, p)
+
+    # 8) 缺关节反馈 → 警告
+    p = dict(startup); p.pop("joint6")
+    case("缺 joint6 反馈", logic.WARNING, p)
+
+    # 9) 角度与速度同时越限 → 仍是急停，且理由两条都在
+    p = dict(startup); p["joint3"] = limits.pos_min[2] - 0.1
+    v = dict(still); v["joint4"] = 2.0 * limits.vel_max[3]
+    case("角度+速度同时越限", logic.EMERGENCY_STOP, p, v, note="两条理由都要报出来")
+
+    # 10) 速度刚好在警告阈值下 → 正常（阈值边界不应抖动）
+    p = dict(startup)
+    v = dict(still); v["joint1"] = 0.5 * limits.vel_max[0]
+    case("角速度 50% 上限", logic.NORMAL, p, v)
+
+    # 11) 夹爪停在限位边界上：编码器量化噪声不得判越限
+    #     （2026-11-21 真机实测：finger_left=-1.9e-6 / finger_right=+1.9e-6 被 1e-6
+    #     容差判成越限 → 假急停把整条手臂失能，这是必须被单测钉住的回归）
+    p = dict(startup); p["finger_left"] = -1.9e-6; p["finger_right"] = 1.9e-6
+    case("夹爪限位边界噪声", logic.NORMAL, p, note="±2e-6 的量化噪声必须被吸收")
+
+    # 12b) 静止零位漂移：超过限位但仍在 static_tolerance 内 → 只警告，不判越限
+    #      （2026-11-21 真机实测：joint2 顶机械停止位读到 +0.0261，被激活检查拦下）
+    p = dict(startup); p["joint2"] = 0.0 + 0.0261
+    case("静止漂移 0.026（容差内）", logic.WARNING, p, note="容差 0.05 内不得判急停")
+
+    # 12c) 超过静态容差 → 仍然是急停（保护不能被容差吃掉）
+    p = dict(startup); p["joint2"] = 0.0 + 0.06
+    case("越过限位 0.06（超容差）", logic.EMERGENCY_STOP, p)
+
+    # 12d) 夹爪单位是 m，容差 0.002：0.052 m 只警告，0.06 m 越限急停
+    p = dict(startup); p["finger_left"] = limits.pos_max[-2] + 0.002
+    case("夹爪漂移 2mm（容差内）", logic.NORMAL, p, note="夹爪关掉了接近限位警告")
+    p = dict(startup); p["finger_left"] = limits.pos_max[-2] + 0.01
+    case("夹爪越过 10mm（超容差）", logic.EMERGENCY_STOP, p)
+
+    # 12) 关节正好在限位上（含噪声）→ 警告（贴限位），但绝不能判越限急停
+    p = dict(startup); p["joint2"] = 0.0 - 1e-6
+    case("关节贴限位边界", logic.WARNING, p, note="只警告，不能因 1e-6 噪声判越限")
+
+    failures = 0
+    print(f"阈值来源：{PARAMS.relative_to(REPO_ROOT)}")
+    print(f"  warn_pos_margin={limits.warn_pos_margin}")
+    print(f"  warn_near_limit={limits.warn_near_limit}"
+          f"  warn_pose_deviation_joint={limits.warn_pose_deviation_joint}")
+    print(f"  warn_vel_ratio={limits.warn_vel_ratio}    estop_vel_ratio={limits.estop_vel_ratio}")
+    print(f"  warn_pose_threshold={limits.warn_pose_threshold}"
+          f"（全局启用={limits.warn_on_pose_deviation}）\n")
+
+    for name, expect, positions, velocities, note in cases:
+        result = logic.evaluate(positions, velocities, limits)
+        ok = result.state == expect
+        failures += 0 if ok else 1
+        mark = "\033[1;32m[PASS]\033[0m" if ok else "\033[1;31m[FAIL]\033[0m"
+        print(f"{mark} {name:<22} 期望 {expect:<15} 实际 {result.state:<15}"
+              + (f"  ← {note}" if note else ""))
+        if args.verbose or not ok:
+            for reason in result.reasons:
+                print(f"         · {reason}")
+
+    total = len(cases)
+    print(f"\n汇总：{total - failures}/{total} 通过")
+    return 0 if failures == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

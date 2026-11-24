@@ -1,0 +1,78 @@
+# ompl_planning.yaml —— OMPL 采样规划器配置
+#
+# 结构（MoveIt 2 / Humble）：
+#   顶层 planner_configs  —— 规划器"定义"（名字 → 类型 + 参数），全局唯一
+#   <组名>.planner_configs —— 该组"可用"的规划器名单（列表，只写名字）
+#   <组名>.default_planner_config —— 该组默认用哪个
+#
+# ⚠ 踩过的坑：Humble 的规划器名就是 `RRTConnect` / `RRT` / `RRTstar` / `PRM` ...
+#   MoveIt 1 那套 `RRTConnectkConfigDefault` 名字在 Metal 之后的版本里**不存在**。
+#   名字写错时 move_group 不会崩，只在启动日志里报
+#   "Could not find the planner configuration 'xxx' on the param server"，
+#   然后在 RViz 里一规划就失败 —— 非常难查。
+#
+# 用法：RViz → MotionPlanning → Context 标签 → OMPL → 选 Planner；
+#      或代码里在同一条轨迹请求上指定 planner_id。
+
+planning_plugin: ompl_interface/OMPLPlanner
+start_state_max_bounds_error: 0.1
+
+# 请求前处理链：时间参数化、约束坐标系归一、工作空间/起始状态修补。
+# 少了 AddTimeOptimalParameterization，规划出的路径没有时间戳，controller 直接拒收。
+request_adapters: >-
+  default_planner_request_adapters/AddTimeOptimalParameterization
+  default_planner_request_adapters/ResolveConstraintFrames
+  default_planner_request_adapters/FixWorkspaceBounds
+  default_planner_request_adapters/FixStartStateBounds
+  default_planner_request_adapters/FixStartStateCollision
+  default_planner_request_adapters/FixStartStatePathConstraints
+
+planner_configs:
+  # 机械臂首选：双向 RRT，快、几乎不失败，教学与工程默认值
+  RRTConnect:
+    type: geometric::RRTConnect
+    range: 0.0            # 0 = 由 OMPL 按状态空间自动决定（推荐保持 0）
+  # 单向 RRT：可观察“树怎么长”，适合讲原理；goal_bias 越大越偏向目标
+  RRT:
+    type: geometric::RRT
+    range: 0.0
+    goal_bias: 0.05
+  # 渐近最优：路径更短更平滑，但慢一到两个数量级，适合做对比实验
+  RRTstar:
+    type: geometric::RRTstar
+    range: 0.0
+    goal_bias: 0.05
+    delay_collision_checking: 1
+  # 概率路线图：多查询场景（反复去同一批点）更快
+  PRM:
+    type: geometric::PRM
+    max_nearest_neighbors: 10
+  # 单查询探索型：狭窄通道场景更有优势
+  EST:
+    type: geometric::EST
+    range: 0.0
+    goal_bias: 0.05
+  KPIECE:
+    type: geometric::KPIECE
+    range: 0.0
+    goal_bias: 0.05
+    border_fraction: 0.9
+    failed_expansion_score_factor: 0.5
+    min_valid_path_fraction: 0.5
+
+arm:
+  default_planner_config: RRTConnect
+  planner_configs:
+    - RRTConnect
+    - RRT
+    - RRTstar
+    - PRM
+    - EST
+    - KPIECE
+
+# gripper 是单关节 prismatic，规划器影响很小；但必须有条目，
+# 否则 RViz 里切到 gripper 组会报 "No planner found"
+gripper:
+  default_planner_config: RRTConnect
+  planner_configs:
+    - RRTConnect

@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<!--
+  b601_dm.urdf.xacro —— 顶层装配文件（入口）。
+
+  只做三件事，具体细节都在 inc/ 里：
+    1. 声明可配置参数（hardware / initial_positions_file）
+    2. 拉进材质、通用宏、零件图
+    3. 调 b601_links() 和 b601_ros2_control()
+
+  常用：
+    xacro b601_dm.urdf.xacro                      # 默认 mock 后端
+    xacro b601_dm.urdf.xacro hardware:=dm         # 切真机后端
+    ros2 launch b601_description display.launch.py hardware:=mock
+
+  注意：$(find b601_description) 只在包被 source/安装后可用；
+  单独用 xacro CLI 调试时用 initial_positions_file:=<abs path> 覆盖。
+-->
+<robot name="b601_dm" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:arg name="hardware" default="mock"/>
+  <xacro:arg name="initial_positions_file"
+             default="$(find b601_description)/config/initial_positions.yaml"/>
+  <!-- 全项目唯一参数真值。所有关节限位、电机参数、控制频率都从这里取，
+       所以改 config/b601_project.yaml 一处，URDF 与 ros2_control 立刻同步。 -->
+  <xacro:arg name="project_config_file"
+             default="$(find b601_description)/config/b601_project.yaml"/>
+  <!-- 真机现场参数：串口与"是否真的使能电机"。做成 xacro 参数的好处是
+       launch 里一行就能改，不用为了换个 ttyACM 编号而编辑文件。 -->
+  <xacro:arg name="dm_device" default="/dev/ttyACM0"/>
+  <xacro:arg name="dm_enable_motors" default="false"/>
+  <!-- 控制模式：pos_vel（电机内部位置环，默认）/ mit / mit_torque（纯力矩，给 MIT 控制器用）
+       mit_torque 时命令接口从 position 换成 effort -->
+  <xacro:arg name="dm_command_mode" default="pos_vel"/>
+  <!-- 真机 CSV 记录路径：留空 = 用 config/b601_project.yaml 的 hardware.dm.log_csv（默认关闭）。
+       示例：ros2 launch ... dm_log_csv:="$PWD/.verify/run.csv" -->
+  <xacro:arg name="dm_log_csv" default=""/>
+
+  <xacro:include filename="inc/materials.xacro"/>
+  <xacro:include filename="inc/macros.xacro"/>
+  <xacro:include filename="inc/b601_links.xacro"/>
+  <xacro:include filename="inc/ros2_control.xacro"/>
+
+  <!-- ① 机械结构与惯量 -->
+  <xacro:b601_links project_config_file="$(arg project_config_file)"/>
+
+  <!-- ② ros2_control 硬件接口（把 hardware 参数透传下去） -->
+  <xacro:b601_ros2_control
+      name="b601"
+      hardware="$(arg hardware)"
+      initial_positions_file="$(arg initial_positions_file)"
+      project_config_file="$(arg project_config_file)"
+      dm_device="$(arg dm_device)"
+      dm_enable_motors="$(arg dm_enable_motors)"
+      dm_command_mode="$(arg dm_command_mode)"
+      dm_log_csv="$(arg dm_log_csv)"/>
+
+</robot>

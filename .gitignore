@@ -1,0 +1,35 @@
+# ---- colcon ----
+# 根目录误跑 colcon 产生的残留（ROS 工作区在 ros2_ws/ 下）
+build/
+install/
+log/
+
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+# build.sh 写的"默认启动指向本次构建"标记（本机产物，不入库）
+ros2_ws/.last_build
+
+# ---- 自检临时产物 ----
+.verify/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ---- 开发文档与 agent 说明：按约定**不纳入 git**（只在本地维护）----
+# 说明：代码/配置/脚本入库；docs/ 与 AGENTS.md 留在工作区但不跟踪。
+/AGENTS.md
+/docs/
+# 未验证/未登记的开发脚本：先不入库（本地保留，验证并登记文档后再 git add -f）
+/scripts/gen_chain_header.py
+/scripts/compare_taug.py
+/scripts/dm_torque_sign_probe.py

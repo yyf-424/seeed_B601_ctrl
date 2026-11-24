@@ -1,0 +1,28 @@
+<library path="b601_dm_hardware">
+  <!--
+    类名必须与 ros2_control.xacro 里 <plugin> 的写法一致：
+      <plugin>b601_hardware/DmSystemHardware</plugin>
+            └─ 包名 ──┘└──── type ────┘
+  -->
+  <class name="b601_hardware/DmSystemHardware"
+         type="b601_hardware::DmSystemHardware"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      B601-DM 真机硬件接口：达妙电机（USB-CAN 串口桥）↔ ros2_control 接口。
+      支持 pos_vel 与 mit 两种控制模式，带限速、软限位与看门狗。
+    </description>
+  </class>
+</library>
+
+<library path="b601_mujoco_hardware">
+  <!-- MuJoCo 仿真后端：物理由 MuJoCo 算，ros2_control 的控制器/安全节点/MoveIt 全在环。
+       换后端只改 launch 的 hardware:=mujoco，③④⑤ 层一行不改。 -->
+  <class name="b601_hardware/MujocoSystemHardware"
+         type="b601_hardware::MujocoSystemHardware"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      B601-DM 的 MuJoCo 动力学仿真后端：MJCF 模型 ↔ ros2_control position/effort 接口。
+      支持 mit_torque（纯力矩，最真实）与 pos_vel/mit（插件内部 PD + 限速）。
+    </description>
+  </class>
+</library>

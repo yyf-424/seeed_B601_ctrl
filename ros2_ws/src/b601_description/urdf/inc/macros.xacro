@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<!--
+  macros.xacro —— 通用构件宏（与具体机器人无关，可复用到别的臂）。
+
+  设计原则：
+  1. 一个宏只干一件事（惯量 / 盒子 / 圆柱），调用处一眼能看出参数含义；
+  2. visual 与 collision 用同一组几何宏，避免两套尺寸对不上；
+  3. 所有长度单位 m、角度 rad、质量 kg（REP-103）。
+
+  ⚠ 为什么用基本体而不是官方 STL：
+  - 教学：读 xacro 就能重建模型，不用打开 3D 文件；
+  - 仿真：MuJoCo 凸包/基本体比 8 万面的 STL 快两个数量级；
+  - 体积：官方 meshes 共 42 MB，不适合塞进示例仓库。
+  需要炫一点的外观时，把官方 meshes 拷到 b601_description/meshes/ 再切 mesh 宏即可。
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- 惯量块：mass=质量(kg) com=质心(link 系, "x y z") i**=惯量张量(kg·m²)
+       数值来自官方 ReBot_Arm_DM.urdf，是后面做重力补偿辨识的物理基准。 -->
+  <xacro:macro name="b601_inertial" params="mass com ixx ixy ixz iyy iyz izz">
+    <inertial>
+      <origin xyz="${com}" rpy="0 0 0"/>
+      <mass value="${mass}"/>
+      <inertia ixx="${ixx}" ixy="${ixy}" ixz="${ixz}"
+               iyy="${iyy}" iyz="${iyz}" izz="${izz}"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- 盒子几何：size="长 宽 高"(m) xyz=在 link 系里的中心偏移 -->
+  <xacro:macro name="b601_box_geom" params="size xyz material">
+    <origin xyz="${xyz}" rpy="0 0 0"/>
+    <geometry>
+      <box size="${size}"/>
+    </geometry>
+    <material name="${material}"/>
+  </xacro:macro>
+
+  <!-- 圆柱几何：默认轴向为 +z；轴向为 x 时传 rpy="0 ${pi/2} 0" -->
+  <xacro:macro name="b601_cylinder_geom" params="radius length xyz material rpy:='0 0 0'">
+    <origin xyz="${xyz}" rpy="${rpy}"/>
+    <geometry>
+      <cylinder radius="${radius}" length="${length}"/>
+    </geometry>
+    <material name="${material}"/>
+  </xacro:macro>
+
+</robot>

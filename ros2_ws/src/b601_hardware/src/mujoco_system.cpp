@@ -1,0 +1,424 @@
+#include "b601_hardware/mujoco_system.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
+#include <mujoco/mujoco.h>
+
+#include "hardware_interface/types/hardware_interface_type_values.hpp"
+#include "pluginlib/class_list_macros.hpp"
+
+namespace b601_hardware
+{
+
+namespace
+{
+rclcpp::Logger logger() { return rclcpp::get_logger("MujocoSystemHardware"); }
+}  // namespace
+
+double MujocoSystemHardware::get_double(
+  const std::unordered_map<std::string, std::string> & params, const std::string & key,
+  double fallback, const std::string & where)
+{
+  const auto it = params.find(key);
+  if (it == params.end() || it->second.empty()) {
+    return fallback;
+  }
+  try {
+    return std::stod(it->second);
+  } catch (const std::exception &) {
+    RCLCPP_WARN(
+      logger(), "%s 的参数 %s='%s' 不是数字，回落 %.4f", where.c_str(), key.c_str(),
+      it->second.c_str(), fallback);
+    return fallback;
+  }
+}
+
+hardware_interface::CallbackReturn MujocoSystemHardware::on_init(
+  const hardware_interface::HardwareInfo & info)
+{
+  if (hardware_interface::SystemInterface::on_init(info) !=
+      hardware_interface::CallbackReturn::SUCCESS)
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  const auto & hp = info_.hardware_parameters;
+  if (const auto it = hp.find("model_path"); it != hp.end()) {
+    model_path_ = it->second;
+  }
+  if (const auto it = hp.find("command_mode"); it != hp.end()) {
+    command_mode_ = it->second;
+  }
+  if (command_mode_ != "pos_vel" && command_mode_ != "mit" && command_mode_ != "mit_torque") {
+    RCLCPP_WARN(
+      logger(), "未知 command_mode='%s'，回落 pos_vel", command_mode_.c_str());
+    command_mode_ = "pos_vel";
+  }
+  velocity_scale_ = std::clamp(get_double(hp, "velocity_scale", 1.0, "hardware"), 0.01, 1.0);
+  effort_sign_ = get_double(hp, "effort_sign", effort_sign_, "hardware");
+  if (effort_sign_ != 1.0 && effort_sign_ != -1.0) {
+    RCLCPP_WARN(logger(), "effort_sign=%.2f 不是 ±1，按符号处理", effort_sign_);
+    effort_sign_ = effort_sign_ < 0.0 ? -1.0 : 1.0;
+  }
+  verbose_ = get_double(hp, "verbose", 0.0, "hardware") > 0.5;
+
+  if (model_path_.empty()) {
+    RCLCPP_ERROR(logger(), "缺少 model_path 参数（指向 MJCF 文件）");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  joints_.clear();
+  for (const auto & joint : info_.joints) {
+    JointMap jm;
+    jm.name = joint.name;
+    jm.has_command = !joint.command_interfaces.empty();
+    const auto & p = joint.parameters;
+    auto num = [&p](const char * key, double fallback) {
+        const auto it = p.find(key);
+        if (it == p.end() || it->second.empty()) {
+          return fallback;
+        }
+        try {
+          return std::stod(it->second);
+        } catch (const std::exception &) {
+          return fallback;
+        }
+      };
+    jm.kp = num("kp", 0.0);
+    jm.kd = num("kd", 0.0);
+    jm.vel_limit = num("vel_limit", 5.0);
+    jm.torque_limit = num("torque_limit", 0.0);
+    const auto lo = p.find("min_pos");
+    const auto hi = p.find("max_pos");
+    if (lo != p.end() && hi != p.end() && !lo->second.empty() && !hi->second.empty()) {
+      jm.min_pos = std::stod(lo->second);
+      jm.max_pos = std::stod(hi->second);
+      jm.has_position_limit = true;
+    }
+    // 初始位形：来自 xacro 传的 <param name="initial_position">（与 URDF 的 initial_value 同源）。
+    // 为什么必须这么做：MJCF 的 qpos0 全是 0，而 joint3/joint4 的限位正好是 0 / 1.57 ——
+    // 从全 0 起步等于贴着限位，而且全 0 是"竖直伸展"位形，仿真里会直接朝限位倒下去
+    // （2026-11-21 实测：安全节点第一帧就判急停）。
+    jm.init_position = num("initial_position", 0.0);
+    jm.cmd_position = jm.init_position;
+
+    const std::size_t index = joints_.size();
+    joints_.push_back(jm);
+    if (joint.name == "finger_left") {
+      finger_left_index_ = index;
+    } else if (joint.name == "finger_right") {
+      finger_right_index_ = index;
+    }
+  }
+
+  RCLCPP_INFO(
+    logger(), "初始化完成：model=%s mode=%s velocity_scale=%.2f 关节数=%zu",
+    model_path_.c_str(), command_mode_.c_str(), velocity_scale_, joints_.size());
+  return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+hardware_interface::CallbackReturn MujocoSystemHardware::on_configure(
+  const rclcpp_lifecycle::State & /*previous_state*/)
+{
+  if (!load_model()) {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  // 关节名 → qpos/dof 索引映射；执行器按 "jointN_motor" 约定找
+  for (auto & jm : joints_) {
+    const int jid = mj_name2id(model_, mjOBJ_JOINT, jm.name.c_str());
+    if (jid < 0) {
+      RCLCPP_ERROR(logger(), "MJCF 里找不到关节 %s", jm.name.c_str());
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+    jm.qpos_adr = model_->jnt_qposadr[jid];
+    jm.dof_adr = model_->jnt_dofadr[jid];
+    const std::string act_name = jm.name + "_motor";
+    jm.actuator = mj_name2id(model_, mjOBJ_ACTUATOR, act_name.c_str());
+    jm.is_finger = (jm.actuator < 0);
+    if (jm.is_finger && jm.has_command && command_mode_ == "mit_torque") {
+      RCLCPP_WARN(
+        logger(), "%s 在 MJCF 里没有执行器：imt_torque 模式下它的 effort 命令会被忽略",
+        jm.name.c_str());
+    }
+    // 仿真初值 = URDF 的 initial_value（不是 MJCF 的全 0），并把命令初值设为同一值（防跳变）
+    data_->qpos[jm.qpos_adr] = jm.init_position;
+    data_->qvel[jm.dof_adr] = 0.0;
+    jm.state_position = jm.init_position;
+    jm.cmd_position = jm.init_position;
+    jm.cmd_sent = jm.init_position;
+  }
+  mj_forward(model_, data_);
+  steps_total_ = 0;
+  RCLCPP_INFO(
+    logger(), "已加载 MuJoCo 模型：nq=%d nv=%d nu=%d，dt=%.4f s",
+    model_->nq, model_->nv, model_->nu, model_->opt.timestep);
+  return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+bool MujocoSystemHardware::load_model()
+{
+  if (model_ != nullptr) {
+    return true;
+  }
+  char error[1024] = {0};
+  model_ = mj_loadXML(model_path_.c_str(), nullptr, error, sizeof(error));
+  if (model_ == nullptr) {
+    RCLCPP_ERROR(logger(), "加载 MJCF 失败：%s（%s）", model_path_.c_str(), error);
+    return false;
+  }
+  data_ = mj_makeData(model_);
+  if (data_ == nullptr) {
+    RCLCPP_ERROR(logger(), "mj_makeData 失败");
+    mj_deleteModel(model_);
+    model_ = nullptr;
+    return false;
+  }
+  return true;
+}
+
+hardware_interface::CallbackReturn MujocoSystemHardware::on_activate(
+  const rclcpp_lifecycle::State & /*previous_state*/)
+{
+  if (model_ == nullptr || data_ == nullptr) {
+    RCLCPP_ERROR(logger(), "尚未加载模型，拒绝激活");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  // 命令初值 = 当前仿真位形，避免激活瞬间跳变（与真机插件的语义保持一致）
+  for (auto & jm : joints_) {
+    jm.cmd_position = data_->qpos[jm.qpos_adr];
+    jm.cmd_sent = jm.cmd_position;
+    jm.cmd_effort = 0.0;
+  }
+  mju_zero(data_->ctrl, model_->nu);
+  sim_started_ = false;
+  cycles_since_activate_ = 0;
+  for (const auto & jm : joints_) {
+    RCLCPP_INFO(
+      logger(), "  %-11s qpos_adr=%d dof_adr=%d actuator=%d init=%+.3f kp=%.1f kd=%.1f 限位[%.2f,%.2f]",
+      jm.name.c_str(), jm.qpos_adr, jm.dof_adr, jm.actuator, jm.init_position, jm.kp, jm.kd,
+      jm.min_pos, jm.max_pos);
+  }
+  RCLCPP_INFO(
+    logger(), "已激活（仿真）：模式 %s，%zu 关节（其中 %d 个无执行器=手指）",
+    command_mode_.c_str(), joints_.size(),
+    static_cast<int>(std::count_if(
+      joints_.begin(), joints_.end(), [](const JointMap & j) { return j.is_finger; })));
+  return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+hardware_interface::CallbackReturn MujocoSystemHardware::on_deactivate(
+  const rclcpp_lifecycle::State & /*previous_state*/)
+{
+  if (model_ != nullptr && data_ != nullptr) {
+    mju_zero(data_->ctrl, model_->nu);
+  sim_started_ = false;
+  cycles_since_activate_ = 0;
+  }
+  RCLCPP_INFO(logger(), "已停用（仿真）：控制量清零");
+  return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+hardware_interface::CallbackReturn MujocoSystemHardware::on_cleanup(
+  const rclcpp_lifecycle::State & /*previous_state*/)
+{
+  if (data_ != nullptr) {
+    mj_deleteData(data_);
+    data_ = nullptr;
+  }
+  if (model_ != nullptr) {
+    mj_deleteModel(model_);
+    model_ = nullptr;
+  }
+  return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+std::vector<hardware_interface::StateInterface> MujocoSystemHardware::export_state_interfaces()
+{
+  std::vector<hardware_interface::StateInterface> states;
+  const bool with_effort = true;
+  for (auto & jm : joints_) {
+    states.emplace_back(jm.name, hardware_interface::HW_IF_POSITION, &jm.state_position);
+    states.emplace_back(jm.name, hardware_interface::HW_IF_VELOCITY, &jm.state_velocity);
+    if (with_effort) {
+      states.emplace_back(jm.name, hardware_interface::HW_IF_EFFORT, &jm.state_effort);
+    }
+  }
+  return states;
+}
+
+std::vector<hardware_interface::CommandInterface> MujocoSystemHardware::export_command_interfaces()
+{
+  std::vector<hardware_interface::CommandInterface> commands;
+  for (auto & jm : joints_) {
+    if (!jm.has_command) {
+      continue;   // finger_right 是 mimic，无命令接口
+    }
+    if (command_mode_ == "mit_torque") {
+      commands.emplace_back(jm.name, hardware_interface::HW_IF_EFFORT, &jm.cmd_effort);
+    } else {
+      commands.emplace_back(jm.name, hardware_interface::HW_IF_POSITION, &jm.cmd_position);
+    }
+  }
+  return commands;
+}
+
+void MujocoSystemHardware::mirror_finger()
+{
+  if (finger_left_index_ == static_cast<std::size_t>(-1) ||
+      finger_right_index_ == static_cast<std::size_t>(-1))
+  {
+    return;
+  }
+  auto & left = joints_[finger_left_index_];
+  auto & right = joints_[finger_right_index_];
+  right.cmd_position = -left.cmd_position;
+}
+
+void MujocoSystemHardware::step_sim(double dt)
+{
+  const double model_dt = model_->opt.timestep;
+  int steps = static_cast<int>(std::lround(dt / model_dt));
+  if (steps < 1) {
+    steps = 1;
+  }
+  if (steps > 200) {          // 上限保护：单周期最多 0.2 s 的物理时间（200 × 1 ms）
+    steps = 200;
+  }
+  for (int k = 0; k < steps; ++k) {
+    mj_step(model_, data_);
+  }
+  steps_total_ += steps;
+}
+
+hardware_interface::return_type MujocoSystemHardware::read(
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+{
+  if (model_ == nullptr || data_ == nullptr) {
+    return hardware_interface::return_type::ERROR;
+  }
+  for (auto & jm : joints_) {
+    jm.state_position = data_->qpos[jm.qpos_adr];
+    jm.state_velocity = data_->qvel[jm.dof_adr];
+    jm.state_effort = (jm.actuator >= 0) ? data_->ctrl[jm.actuator] : 0.0;
+  }
+  if (verbose_ && steps_total_ < 20) {
+    std::string line;
+    char buf[128];
+    for (const auto & jm : joints_) {
+      std::snprintf(buf, sizeof(buf), " %s: q=%+.3f cmd=%+.3f", jm.name.c_str(),
+        jm.state_position, jm.cmd_position);
+      line += buf;
+    }
+    RCLCPP_INFO(logger(), "[read #%ld]%s", steps_total_, line.c_str());
+  }
+  return hardware_interface::return_type::OK;
+}
+
+hardware_interface::return_type MujocoSystemHardware::write(
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & period)
+{
+  if (model_ == nullptr || data_ == nullptr) {
+    return hardware_interface::return_type::ERROR;
+  }
+  const double dt = std::clamp(period.seconds(), 1e-4, 0.2);
+
+  if (command_mode_ == "mit_torque" && !sim_started_) {
+    bool any_torque = false;
+    for (const auto & jm : joints_) {
+      if (jm.actuator >= 0 && std::abs(jm.cmd_effort) > 1e-6) {
+        any_torque = true;
+        break;
+      }
+    }
+    ++cycles_since_activate_;
+    if (!any_torque && cycles_since_activate_ < 300) {
+      return hardware_interface::return_type::OK;   // 控制器尚未接管：抱闸，不积分
+    }
+    sim_started_ = true;
+    RCLCPP_INFO(
+      logger(), "仿真开始积分物理（%s，等待了 %ld 个周期）",
+      any_torque ? "收到控制器力矩命令" : "超时兜底", cycles_since_activate_);
+  }
+
+  mirror_finger();
+
+  // 位置模式必须补重力项（qfrc_bias）：
+  //   真机的 pos_vel 模式是**电机内部位置环**在顶着重力保持，而我们这里是自己做 PD。
+  //   只做纯 PD 的话手臂会一路下垂到限位 —— 2026-11-21 实测：joint3 掉到 0（正好是限位），
+  //   安全节点立刻判越限并急停，轨迹被中断（error: Current goal cancelled during deactivate）。
+  //   mit_torque 模式**不加**这一项：那时控制律应该完全由控制器决定（这样才和真机一致）。
+  if (command_mode_ != "mit_torque") {
+    mj_forward(model_, data_);     // 刷新 qfrc_bias（重力+科氏）到当前位形
+  }
+
+  for (auto & jm : joints_) {
+    if (jm.actuator < 0) {
+      // 手指没有执行器：命令即位置（运动学直通），仿真里仍能看到夹爪"开合"
+      if (jm.has_command) {
+        double pos = jm.cmd_position;
+        if (jm.has_position_limit) {
+          pos = std::clamp(pos, jm.min_pos, jm.max_pos);
+        }
+        data_->qpos[jm.qpos_adr] = pos;
+        data_->qvel[jm.dof_adr] = 0.0;
+      }
+      continue;
+    }
+
+    double tau = 0.0;
+    if (command_mode_ == "mit_torque") {
+      tau = effort_sign_ * jm.cmd_effort;   // 与真机插件同一符号约定
+    } else {
+      // 位置模式：内部 PD + 每周期限速（与真机插件的限速语义一致，基准是上次下发值）
+      double target = jm.cmd_position;
+      if (jm.has_position_limit) {
+        target = std::clamp(target, jm.min_pos, jm.max_pos);
+      }
+      const double max_step = jm.vel_limit * velocity_scale_ * dt;
+      if (std::isfinite(jm.cmd_sent)) {
+        target = std::clamp(target, jm.cmd_sent - max_step, jm.cmd_sent + max_step);
+      }
+      jm.cmd_sent = target;
+      const double err = target - jm.state_position;
+      tau = jm.kp * err - jm.kd * jm.state_velocity + data_->qfrc_bias[jm.dof_adr];
+    }
+    if (jm.torque_limit > 0.0) {
+      tau = std::clamp(tau, -jm.torque_limit, jm.torque_limit);
+    }
+    data_->ctrl[jm.actuator] = tau;
+  }
+
+  step_sim(dt);
+
+  // 手指在 MJCF 里没有执行器（是自由滑动关节）：手臂一加速就会被惯性甩出去，
+  // 而真机的手指是被电机夹住的。这里做"运动学夹紧"：每周期把手指 qpos 夹回限位并清速度。
+  // 2026-11-21 实测：不夹的话 finger_left 会掉到 -0.0000（限位 0 的负侧），
+  // 安全节点立刻判越限并急停，整条轨迹被打断。
+  for (auto & jm : joints_) {
+    if (jm.actuator >= 0) {
+      continue;
+    }
+    double pos = data_->qpos[jm.qpos_adr];
+    if (jm.has_position_limit) {
+      pos = std::clamp(pos, jm.min_pos, jm.max_pos);
+    }
+    data_->qpos[jm.qpos_adr] = pos;
+    data_->qvel[jm.dof_adr] = 0.0;
+  }
+
+  if (verbose_ && steps_total_ % 200 == 0) {
+    RCLCPP_INFO(
+      logger(), "[sim] t=%.2fs q2=%.3f q3=%.3f q6=%.3f",
+      steps_total_ * model_->opt.timestep, data_->qpos[joints_[1].qpos_adr],
+      data_->qpos[joints_[2].qpos_adr], data_->qpos[joints_[5].qpos_adr]);
+  }
+  return hardware_interface::return_type::OK;
+}
+
+}  // namespace b601_hardware
+
+PLUGINLIB_EXPORT_CLASS(b601_hardware::MujocoSystemHardware, hardware_interface::SystemInterface)

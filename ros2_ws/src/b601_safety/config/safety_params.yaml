@@ -1,0 +1,109 @@
+# ============================================================================
+# ⚠ 本文件由 scripts/sync_config.py 自动生成，请勿手工编辑。
+#    要改参数请改：ros2_ws/src/b601_description/config/b601_project.yaml
+#    改完执行：  ./scripts/sync_config.py
+# ============================================================================
+# 安全监控节点参数。限位/速度上限来自 joints 段，阈值来自 safety 段。
+# 想永久调整阈值请改 b601_project.yaml，不要手改本文件。
+b601_safety_monitor:
+  ros__parameters:
+    joint_names:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - finger_left
+    - finger_right
+    pos_min:
+    - -2.59
+    - -3.14
+    - -3.14
+    - -1.56
+    - -0.73
+    - -3.14
+    - 0.0
+    - -0.05
+    pos_max:
+    - 2.6
+    - 0.0
+    - 0.0
+    - 1.57
+    - 1.57
+    - 3.14
+    - 0.05
+    - 0.0
+    vel_max:
+    - 6.0
+    - 6.0
+    - 6.0
+    - 6.0
+    - 6.0
+    - 6.0
+    - 0.05
+    - 0.05
+    startup_pose:
+    - 0.0
+    - -0.3
+    - -0.6
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    warn_pos_margin:
+    - 0.12
+    - 0.12
+    - 0.12
+    - 0.12
+    - 0.12
+    - 0.12
+    - 0.005
+    - 0.005
+    warn_near_limit:
+    - true
+    - true
+    - true
+    - true
+    - true
+    - true
+    - false
+    - false
+    warn_pose_deviation_joint:
+    - true
+    - true
+    - true
+    - true
+    - true
+    - true
+    - false
+    - false
+    evaluate_rate_hz: 100.0
+    publish_rate_hz: 20.0
+    feedback_timeout_sec: 0.3
+    estop_on_feedback_timeout: false
+    startup_grace_sec: 3.0
+    estop_pos_margin: 0.0
+    static_tolerance:
+    - 0.05
+    - 0.05
+    - 0.05
+    - 0.05
+    - 0.05
+    - 0.05
+    - 0.002
+    - 0.002
+    warn_vel_ratio: 0.8
+    estop_vel_ratio: 1.0
+    estop_vel_absolute: 0.0
+    warn_on_pose_deviation: true
+    warn_pose_threshold: 0.35
+    status_topic: /b601_safety/status
+    clear_service: /b601_safety/clear_estop
+    deactivate_controllers:
+    - '*'
+    deactivate_hardware: true
+    hardware_component: b601
+    service_timeout_sec: 2.0
+    latch: true
