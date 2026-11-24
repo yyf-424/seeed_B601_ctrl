@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include "b601_description/project_parameters.hpp"
+
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -90,14 +92,15 @@ private:
     double t_rotor{0.0};        // 反馈帧自带的转子温度（℃）
     double kp{0.0};             // MIT 模式位置刚度
     double kd{0.0};             // MIT 模式阻尼
-    double vel_limit{5.0};      // rad/s，用于限速与 POS_VEL 模式的 vlim
+    double vel_limit{b601_config::dm::default_joint_velocity_rad_s};      // rad/s，用于限速与 POS_VEL 模式的 vlim
+    double mit_velocity_limit{0.0};  // MIT 帧速度目标的关节单位上限
     double torque_limit{0.0};   // N·m，>0 时对力矩命令做限幅（mit_torque 模式用）
     double min_pos{0.0};        // 软限位下限（rad），超出即夹紧
     double max_pos{0.0};        // 软限位上限
     // 静止零位漂移许用值（rad/m，逐关节）：手臂静止顶在机械停止位上时实测值可能略微越界
     // （2026-11-21 实测 joint2 读到 +0.026）。只用于 on_activate 的超限检查，
     // 不参与 write() 的夹紧 —— 命令永远夹在真实限位内。
-    double limit_tolerance{0.05};
+    double limit_tolerance{b601_config::dm::static_tolerance};
     bool has_position_limit{false};
     bool has_command{false};    // 该关节是否有命令接口（finger_right 没有）
     int reject_count{0};        // 被合理性检查拦掉的次数
@@ -109,8 +112,9 @@ private:
     // 运行时
     void * handle{nullptr};
     double cmd{0.0};            // 控制器写进来的期望位置
+    double cmd_velocity{0.0};
     double cmd_effort{0.0};
-    // mit_impedance（Phase 3）：位置环交给驱动器，控制器下发 (pos, kp, kd, τ_ff)
+    // mit_impedance（Phase 3）：位置环交给驱动器，控制器下发 (pos, vel, kp, kd, τ_ff)
     double cmd_kp{0.0};
     double cmd_kd{0.0};     // 控制器写进来的期望力矩（mit_torque 模式）
     double command_sent{0.0};   // 上一周期真正下发到电机的值（限速基准）
@@ -155,19 +159,19 @@ private:
   void flush_log_buffer();
 
   // ---- 配置（on_init 填好，之后只读）----
-  std::string device_{"/dev/ttyACM0"};
-  int baudrate_{921600};
-  std::string command_mode_{"pos_vel"};   // pos_vel | mit
+  std::string device_{b601_config::dm::device};
+  int baudrate_{b601_config::dm::baudrate};
+  std::string command_mode_{b601_config::dm::command_mode};   // pos_vel | mit
   bool enable_motors_{true};              // false = 只读模式（dry run，不使能电机）
-  double watchdog_timeout_{0.5};
+  double watchdog_timeout_{b601_config::dm::watchdog_timeout};
   // 全局速度缩放（0~1）：同时作用于「每周期限速」与「POS_VEL 的 vlim」。
   // 首次上真机时调到 0.1，确认方向/幅值都对之后再放开。默认就取保守值。
-  double velocity_scale_{0.2};
+  double velocity_scale_{b601_config::dm::velocity_scale};
 
   // 电机力矩符号约定：达妙电机上报/接收的 torq 与「关节正方向力矩」反号
   // （2026-11-20 实测：用 +1 拟合重力会得到负质量）。统一在插件里做一次转换，
   // 这样 /joint_states.effort 与 effort 命令都是"关节约定"，上层不用关心电机细节。
-  double effort_sign_{-1.0};
+  double effort_sign_{b601_config::dm::effort_sign};
   // 力矩**命令**的符号：与 effort_sign_ **不是同一个**！
   //   · 反馈：电机上报的 torq 与关节正方向力矩反号 → effort_sign_ = −1（2026-11-20 实测：
   //     用 +τ 拟合重力会得到 7 个负质量，取反后质量全正且接近 CAD）
@@ -175,23 +179,23 @@ private:
   //     +1.0 N·m → joint5 朝正方向走 0.113 rad）
   // 2026-11-21 真机实测：把反馈用的 −1 也用到命令上 → PD 变成正反馈，
   // 首个 0.05 rad 动作中 joint5 冲到 10.26 rad/s，靠安全节点急停才没出事。
-  double command_sign_{1.0};
-  int can_timeout_ms_{0};
-  int max_write_failures_{20};
-  int feedback_wait_ms_{2000};
+  double command_sign_{b601_config::dm::command_sign};
+  int can_timeout_ms_{b601_config::dm::can_timeout_ms};
+  int max_write_failures_{b601_config::dm::max_write_failures};
+  int feedback_wait_ms_{b601_config::dm::feedback_wait_ms};
   // 达妙电机是"应答式"的：不主动上报，必须每个周期显式发请求帧（实测：裸读串口完全静默）。
   // feedback_divider=1 表示每个周期都请求；想降总线负载就调大（2 → 每两周期请求一次）。
-  bool request_feedback_{true};
-  int feedback_divider_{1};
-  int mode_switch_timeout_ms_{1000};
+  bool request_feedback_{b601_config::dm::request_feedback};
+  int feedback_divider_{b601_config::dm::feedback_divider};
+  int mode_switch_timeout_ms_{b601_config::dm::mode_switch_timeout_ms};
   long feedback_tick_{0};
 
   // CSV 记录：log_csv 为空 = 关闭（默认）。开启后每个采样周期写一行，
   // 列含义见文件头注释；含「电机原始速度」与「MIT 力矩命令」，
   // 正好补上 2026-11-20 抽风事故没留下速度数据的缺口。
-  std::string log_csv_{""};
-  double log_rate_hz_{200.0};
-  double log_period_s_{0.005};
+  std::string log_csv_{b601_config::dm::log_csv};
+  double log_rate_hz_{b601_config::dm::log_rate_hz};
+  double log_period_s_{1.0 / b601_config::dm::log_rate_hz};
   double log_accum_s_{0.0};
   std::uint64_t log_rows_{0};
   double log_t0_{-1.0};

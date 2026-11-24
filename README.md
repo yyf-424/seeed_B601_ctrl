@@ -1,8 +1,8 @@
-# B601-DM v0.2.0 · 主机侧 MIT
+# B601-DM v0.2.1 · 关节端 MIT
 
-`b601_mit_arm` 在主机计算 PD 力矩，经 `effort` 和 `mit_torque` 下发。电机帧 Kp、Kd
-和三项前馈为零。历史真机六轴五姿态全部通过，各姿态最大稳态误差为 0.055–0.058 rad，
-归中误差 0.0210 rad。见 [验收记录](validation/host-pd.json)。
+主机发 `pos_target`、`vel_target`、`kp`、`kd` 和 `tff`。电机执行 PD 闭环。前馈口可接
+重力、摩擦和任务力矩，验收配置三项均为零。手臂六轴和主动夹爪五姿态通过 5/5，
+逐轴通过 35/35。见 [发布记录](CHANGELOG.md) 和 [逐姿态反馈](validation/results.json)。
 
 ## 环境和离线门禁
 
@@ -21,23 +21,36 @@ source ros2_ws/install/setup.bash
 在归中位置开始。使能前完成探针回读、只读和方向核对。同一串口只运行一个控制程序。
 常规收工先核对归中再失能。触发急停时由安全节点立即停止。
 
-## 六轴 MIT 真机复测
+## 6+1 MIT 真机复测
 
-先生成验收参数和回读电机。六轴使用原始设备的 MIT 固件模式。下列 launch 保持电机未使能，并会设置和核对固件模式。
-方向核对后归中，退出该 launch 并撤离扫掠区。
-
-```bash
-./scripts/hw_mit_test1.sh --dry-run --amp big --slew 0.12
-./scripts/dm_probe.py
-ros2 launch b601_bringup bringup.launch.py hardware:=dm dm_command_mode:=mit_torque dm_enable_motors:=false \
-  controllers:="joint_state_broadcaster b601_mit_arm" controllers_file:="$PWD/.verify/mit_pd_hw1.yaml"
-```
-
-现场确认后执行原始五姿态参数。脚本记录轨迹与反馈，按 MIT 回路归中并核对失能。
+碰撞核对使用 Seeed 官方 `reBotArmController_ROS2` 中的 DM 模型资源，历史实测使用
+`87780c6a5c2fb43b55ddebda5eac375ceb9c5a40`。把参考仓库的 `src/rebotarm_bringup` 目录
+设为 `B601_VENDOR_DESCRIPTION`。缺省查找本项目同级 `rebotarm_ros2/src/rebotarm_bringup`。
+只用 URDF 和网格文件，ROS 包由当前标签构建。
 
 ```bash
-./scripts/hw_mit_test1.sh --execute --amp big --slew 0.12
+export B601_VENDOR_DESCRIPTION=/path/to/rebotarm_ros2/src/rebotarm_bringup
+./scripts/hw_mit_five_poses.sh --simulate
+./scripts/hw_mit_five_poses.sh --probe
+./scripts/hw_mit_five_poses.sh --readonly
 ```
 
-历史验收范围为六个手臂轴，误差基准是各轴软限位全行程的 5%。软件位置误差会产生静态持位力矩。
+确认探针回读的七台电机处于 MIT 模式，方向已核对，机械臂与夹爪均处于配置的停放范围。
+现场确认后执行。入口先检查厂商网格碰撞，再从小幅动作开始。
+
+```bash
+./scripts/hw_mit_five_poses.sh --execute
+```
+
+真机流程用此标签中的验收增益、0.08 rad/s 手臂目标斜率和 0.65 rad/s 独立急停阈值。
+日志、CSV 和判定写入 `.verify/mit_hardware_five_poses/`。需要在试验中途停止发新目标并尝试安全归中时，
+在输出目录创建 `HOLD_HARDWARE`；遇到危险立即使用现场急停。参数集中在
+`ros2_ws/src/b601_description/config/b601_project.yaml`，改后执行 `./scripts/sync_config.py` 和构建。
+
+历史真机记录可离线重算。
+
+```bash
+python3 scripts/mit_five_poses.py --score-hardware validation/results.json
+```
+
 历史位置回路的复测入口见 [pos_vel 流程](validation/pos-vel.md)。

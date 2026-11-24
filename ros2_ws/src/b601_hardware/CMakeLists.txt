@@ -10,6 +10,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(b601_description REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -103,6 +104,7 @@ add_library(b601_dm_hardware SHARED
 target_include_directories(b601_dm_hardware PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
+  ${b601_description_INCLUDE_DIRS}
 )
 target_link_libraries(b601_dm_hardware PUBLIC
   hardware_interface::hardware_interface
@@ -129,6 +131,7 @@ if(HAVE_MUJOCO)
   target_include_directories(b601_mujoco_hardware PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+    ${b601_description_INCLUDE_DIRS}
     "${MUJOCO_ROOT}/include"
   )
   target_link_libraries(b601_mujoco_hardware PUBLIC
@@ -170,6 +173,7 @@ install(FILES b601_hardware_plugins.xml DESTINATION share/${PROJECT_NAME})
 pluginlib_export_plugin_description_file(hardware_interface b601_hardware_plugins.xml)
 
 ament_export_include_directories(include)
+ament_export_dependencies(b601_description)
 ament_export_libraries(b601_dm_hardware)
 ament_export_targets(export_b601_hardware)
 ament_package()

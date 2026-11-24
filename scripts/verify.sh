@@ -141,14 +141,14 @@ if [[ ${#XACRO_CMD[@]} -gt 0 ]]; then
   # MIT 力控模式（effort 命令接口）单独展开一份：检查「每个可控关节都有属主」需要它
   if "${XACRO_CMD[@]}" \
       "$DESCRIPTION/urdf/b601_dm.urdf.xacro" \
-      "hardware:=dm" "dm_command_mode:=mit_torque" \
+      "hardware:=dm" "dm_command_mode:=mit_impedance" \
       "initial_positions_file:=$DESCRIPTION/config/initial_positions.yaml" \
       "project_config_file:=$PROJECT_CONFIG" \
-      > "$TMP/b601_mittorque.urdf" 2> "$TMP/xacro_mittorque.err"; then
-    ok "mit_torque 展开成功（effort 命令接口）"
+      > "$TMP/b601_mitimpedance.urdf" 2> "$TMP/xacro_mitimpedance.err"; then
+    ok "mit_impedance 展开成功（电机侧 MIT 命令接口）"
   else
-    fail "mit_torque 展开失败："
-    sed 's/^/         /' "$TMP/xacro_mittorque.err" | head -10
+    fail "mit_impedance 展开失败："
+    sed 's/^/         /' "$TMP/xacro_mitimpedance.err" | head -10
   fi
 fi
 
@@ -183,9 +183,9 @@ if [[ -f "$TMP/b601_mock.urdf" ]]; then
 else
   warn "跳过（没有展开后的 URDF）"
 fi
-# MIT 实例覆盖：在 mit_torque 展开（effort 命令接口）上再查一遍「每关节都有属主」
-if [[ -f "$TMP/b601_mittorque.urdf" ]]; then
-  if python3 "$REPO_ROOT/scripts/check_consistency.py" "$TMP/b601_mittorque.urdf" \
+# MIT 实例覆盖：在 mit_impedance 模型上再查一遍「每关节都有属主」
+if [[ -f "$TMP/b601_mitimpedance.urdf" ]]; then
+  if python3 "$REPO_ROOT/scripts/check_consistency.py" "$TMP/b601_mitimpedance.urdf" \
       --project-config "$PROJECT_CONFIG" \
       --repo-root "$REPO_ROOT" \
       --mit-controllers "$WORKSPACE/src/b601_bringup/config/b601_mit_controllers.yaml" \

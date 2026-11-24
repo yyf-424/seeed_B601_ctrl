@@ -140,12 +140,15 @@ def check_mit_controllers(urdf, path, errors):
         errors.append(f"{path} 里没有 MIT 控制器实例（controller_manager 只声明了 broadcaster）")
         return
 
-    # ros2_control 里带 effort 命令接口的关节（= mit_torque 模式下可控的关节）
+    required_commands = {"position", "velocity", "kp", "kd", "effort"}
     effort_joints = set()
     for system in urdf["ros2_control"].values():
         for name, joint in system["joints"].items():
-            if "effort" in joint.get("command", []):
+            commands = set(joint.get("command", []))
+            if "effort" in commands:
                 effort_joints.add(name)
+                if commands != required_commands:
+                    errors.append(f"{name} MIT 接口不完整：{sorted(commands)}")
     if not effort_joints:
         # 位置模式的 URDF 展开：MIT 实例表不适用，跳过而不是报错
         return

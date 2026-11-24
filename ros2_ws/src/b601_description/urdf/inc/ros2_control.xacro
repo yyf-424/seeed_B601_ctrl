@@ -31,13 +31,17 @@
       <!-- 命令接口由控制模式决定：
            mit_torque（重力补偿）→ effort，由 MIT 控制器给力矩；
            其它模式              → position，由 JTC 等位置控制器给轨迹 -->
-      <!-- mit_impedance：位置环交给驱动器 —— 控制器写 position + effort + kp + kd
+      <!-- mit_impedance：位置环交给驱动器 —— 控制器写 position + velocity + effort + kp + kd
            （Phase 3，见 docs/changes/2026-11-22-01 §4 方案 D） -->
       <xacro:if value="${dm_command_mode == 'mit_impedance'}">
         <command_interface name="position"/>
+        <command_interface name="velocity"/>
         <command_interface name="effort"/>
         <command_interface name="kp"/>
         <command_interface name="kd"/>
+        <xacro:if value="${hardware != 'mock' and 'mit_arm_velocity_limit' in cfg['hardware']['dm']}">
+          <param name="mit_velocity_limit">${cfg['hardware']['dm']['mit_arm_velocity_limit']}</param>
+        </xacro:if>
       </xacro:if>
       <xacro:if value="${dm_command_mode == 'mit_torque'}">
         <command_interface name="effort"/>
@@ -80,7 +84,7 @@
         <param name="feedback_jump_limit">${jc['feedback_jump_limit']}</param>
         <!-- 静止零位漂移许用值：手臂顶在机械停止位上时实测值可能略微越界（实测 0.026）。
              只用激活检查，命令夹紧仍按真实限位。夹爪单位是 m，真值里单独给 0.002。 -->
-        <param name="limit_tolerance">${jc.get('static_tolerance', 0.05)}</param>
+        <param name="limit_tolerance">${jc.get('static_tolerance', cfg['safety']['angle']['static_tolerance'])}</param>
       </xacro:if>
 
       <!-- 仿真后端共享的物理参数：kp/kd 用作插件内部 PD，min/max_pos 作软限位，
@@ -181,13 +185,13 @@
           </xacro:unless>
           <param name="command_mode">${eff_mode}</param>
           <!-- 仿真里不需要额外收紧限速（1.0 = 只用 vel_limit × dt） -->
-          <param name="velocity_scale">1.0</param>
+          <param name="velocity_scale">${CFG['implementation']['mujoco']['velocity_scale']}</param>
           <!-- ⚠ 仿真后端的力矩符号与真机**不同**：
                达妙电机的 tau 命令与关节正方向力矩反号 → 真机用 effort_sign=-1；
                而 MuJoCo 的执行器直接吃"关节约定"的力矩 → 这里必须是 +1。
                （2026-11-21 实测：照抄 -1 会让 PD 变成正反馈，1 秒内甩到 7.5 rad/s 触发急停） -->
-          <param name="effort_sign">1.0</param>
-          <param name="verbose">0</param>
+          <param name="effort_sign">${CFG['implementation']['mujoco']['effort_sign']}</param>
+          <param name="verbose">${CFG['implementation']['mujoco']['verbose']}</param>
           <!-- 温度守护 + 一阶热模型（与真机同一套判定逻辑，便于仿真验证） -->
           <param name="temp_warn_c">${HW['temperature']['warn_c']}</param>
           <param name="temp_limit_c">${HW['temperature']['limit_c']}</param>
@@ -229,6 +233,7 @@
       <joint name="finger_left">
           <xacro:if value="${eff_mode == 'mit_impedance'}">
           <command_interface name="position"/>
+          <command_interface name="velocity"/>
           <command_interface name="effort"/>
           <command_interface name="kp"/>
           <command_interface name="kd"/>
@@ -244,7 +249,7 @@
         </state_interface>
         <param name="initial_position">${initial_positions['finger_left']}</param>
         <!-- 静止零位漂移许用值（夹爪单位 m，真值里给 0.002） -->
-        <param name="limit_tolerance">${J['finger_left'].get('static_tolerance', 0.05)}</param>
+        <param name="limit_tolerance">${J['finger_left'].get('static_tolerance', CFG['safety']['angle']['static_tolerance'])}</param>
         <state_interface name="velocity">
           <param name="initial_value">0.0</param>
         </state_interface>
@@ -289,7 +294,7 @@
           <param name="initial_value">0.0</param>
         </state_interface>
         <!-- 静止零位漂移许用值（夹爪单位 m，真值里给 0.002） -->
-        <param name="limit_tolerance">${J['finger_right'].get('static_tolerance', 0.05)}</param>
+        <param name="limit_tolerance">${J['finger_right'].get('static_tolerance', CFG['safety']['angle']['static_tolerance'])}</param>
       </joint>
     </ros2_control>
   </xacro:macro>

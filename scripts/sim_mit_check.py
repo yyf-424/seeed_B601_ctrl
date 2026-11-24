@@ -24,6 +24,11 @@ import sys
 
 import numpy as np
 
+from project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["tools"]["sim_mit_check"]
+
 
 def load_fitted_params(path=".verify/gravity_params.yaml"):
     """读取 identify.py 生成的参数（8 个 link × 4，顺序 = kGravityLinks）"""
@@ -37,14 +42,16 @@ def load_fitted_params(path=".verify/gravity_params.yaml"):
 
 # 按等效惯量 I = [0.111, 0.414, 0.297, 0.047, 0.021, 0.0106] kg·m² 算的临界阻尼
 # kd = 2√(kp·I)。用统一 kd 会让最轻的 joint6 离散发散（kd·dt/I > 2）。
-KD_HOLD = [1.63, 3.15, 2.67, 1.07, 0.71, 0.50]     # kp=6
-KD_MOVE = [5.17, 9.97, 8.45, 3.38, 2.26, 1.59]     # kp=60
+KD_HOLD = SETTINGS["kd_hold"]     # kp=6
+KD_MOVE = SETTINGS["kd_move"]     # kp=60
 
 
 class Sim:
-    def __init__(self, xml, gravity_source="truth", kp_hold=6.0, kd_hold=None,
-                 kp_move=60.0, kd_move=None, move_thr=0.08, hold_thr=0.03,
-                 friction_scale=0.0, torque_limit=15.0, sub_steps=10):
+    def __init__(self, xml, gravity_source="truth", kp_hold=SETTINGS["kp_hold"], kd_hold=None,
+                 kp_move=SETTINGS["kp_move"], kd_move=None,
+                 move_thr=SETTINGS["move_threshold_rad"], hold_thr=SETTINGS["hold_threshold_rad"],
+                 friction_scale=SETTINGS["friction_scale"], torque_limit=SETTINGS["torque_limit_nm"],
+                 sub_steps=SETTINGS["substeps"]):
         import mujoco
         self.mj = mujoco
         self.model = mujoco.MjModel.from_xml_path(xml)
@@ -153,7 +160,7 @@ class Sim:
         n = int(round(seconds / (self.model.opt.timestep * self.sub_steps)))
         for k in range(n):
             self.step(ext_force if callable(ext_force) else ext_force)
-            if log is not None and k % 20 == 0:
+            if log is not None and k % SETTINGS["snapshot_divider"] == 0:
                 log.append((self.q(), self.q_des.copy(), self.kp.copy()))
 
 
@@ -162,46 +169,46 @@ def main() -> int:
     ap.add_argument("--xml", default="ros2_ws/src/b601_mujoco/models/b601_arm.xml")
     ap.add_argument("--gravity", default="truth",
                     choices=["truth", "inverted", "urdf", "fitted"])
-    ap.add_argument("--friction-scale", type=float, default=0.0)
+    ap.add_argument("--friction-scale", type=float, default=SETTINGS["friction_scale"])
     args = ap.parse_args()
 
     # 起始位形：手臂前伸（仿真里不会像真机那样顶在限位上）
-    q0 = np.array([0.0, -0.9, -1.1, 0.0, 0.0, 0.0])
+    q0 = np.array(SETTINGS["start_rad"])
     print(f"重力前馈来源 = {args.gravity}；起始位形 q = {np.array2string(q0, precision=3)}")
 
     # ---------- ① 前馈符号：稳/不稳 ----------
     print("\n① 前馈符号检验（kp=40，观察 3 秒后是否还在起始位形附近）")
     for src in ("truth", "inverted"):
-        sim = Sim(args.xml, gravity_source=src, kp_hold=40.0)
+        sim = Sim(args.xml, gravity_source=src, kp_hold=SETTINGS["sign_test_kp"])
         sim.reset(q0)
-        sim.run(3.0)
+        sim.run(SETTINGS["observe_sec"])
         dq = sim.q() - q0
         print(f"   前馈={src:<9} 3s 后偏差 = {np.array2string(dq, precision=4)}  "
               f"最大 {np.abs(dq).max():.4f} rad → "
-              + ("✅ 稳住" if np.abs(dq).max() < 0.15 else "❌ 发散/下垂"))
+              + ("✅ 稳住" if np.abs(dq).max() < SETTINGS['sign_tol_rad'] else "❌ 发散/下垂"))
 
     # ---------- ② 有/无前馈的下垂对比 ----------
     print("\n② 有无重力前馈的稳态下垂（kp=40，等 3 秒）")
-    sim = Sim(args.xml, gravity_source="zero", kp_hold=40.0)  # 纯 PD（无前馈）
+    sim = Sim(args.xml, gravity_source="zero", kp_hold=SETTINGS["sign_test_kp"])  # 纯 PD（无前馈）
     sim.reset(q0)
-    sim.run(3.0)
+    sim.run(SETTINGS["observe_sec"])
     droop_pd = sim.q() - q0
-    sim2 = Sim(args.xml, gravity_source="truth", kp_hold=40.0)
+    sim2 = Sim(args.xml, gravity_source="truth", kp_hold=SETTINGS["sign_test_kp"])
     sim2.reset(q0)
-    sim2.run(3.0)
+    sim2.run(SETTINGS["observe_sec"])
     droop_ff = sim2.q() - q0
     print(f"   纯 PD（无前馈）: {np.array2string(droop_pd, precision=4)}  最大 {np.abs(droop_pd).max():.4f} rad")
     print(f"   带重力前馈     : {np.array2string(droop_ff, precision=4)}  最大 {np.abs(droop_ff).max():.4f} rad")
 
     # ---------- ③ 小刚度悬浮 + 外力推动 ----------
     print("\n③ 小刚度悬浮（kp_hold=6）+ 推一下")
-    sim = Sim(args.xml, gravity_source=args.gravity, kp_hold=6.0)
+    sim = Sim(args.xml, gravity_source=args.gravity, kp_hold=SETTINGS["kp_hold"])
     sim.reset(q0)
-    sim.run(2.0)
+    sim.run(SETTINGS["push_rest_sec"])
     q_before = sim.q()
-    sim.run(0.8, ext_force=3.0)          # 3 N 推力 0.8 秒
+    sim.run(SETTINGS["push_sec"], ext_force=SETTINGS["push_force_n"])          # 3 N 推力 0.8 秒
     q_pushed = sim.q()
-    sim.run(2.0)                          # 松手后
+    sim.run(SETTINGS["push_rest_sec"])                          # 松手后
     q_after = sim.q()
     print(f"   推之前      : {np.array2string(q_before, precision=4)}")
     print(f"   推 0.8s 后  : {np.array2string(q_pushed, precision=4)}  "
@@ -212,20 +219,20 @@ def main() -> int:
 
     # ---------- ④ 目标阶跃：增益调度 ----------
     print("\n④ 收到目标后的增益调度（kp 6 → 60）")
-    sim = Sim(args.xml, gravity_source=args.gravity, kp_hold=6.0)
+    sim = Sim(args.xml, gravity_source=args.gravity, kp_hold=SETTINGS["kp_hold"])
     sim.reset(q0)
-    sim.run(1.0)
-    target = q0 + np.array([0.25, 0.25, 0.25, 0.20, 0.20, 0.20])
+    sim.run(SETTINGS["initial_hold_sec"])
+    target = q0 + np.array(SETTINGS["step_rad"])
     sim.q_des = target.copy()
     log = []
     t = 0.0
     dt_ctrl = sim.model.opt.timestep * sim.sub_steps
     reached = None
-    while t < 3.0:
+    while t < SETTINGS["observe_sec"]:
         sim.step()
         t += dt_ctrl
         err = np.abs(sim.q() - target).max()
-        if reached is None and err < 0.02:
+        if reached is None and err < SETTINGS["step_tol_rad"]:
             reached = t
     print(f"   目标增量 {np.array2string(target - q0, precision=3)}")
     print(f"   到达（误差<0.02 rad）用时：{reached if reached else '>3s'}")
@@ -237,9 +244,9 @@ def main() -> int:
     print("   truth = MuJoCo 物理真值；urdf = CAD 惯量；fitted = 真机静态辨识参数")
     for src in ("truth", "urdf", "fitted"):
         try:
-            sim = Sim(args.xml, gravity_source=src, kp_hold=6.0)
+            sim = Sim(args.xml, gravity_source=src, kp_hold=SETTINGS["kp_hold"])
             sim.reset(q0)
-            sim.run(3.0)
+            sim.run(SETTINGS["observe_sec"])
             dq = sim.q() - q0
             print(f"   {src:<8} 下垂 {np.array2string(dq, precision=4)}  "
                   f"最大 {np.abs(dq).max():.4f} rad")

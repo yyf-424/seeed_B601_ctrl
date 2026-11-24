@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import difflib
 import sys
 from pathlib import Path
@@ -324,12 +325,17 @@ def render_safety_params(cfg: dict) -> str:
         "estop_vel_absolute": safety["velocity"]["estop_absolute"],
         "warn_on_pose_deviation": safety["pose"]["warn_on_deviation"],
         "warn_pose_threshold": safety["pose"]["warn_deviation"],
+        "joint_states_topic": safety["joint_states_topic"],
+        "joint_state_depth": safety["joint_state_depth"],
+        "minimum_evaluate_rate_hz": safety["minimum_evaluate_rate_hz"],
+        "minimum_publish_rate_hz": safety["minimum_publish_rate_hz"],
         "status_topic": safety["status_topic"],
         "clear_service": safety["clear_service"],
         "deactivate_controllers": list(safety["estop"].get("deactivate_controllers") or []),
         "deactivate_hardware": safety["estop"]["deactivate_hardware"],
         "hardware_component": safety["estop"]["hardware_component"],
         "service_timeout_sec": safety["estop"]["service_timeout_sec"],
+        "service_discovery_timeout_sec": safety["estop"]["service_discovery_timeout_sec"],
         "latch": safety["estop"]["latch"],
     }
     data = {safety.get("node_name", "b601_safety_monitor"): {"ros__parameters": params}}
@@ -401,9 +407,9 @@ def render_mit_controllers(cfg: dict) -> str:
     head = (
         GENERATED_NOTE
         + "# MIT 力控（变刚度）控制器：一个实例控一组关节，参数来自真值的 controllers.mit 段。\n"
-        + "# 启动示例（真机/仿真，纯力矩模式）：\n"
+        + "# 启动示例（电机侧 MIT，仿真）：\n"
         + "#   ros2 launch b601_bringup bringup.launch.py hardware:=mujoco \\\n"
-        + "#       dm_command_mode:=mit_torque \\\n"
+        + "#       dm_command_mode:=mit_impedance \\\n"
         + "#       controllers_file:=<本文件> \\\n"
         + "#       controllers:=\"joint_state_broadcaster " + " ".join(instances) + "\"\n"
     )
@@ -412,7 +418,29 @@ def render_mit_controllers(cfg: dict) -> str:
     return head + dump_yaml(data)
 
 
+def render_hardware_dm(cfg: dict) -> str:
+    dm = cfg["hardware"]["dm"]
+    joints = [joint for joint in cfg["joints"].values() if joint["control"]]
+    motors = [joint["motor"] for joint in joints]
+    return GENERATED_NOTE + dump_yaml({"dm_hardware": {
+        "transport": "serial", "device": dm["device"], "baudrate": dm["baudrate"],
+        "motor_ids": [motor["id"] for motor in motors],
+        "direction": [motor["direction"] for motor in motors],
+        "zero_offset": [motor["zero_offset"] for motor in motors],
+        "command_mode": dm["command_mode"],
+        "kp": [motor["kp"] for motor in motors],
+        "kd": [motor["kd"] for motor in motors],
+        "torque_limit": [joint["max_effort"] for joint in joints],
+        "enable_on_activate": dm["enable_motors"],
+        "watchdog_timeout": dm["watchdog_timeout"],
+        "max_velocity": [joint["max_velocity"] for joint in joints],
+    }})
+
+
 def render_all(cfg: dict) -> dict[Path, str]:
+    verified = deepcopy(cfg)
+    plan = verified["validation"]["mit_five_poses"]["hardware_retest"]
+    verified["safety"]["velocity"]["estop_absolute"] = plan["estop_arm_speed_rad_s"]
     return {
         WS_SRC / "b601_description" / "config" / "initial_positions.yaml":
             render_initial_positions(cfg),
@@ -424,6 +452,10 @@ def render_all(cfg: dict) -> dict[Path, str]:
             render_safety_params(cfg),
         WS_SRC / "b601_bringup" / "config" / "b601_mit_controllers.yaml":
             render_mit_controllers(cfg),
+        WS_SRC / "b601_bringup" / "config" / "b601_mit_safety_verified.yaml":
+            render_safety_params(verified),
+        WS_SRC / "b601_bringup" / "config" / "hardware_dm.yaml":
+            render_hardware_dm(cfg),
     }
 
 

@@ -10,6 +10,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(b601_description REQUIRED)
 find_package(controller_interface REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
@@ -21,7 +22,8 @@ find_package(std_msgs REQUIRED)
 add_library(b601_mit_controller SHARED src/b601_mit_controller.cpp)
 target_include_directories(b601_mit_controller PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
+  $<INSTALL_INTERFACE:include>
+  ${b601_description_INCLUDE_DIRS})
 target_link_libraries(b601_mit_controller PUBLIC
   controller_interface::controller_interface
   hardware_interface::hardware_interface
@@ -42,6 +44,7 @@ install(FILES b601_mit_controller_plugins.xml DESTINATION share/${PROJECT_NAME})
 pluginlib_export_plugin_description_file(controller_interface b601_mit_controller_plugins.xml)
 
 ament_export_include_directories(include)
+ament_export_dependencies(b601_description)
 ament_export_libraries(b601_mit_controller)
 ament_export_targets(export_b601_mit_controller)
 ament_package()

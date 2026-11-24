@@ -61,25 +61,42 @@ class SafetyLimits:
     startup: list[float]
 
     # 逐关节：距离限位多近开始警告（关节单位：rad 或 m）
-    warn_pos_margin: list[float] = 0.12
+    warn_pos_margin: float | list[float] | None = None
     # 逐关节：是否启用"接近限位"警告
     warn_near_limit: list[bool] = True
     # 逐关节：是否启用"离开启动位形"警告
     warn_pose_deviation_joint: list[bool] = True
 
-    estop_pos_margin: float = 0.0
+    estop_pos_margin: float | None = None
     # 静止零位漂移容差（rad/m）：手臂顶在机械停止位上时实测值可能略微越界，
     # 这段时间内不判越限（否则刚上电就被自己的零位漂移急停）。真实越限仍由
     # 物理停止位 + 速度急停兜底。
-    static_tolerance: float | list[float] = 0.05
-    warn_vel_ratio: float = 0.8
-    estop_vel_ratio: float = 1.0
-    estop_vel_absolute: float = 0.0
+    static_tolerance: float | list[float] | None = None
+    warn_vel_ratio: float | None = None
+    estop_vel_ratio: float | None = None
+    estop_vel_absolute: float | None = None
     # 全局总开关 + 偏差阈值
-    warn_on_pose_deviation: bool = True
-    warn_pose_threshold: float = 0.35
+    warn_on_pose_deviation: bool | None = None
+    warn_pose_threshold: float | None = None
 
     def __post_init__(self) -> None:
+        missing = [name for name in (
+            "warn_pos_margin", "estop_pos_margin", "static_tolerance", "warn_vel_ratio",
+            "estop_vel_ratio", "estop_vel_absolute", "warn_on_pose_deviation", "warn_pose_threshold",
+        ) if getattr(self, name) is None]
+        if missing:
+            from b601_description.project_config import load_project_config
+
+            cfg = load_project_config()["safety"]
+            angle, velocity, pose = cfg["angle"], cfg["velocity"], cfg["pose"]
+            defaults = {
+                "warn_pos_margin": angle["warn_margin"], "estop_pos_margin": angle["estop_margin"],
+                "static_tolerance": angle["static_tolerance"], "warn_vel_ratio": velocity["warn_ratio"],
+                "estop_vel_ratio": velocity["estop_ratio"], "estop_vel_absolute": velocity["estop_absolute"],
+                "warn_on_pose_deviation": pose["warn_on_deviation"], "warn_pose_threshold": pose["warn_deviation"],
+            }
+            for name in missing:
+                setattr(self, name, defaults[name])
         n = len(self.names)
         self.warn_pos_margin = [float(v) for v in _broadcast(self.warn_pos_margin, n)]
         self.static_tolerance = [float(v) for v in _broadcast(self.static_tolerance, n)]

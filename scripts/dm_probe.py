@@ -22,24 +22,20 @@ import argparse
 import sys
 import time
 
-# 关节 → 电机（与 b601_description/urdf/inc/ros2_control.xacro 的 <param> 一一对应）
-JOINTS = [
-    # (关节名, motor_id, feedback_id, 型号, 关节限位 rad / 夹爪 m)
-    ("joint1", 0x01, 0x11, "4340P", (-2.80, 2.80)),
-    ("joint2", 0x02, 0x12, "4340P", (-3.14, 0.00)),
-    ("joint3", 0x03, 0x13, "4340P", (-3.14, 0.00)),
-    ("joint4", 0x04, 0x14, "4310", (-1.87, 1.57)),
-    ("joint5", 0x05, 0x15, "4310", (-1.57, 1.57)),
-    ("joint6", 0x06, 0x16, "4310", (-3.14, 3.14)),
-    ("gripper", 0x07, 0x17, "4310", (-5.00, 0.00)),
-]
+from project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["tools"]["dm_probe"]
+DM = PROJECT["hardware"]["dm"]
+ROBOT = PROJECT["robot"]
+JOINTS = [*ROBOT["arm_joints"], ROBOT["gripper_joint"]]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="B601-DM 只读探针")
-    parser.add_argument("--device", default="/dev/ttyACM0")
-    parser.add_argument("--baud", type=int, default=921600)
-    parser.add_argument("--seconds", type=float, default=3.0)
+    parser.add_argument("--device", default=DM["device"])
+    parser.add_argument("--baud", type=int, default=DM["baudrate"])
+    parser.add_argument("--seconds", type=float, default=SETTINGS["duration_sec"])
     parser.add_argument("--enable", action="store_true",
                         help="做一次使能→立刻失能的连通测试（不适合首次上电）")
     args = parser.parse_args()
@@ -62,8 +58,9 @@ def main() -> int:
 
     motors = {}
     try:
-        for name, mid, fid, model, _limits in JOINTS:
-            motors[name] = ctrl.add_damiao_motor(mid, fid, model)
+        for name in JOINTS:
+            motor = PROJECT["joints"][name]["motor"]
+            motors[name] = ctrl.add_damiao_motor(motor["id"], motor["feedback_id"], motor["model"])
         print(f"==> 已注册 {len(motors)} 台电机，开始读反馈 {args.seconds:.1f} s\n")
 
         deadline = time.time() + args.seconds
@@ -87,7 +84,7 @@ def main() -> int:
                     continue
                 if state is not None and getattr(state, "has_value", 1):
                     latest[name] = state
-            time.sleep(0.01)
+            time.sleep(SETTINGS["poll_sec"])
 
         if not latest:
             print("❌ 一帧反馈都没收到。逐项检查：")
@@ -97,34 +94,41 @@ def main() -> int:
             print("   4) 是否有另一个程序同时在收发这条总线")
             return 1
 
-        print(f"{'关节':<9}{'motor':>6}{'反馈id':>8}{'位置(rad)':>12}{'速度':>10}"
+        print(f"{'关节':<9}{'motor':>6}{'反馈id':>8}{'位置(rad/m)':>12}{'速度':>10}"
               f"{'力矩':>9}{'MOS温度':>9}  限位检查")
         ok = True
-        for name, mid, fid, _model, (lo, hi) in JOINTS:
+        for name in JOINTS:
+            joint = PROJECT["joints"][name]
+            motor = joint["motor"]
+            mid, fid = motor["id"], motor["feedback_id"]
+            lo, hi = joint["min_pos"], joint["max_pos"]
             state = latest.get(name)
             if state is None:
                 print(f"{name:<9}{mid:>6}{fid:>8}{'—— 无反馈 ——':>28}")
                 ok = False
                 continue
-            pos = float(state.pos)
-            in_range = lo - 0.05 <= pos <= hi + 0.05
+            factor = motor["direction"] * motor["scale"]
+            pos = float(state.pos) * factor + motor["zero_offset"]
+            velocity = float(state.vel) * factor
+            tolerance = joint.get("static_tolerance", PROJECT["safety"]["angle"]["static_tolerance"])
+            in_range = lo - tolerance <= pos <= hi + tolerance
             ok = ok and in_range
             flag = "OK" if in_range else f"⚠ 超出 [{lo:+.2f},{hi:+.2f}]"
-            print(f"{name:<9}{mid:>6}{fid:>8}{pos:>12.4f}{float(state.vel):>10.3f}"
+            print(f"{name:<9}{mid:>6}{fid:>8}{pos:>12.4f}{velocity:>10.3f}"
                   f"{float(state.torq):>9.3f}{float(state.t_mos):>9.1f}  {flag}")
 
         # ---- 电机固件里的控制参数（寄存器 21/22/23；只读，不写） ----
         # 为什么必须知道 TMAX：MIT 模式下力矩命令由电机按 TMAX 归一化并**在固件里**限幅。
         # 软件侧的 torque_limit 若大于 TMAX，多出来的部分电机直接削掉 —— 看起来"没生效"。
         print(f"\n{'关节':<9}{'PMAX(rad)':>11}{'VMAX(rad/s)':>13}{'TMAX(N·m)':>11}{'CTRL_MODE':>11}")
-        for name, _mid, _fid, _model, _lim in JOINTS:
+        for name in JOINTS:
             motor = motors[name]
             def _rd(fn, reg):
-                for _ in range(2):
+                for _ in range(SETTINGS["register_attempts"]):
                     try:
-                        return fn(reg, 300)
+                        return fn(reg, SETTINGS["register_timeout_ms"])
                     except Exception:  # noqa: BLE001 - 个别电机不支持就打印 ?
-                        time.sleep(0.1)
+                        time.sleep(SETTINGS["register_retry_sec"])
                 return None
             pmax = _rd(motor.get_register_f32, 21)
             vmax = _rd(motor.get_register_f32, 22)
@@ -145,7 +149,7 @@ def main() -> int:
             print("\n==> 使能测试（会立刻失能）…")
             try:
                 ctrl.enable_all()
-                time.sleep(0.3)
+                time.sleep(SETTINGS["enable_hold_sec"])
                 for name, motor in motors.items():
                     state = motor.get_state()
                     if state is not None:
@@ -164,10 +168,6 @@ def main() -> int:
               "跑 ros2 launch b601_bringup bringup.launch.py hardware:=dm 看只读模式。")
         return 0
     finally:
-        try:
-            ctrl.disable_all()
-        except Exception:  # noqa: BLE001
-            pass
         try:
             ctrl.close()
         except Exception:  # noqa: BLE001

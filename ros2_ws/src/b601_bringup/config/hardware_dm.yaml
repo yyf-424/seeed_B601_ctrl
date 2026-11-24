@@ -1,34 +1,68 @@
-# hardware_dm.yaml —— 真机后端（RMW 之外）的现场参数
-#
-# 这个文件现在**没有代码读它**，是给 b601_hardware/DmSystemHardware 预留的：
-# 实现时的分工约定是
-#   静态结构（有几个关节、限位）→ URDF/xacro
-#   现场差异（串口号、方向符号、零位偏置、PID）→ 本文件
-# 这样换一台机器、换个 USB 口，不用改 URDF、不用重编 C++。
-#
-# 用法（实现后）：
-#   ros2 launch b601_bringup bringup.launch.py hardware:=dm \
-#       ros2_control_args:="--param-file $(ros2 pkg prefix b601_bringup)/share/b601_bringup/config/hardware_dm.yaml"
-
+# ============================================================================
+# ⚠ 本文件由 scripts/sync_config.py 自动生成，请勿手工编辑。
+#    要改参数请改：ros2_ws/src/b601_description/config/b601_project.yaml
+#    改完执行：  ./scripts/sync_config.py
+# ============================================================================
 dm_hardware:
-  # ---- 通信层 ----
-  transport: serial                # serial（USB-CAN 串口桥）| socketcan（原生 CAN，需 ip link set can0 up）
-  device: /dev/ttyACM0             # ls /dev/ttyACM* 确认；建议配 udev 规则固定成 /dev/b601
+  transport: serial
+  device: /dev/ttyACM0
   baudrate: 921600
-
-  # ---- 关节 → 电机映射 ----
-  # B601-DM：达妙 J4340P×3（joint1-3）+ J4310×3（joint4-6）+ 夹爪电机
-  motor_ids: [1, 2, 3, 4, 5, 6, 7]
-  direction: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]   # 关节正方向 / 电机正方向
-  zero_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 机械零位相对编码器零位的偏置（rad）
-
-  # ---- 控制模式 ----
-  command_mode: mit                # mit（位置+速度+力矩混合）| pos_vel
-  kp: [30.0, 60.0, 60.0, 15.0, 15.0, 10.0, 20.0]
-  kd: [1.5, 3.0, 3.0, 1.0, 1.0, 0.8, 1.5]
-  torque_limit: [24.0, 24.0, 24.0, 10.0, 10.0, 10.0, 10.0]   # MIT 模式电机力矩上限：4340P=24、4310=10
-
-  # ---- 安全 ----
-  enable_on_activate: false        # activate 时是否自动使能电机（首次调试务必 false，手动调 /enable）
-  watchdog_timeout: 0.5            # 超过这么久没收到新命令 → 停止写入并保持位置
-  max_velocity: [2.0, 2.0, 2.0, 4.0, 4.0, 4.0, 0.05]
+  motor_ids:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  direction:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - -1.0
+  zero_offset:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  command_mode: pos_vel
+  kp:
+  - 120.0
+  - 120.0
+  - 120.0
+  - 18.0
+  - 18.0
+  - 18.0
+  - 8.0
+  kd:
+  - 8.0
+  - 8.0
+  - 8.0
+  - 2.0
+  - 2.0
+  - 2.0
+  - 1.0
+  torque_limit:
+  - 24.0
+  - 24.0
+  - 24.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  enable_on_activate: false
+  watchdog_timeout: 0.5
+  max_velocity:
+  - 6.0
+  - 6.0
+  - 6.0
+  - 6.0
+  - 6.0
+  - 6.0
+  - 0.05

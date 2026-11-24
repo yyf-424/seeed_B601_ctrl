@@ -37,6 +37,11 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
+from project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["tools"]["dm_mit_move"]
+
 # 安全状态话题是 transient_local（锁存）：晚加入的订阅者也应立刻拿到"当前状态"。
 # 用默认 volatile 订阅会收不到（状态不变时发布者不会重复发）—— 2026-11-21 实测踩过。
 STATUS_QOS = QoSProfile(
@@ -47,17 +52,11 @@ STATUS_QOS = QoSProfile(
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-TRUTH = REPO_ROOT / "ros2_ws/src/b601_description/config/b601_project.yaml"
-ARM = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+ARM = PROJECT["robot"]["arm_joints"]
 
 
 def load_limits():
-    import yaml
-
-    with TRUTH.open(encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    j = cfg["joints"]
+    j = PROJECT["joints"]
     return ({n: float(j[n]["min_pos"]) for n in ARM},
             {n: float(j[n]["max_pos"]) for n in ARM})
 
@@ -65,7 +64,7 @@ def load_limits():
 class MitMover(Node):
     def __init__(self, topic: str, rate_hz: float, slew: float,
                  max_delta: float, tolerance: float, debug_topic: str,
-                 settle: float = 1.0):
+                 settle: float = SETTINGS["settle"]):
         super().__init__("b601_mit_move")
         self.pub = self.create_publisher(JointState, topic, 10)
         self.current: dict[str, float] = {}
@@ -99,10 +98,10 @@ class MitMover(Node):
             if kv.key == "state":
                 self.safety = kv.value
 
-    def wait_ready(self, timeout: float = 15.0) -> bool:
+    def wait_ready(self, timeout: float = SETTINGS["ready_timeout_sec"]) -> bool:
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
-            rclpy.spin_once(self, timeout_sec=0.1)
+            rclpy.spin_once(self, timeout_sec=SETTINGS["poll_sec"])
             if (all(n in self.current for n in ARM) and self.safety != "UNKNOWN"
                     and self.controller_seen):
                 return True
@@ -171,7 +170,7 @@ class MitMover(Node):
             self.pub.publish(msg)
 
             elapsed = time.monotonic() - t0
-            if elapsed - last_log > 1.0:
+            if elapsed - last_log > SETTINGS["log_interval_sec"]:
                 last_log = elapsed
                 errs = {n: abs(want[n] - self.current[n]) for n in ARM}
                 worst = max(errs, key=errs.get)
@@ -188,18 +187,21 @@ class MitMover(Node):
             # 冻结判据要看"有没有进展"：纯 MIT 到位后仍有 0.1 rad 左右的下垂，
             # 那不是冻结；只有"误差几乎没变过"才是目标没被执行。
             # ⚠ reached 之后误差不再变化是**正常的**（下垂），所以 reached 时不判冻结。
-            if (not reached) and err_now > max(self.tol + 0.05, 0.8 * err0) and vel_now < 0.02:
+            if (not reached) and err_now > max(
+                self.tol + SETTINGS["no_progress_margin_rad"],
+                SETTINGS["no_progress_initial_error_fraction"] * err0,
+            ) and vel_now < SETTINGS["no_progress_speed_rad_s"]:
                 self._frozen = getattr(self, "_frozen", 0.0) + dt
             else:
                 self._frozen = 0.0
-            if getattr(self, "_frozen", 0.0) > 1.2:
+            if getattr(self, "_frozen", 0.0) > SETTINGS["no_progress_timeout_sec"]:
                 self.get_logger().error(
                     f"{label}：误差还有 {err_now:.3f} rad 但 1.2 s 内没有任何运动 —— "
                     "目标没被执行（控制器未接管？），判失败")
                 return False
             if err_now <= self.tol:
                 quiet = getattr(self, "_quiet", 0.0) + dt
-            elif vel_now < 0.05:
+            elif vel_now < SETTINGS["settled_speed_rad_s"]:
                 # 纯 MIT（无重力补偿）稳态必然有下垂，"误差=0"不可能达到；
                 # 因此"速度已经静止"也算到位，只是把稳态误差如实报出来。
                 quiet = getattr(self, "_quiet", 0.0) + dt
@@ -210,9 +212,12 @@ class MitMover(Node):
             #   ① 目标命令已经走完全程（reached）—— 否则误把"斜坡中途"当成"稳态"报出去；
             #   ② 误差进入容差，或者"已经静止 settle 秒"（纯 MIT 稳态下垂，误差下不去）。
             # "静止即到位"还要求确实走过一大半路程，否则只读模式/未接管时会假成功。
-            settled = quiet > self.settle and err_now <= max(self.tol, 0.5 * err0)
+            settled = quiet > self.settle and err_now <= max(self.tol, SETTINGS["settled_initial_error_fraction"] * err0)
             done = reached and (err_now <= self.tol or settled)
-            if done or elapsed > 3.0 * max(move / max(self.slew, 1e-3), 1.0) + 8.0:
+            if done or elapsed > SETTINGS["deadline_scale"] * max(
+                move / max(self.slew, PROJECT["implementation"]["mit"]["slew_min"]),
+                SETTINGS["deadline_floor_sec"],
+            ) + SETTINGS["deadline_grace_sec"]:
                 self.get_logger().info(
                     f"{label}：结束，稳态最大误差 {err_now:.3f} rad、最大速度 {vel_now:.3f} rad/s"
                     "（纯 MIT 无重力补偿时误差≈重力下垂量）")
@@ -245,13 +250,13 @@ def main() -> int:
                     help="MIT 控制器心跳（激活后 ~10 Hz 发布），用于确认控制器真在跑")
     ap.add_argument("--set", default="", help="目标姿态，例：joint2=-0.35,joint5=0.2")
     ap.add_argument("--poses", default="", help="多个姿态用 ; 分隔，依次执行")
-    ap.add_argument("--slew", type=float, default=0.2, help="目标逼近速率 rad/s（默认 0.2，很慢）")
-    ap.add_argument("--rate", type=float, default=50.0, help="目标发布频率 Hz")
-    ap.add_argument("--max-delta", type=float, default=0.15,
+    ap.add_argument("--slew", type=float, default=SETTINGS["slew"], help="目标逼近速率 rad/s（默认 0.2，很慢）")
+    ap.add_argument("--rate", type=float, default=SETTINGS["rate"], help="目标发布频率 Hz")
+    ap.add_argument("--max-delta", type=float, default=SETTINGS["max_delta"],
                     help="单个关节允许的最大位移 rad（默认 0.15，防手误；确认无误后可调大）")
-    ap.add_argument("--tolerance", type=float, default=0.05,
+    ap.add_argument("--tolerance", type=float, default=SETTINGS["tolerance"],
                     help="到位判据 rad（只用于判到位，不会让目标跳步；纯 MIT 有下垂，别设太小）")
-    ap.add_argument("--settle", type=float, default=1.0,
+    ap.add_argument("--settle", type=float, default=SETTINGS["settle"],
                     help="目标命令走完后，实测『静止』多少秒才算一次姿态结束（默认 1.0 s）。"
                          "纯 MIT 稳态误差不会到 0，靠这个保证报出来的是稳态值而不是斜坡中途值")
     args = ap.parse_args()

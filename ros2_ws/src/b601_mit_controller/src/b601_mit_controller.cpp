@@ -15,7 +15,7 @@ namespace
 using Vec3 = std::array<double, 3>;
 using Mat3 = std::array<double, 9>;   // 行主序
 
-constexpr double kGravity = 9.81;
+constexpr double kGravity = b601_config::mit::gravity_m_s2;
 
 Vec3 mul(const Mat3 & R, const Vec3 & v)
 {
@@ -114,12 +114,10 @@ B601MitController::command_interface_configuration() const
   controller_interface::InterfaceConfiguration cfg;
   cfg.type = controller_interface::interface_configuration_type::INDIVIDUAL;
   for (const auto & name : joint_names_) {
-    if (motor_impedance_) {
-      // 电机侧阻抗：位置环在驱动器里，控制器把 (q_ref, kp, kd) 一起下发
-      cfg.names.push_back(name + "/" + hardware_interface::HW_IF_POSITION);
-      cfg.names.push_back(name + "/kp");
-      cfg.names.push_back(name + "/kd");
-    }
+    cfg.names.push_back(name + "/" + hardware_interface::HW_IF_POSITION);
+    cfg.names.push_back(name + "/" + hardware_interface::HW_IF_VELOCITY);
+    cfg.names.push_back(name + "/kp");
+    cfg.names.push_back(name + "/kd");
     cfg.names.push_back(name + "/" + hardware_interface::HW_IF_EFFORT);
   }
   return cfg;
@@ -209,19 +207,19 @@ bool B601MitController::read_gain_params()
 
   // 默认值 = 2026-11-21 真机验证过的那一套（只在 6 关节实例下有意义；
   // 其它关节数的实例必须由 profile 显式给值，否则下面 to_per_joint 会报错）
-  ensure("kp_hold", std::vector<double>{6.0, 6.0, 6.0, 2.0, 1.0, 0.8});
-  ensure("kd_hold", std::vector<double>{1.63, 3.15, 2.67, 0.37, 0.21, 0.13});
-  ensure("kp_move", std::vector<double>{60.0, 60.0, 60.0, 20.0, 10.0, 8.0});
-  ensure("kd_move", std::vector<double>{5.17, 9.97, 8.45, 1.17, 0.55, 0.35});
-  ensure("friction", std::vector<double>(6, 0.0));
-  ensure("torque_limit", 20.0);
+  ensure("kp_hold", b601_config::mit::kp_hold);
+  ensure("kd_hold", b601_config::mit::kd_hold);
+  ensure("kp_move", b601_config::mit::kp_move);
+  ensure("kd_move", b601_config::mit::kd_move);
+  ensure("friction", std::vector<double>(n, 0.0));
+  ensure("torque_limit", b601_config::mit::legacy_torque_default);
   // 等待档：没给就回落到 hold 档（老配置仍能跑）
   ensure("kp_free", std::vector<double>(kp_hold_.begin(), kp_hold_.end()));
   ensure("kd_free", std::vector<double>(kd_hold_.begin(), kd_hold_.end()));
   ensure("free_enabled", std::vector<bool>(n, true));
-  ensure("target_deadband", 0.001);
-  ensure("settle_band_min", 0.01);
-  ensure("settle_band_max", 0.05);
+  ensure("target_deadband", b601_config::mit::target_deadband);
+  ensure("settle_band_min", b601_config::mit::settle_band_min);
+  ensure("settle_band_max", b601_config::mit::settle_band_max);
 
   kp_hold_ = to_per_joint("kp_hold", node->get_parameter("kp_hold"), n);
   // kp_free/kd_free 可能来自 hold 档的默认值，需要在 kp_hold_ 读完之后再取
@@ -323,11 +321,9 @@ controller_interface::CallbackReturn B601MitController::on_init()
     }
 
     ensure("gravity_scale", gravity_scale_.load());
-    gravity_scale_ = std::min(1.5, std::max(0.0, node->get_parameter("gravity_scale").as_double()));
+    gravity_scale_ = std::min(b601_config::mit::gravity_scale_max, std::max(0.0, node->get_parameter("gravity_scale").as_double()));
     ensure("friction_scale", friction_scale_.load());
-    friction_scale_ = std::min(2.0, std::max(0.0, node->get_parameter("friction_scale").as_double()));
-    ensure("max_error", max_error_);
-    max_error_ = std::max(1e-3, node->get_parameter("max_error").as_double());
+    friction_scale_ = std::min(b601_config::mit::friction_scale_max, std::max(0.0, node->get_parameter("friction_scale").as_double()));
     // 旧的"误差阈值调度"参数（move/hold_threshold、vel_hold_threshold、kp_ramp_sec）
     // 在 Phase 1 已**不再用于决定模式**：模式只由「指令变化 + 整组到位」决定。
     // 仍然声明，是为了让旧 yaml/工具不报"未声明参数"；改它们不会有任何效果。
@@ -338,11 +334,24 @@ controller_interface::CallbackReturn B601MitController::on_init()
     ensure("vel_hold_threshold", vel_hold_threshold_);
     vel_hold_threshold_ = std::max(0.0, node->get_parameter("vel_hold_threshold").as_double());
     ensure("kp_ramp_sec", kp_ramp_sec_);
-    kp_ramp_sec_ = std::max(1e-3, node->get_parameter("kp_ramp_sec").as_double());
+    kp_ramp_sec_ = std::max(b601_config::mit::ramp_time_sec_min, node->get_parameter("kp_ramp_sec").as_double());
     ensure("friction_vel_eps", friction_vel_eps_);
-    friction_vel_eps_ = std::max(1e-4, node->get_parameter("friction_vel_eps").as_double());
-    ensure("motor_impedance", motor_impedance_);
-    motor_impedance_ = node->get_parameter("motor_impedance").as_bool();
+    friction_vel_eps_ = std::max(b601_config::mit::friction_velocity_epsilon_min, node->get_parameter("friction_vel_eps").as_double());
+    ensure("motor_impedance", true);
+    if (!node->get_parameter("motor_impedance").as_bool()) {
+      RCLCPP_ERROR(node->get_logger(), "本控制器需要 dm_command_mode:=mit_impedance");
+      return controller_interface::CallbackReturn::ERROR;
+    }
+    ensure("task_torque_timeout_sec", task_torque_timeout_sec_);
+    task_torque_timeout_sec_ = node->get_parameter("task_torque_timeout_sec").as_double();
+    ensure("target_velocity_timeout_sec", target_velocity_timeout_sec_);
+    target_velocity_timeout_sec_ = node->get_parameter("target_velocity_timeout_sec").as_double();
+    if (!std::isfinite(task_torque_timeout_sec_) || task_torque_timeout_sec_ < 0.0 ||
+      !std::isfinite(target_velocity_timeout_sec_) || target_velocity_timeout_sec_ <= 0.0)
+    {
+      RCLCPP_ERROR(node->get_logger(), "任务力矩或速度目标超时参数无效");
+      return controller_interface::CallbackReturn::ERROR;
+    }
     ensure("use_gravity", use_gravity_);
     use_gravity_ = node->get_parameter("use_gravity").as_bool();
     // ---- 真机鲁棒性三件套（默认值即为保守值，可用 ros2 param set 现场调）----
@@ -350,23 +359,19 @@ controller_interface::CallbackReturn B601MitController::on_init()
     ensure("settle_band_pct", settle_band_pct_);
     settle_band_pct_ = std::clamp(node->get_parameter("settle_band_pct").as_double(), 0.0, 1.0);
     ensure("settle_sec", settle_sec_);
-    settle_sec_ = std::max(0.05, node->get_parameter("settle_sec").as_double());
+    settle_sec_ = std::max(b601_config::mit::settle_sec_min, node->get_parameter("settle_sec").as_double());
     ensure("target_slew", target_slew_);
-    target_slew_ = std::max(1e-3, node->get_parameter("target_slew").as_double());
+    target_slew_ = std::max(b601_config::mit::slew_min, node->get_parameter("target_slew").as_double());
     ensure("kp_up_sec", kp_up_sec_);
-    kp_up_sec_ = std::max(1e-3, node->get_parameter("kp_up_sec").as_double());
+    kp_up_sec_ = std::max(b601_config::mit::ramp_time_sec_min, node->get_parameter("kp_up_sec").as_double());
     ensure("kp_down_sec", kp_down_sec_);
-    kp_down_sec_ = std::max(1e-3, node->get_parameter("kp_down_sec").as_double());
+    kp_down_sec_ = std::max(b601_config::mit::ramp_time_sec_min, node->get_parameter("kp_down_sec").as_double());
     ensure("q_ref_lpf_hz", q_ref_lpf_hz_);
-    q_ref_lpf_hz_ = std::max(0.5, node->get_parameter("q_ref_lpf_hz").as_double());
+    q_ref_lpf_hz_ = std::max(b601_config::mit::position_filter_hz_min, node->get_parameter("q_ref_lpf_hz").as_double());
     ensure("track_timeout_sec", track_timeout_sec_);
     track_timeout_sec_ = std::max(0.0, node->get_parameter("track_timeout_sec").as_double());
     ensure("velocity_lpf_hz", velocity_lpf_hz_.load());
-    velocity_lpf_hz_ = std::max(0.5, node->get_parameter("velocity_lpf_hz").as_double());
-    ensure("max_vel_feedback", max_vel_feedback_.load());
-    max_vel_feedback_ = std::max(0.01, node->get_parameter("max_vel_feedback").as_double());
-    ensure("torque_slew", torque_slew_.load());
-    torque_slew_ = std::max(0.0, node->get_parameter("torque_slew").as_double());
+    velocity_lpf_hz_ = std::max(b601_config::mit::velocity_filter_hz_min, node->get_parameter("velocity_lpf_hz").as_double());
   } catch (const std::exception & e) {
     RCLCPP_ERROR(get_node()->get_logger(), "参数读取失败：%s", e.what());
     return controller_interface::CallbackReturn::ERROR;
@@ -398,9 +403,8 @@ controller_interface::CallbackReturn B601MitController::on_init()
     track_timeout_sec_);
   RCLCPP_INFO(
     get_node()->get_logger(),
-    "守卫：重力前馈 %.2f 摩擦 %.2f 速度低通 %.1f Hz / kd 钳位 %.2f / 力矩斜坡 %.0f",
-    gravity_scale_.load(), friction_scale_.load(),
-    velocity_lpf_hz_.load(), max_vel_feedback_.load(), torque_slew_.load());
+    "电机侧 MIT：重力 %.2f，摩擦 %.2f，任务力矩超时 %.2f s",
+    gravity_scale_.load(), friction_scale_.load(), task_torque_timeout_sec_);
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -413,9 +417,9 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
   for (const auto & p : params) {
     const auto & name = p.get_name();
     if (name == "gravity_scale") {
-      gravity_scale_ = std::clamp(p.as_double(), 0.0, 1.5);
+      gravity_scale_ = std::clamp(p.as_double(), 0.0, b601_config::mit::gravity_scale_max);
     } else if (name == "friction_scale") {
-      friction_scale_ = std::clamp(p.as_double(), 0.0, 2.0);
+      friction_scale_ = std::clamp(p.as_double(), 0.0, b601_config::mit::friction_scale_max);
     } else if (name == "kp_hold" || name == "kd_hold" || name == "kp_move" || name == "kd_move" ||
       name == "friction" || name == "torque_limit")
     {
@@ -445,14 +449,8 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
       move_threshold_ = std::max(0.0, p.as_double());
     } else if (name == "hold_threshold") {
       hold_threshold_ = std::max(0.0, p.as_double());
-    } else if (name == "max_error") {
-      max_error_ = std::max(1e-3, p.as_double());
     } else if (name == "velocity_lpf_hz") {
-      velocity_lpf_hz_ = std::max(0.5, p.as_double());
-    } else if (name == "max_vel_feedback") {
-      max_vel_feedback_ = std::max(0.01, p.as_double());
-    } else if (name == "torque_slew") {
-      torque_slew_ = std::max(0.0, p.as_double());
+      velocity_lpf_hz_ = std::max(b601_config::mit::velocity_filter_hz_min, p.as_double());
     } else {
       continue;
     }
@@ -477,6 +475,7 @@ bool B601MitController::bind_interfaces()
   vel_idx_.assign(n, -1);
   cmd_idx_.assign(n, -1);
   pos_cmd_idx_.assign(n, -1);
+  vel_cmd_idx_.assign(n, -1);
   kp_idx_.assign(n, -1);
   kd_idx_.assign(n, -1);
   chain_pos_idx_.fill(-1);
@@ -514,21 +513,20 @@ bool B601MitController::bind_interfaces()
       cmd_idx_[j] = static_cast<int>(k);
     } else if (iface == hardware_interface::HW_IF_POSITION && pos_cmd_idx_[j] < 0) {
       pos_cmd_idx_[j] = static_cast<int>(k);
+    } else if (iface == hardware_interface::HW_IF_VELOCITY && vel_cmd_idx_[j] < 0) {
+      vel_cmd_idx_[j] = static_cast<int>(k);
     } else if (iface == "kp" && kp_idx_[j] < 0) {
       kp_idx_[j] = static_cast<int>(k);
     } else if (iface == "kd" && kd_idx_[j] < 0) {
       kd_idx_[j] = static_cast<int>(k);
     }
   }
-  if (motor_impedance_) {
-    for (std::size_t i = 0; i < n; ++i) {
-      if (pos_cmd_idx_[i] < 0 || kp_idx_[i] < 0 || kd_idx_[i] < 0) {
-        RCLCPP_ERROR(
-          get_node()->get_logger(),
-          "motor_impedance=true 但 %s 缺 position/kp/kd 命令接口 —— "
-          "URDF 里需要 dm_command_mode:=mit_impedance", joint_names_[i].c_str());
-        return false;
-      }
+  for (std::size_t i = 0; i < n; ++i) {
+    if (pos_cmd_idx_[i] < 0 || vel_cmd_idx_[i] < 0 || kp_idx_[i] < 0 || kd_idx_[i] < 0) {
+      RCLCPP_ERROR(
+        get_node()->get_logger(), "%s 缺少 MIT 命令接口，需要 dm_command_mode:=mit_impedance",
+        joint_names_[i].c_str());
+      return false;
     }
   }
 
@@ -575,12 +573,16 @@ controller_interface::CallbackReturn B601MitController::on_configure(
   target_sub_ = node->create_subscription<sensor_msgs::msg::JointState>(
     "~/joint_target", rclcpp::SystemDefaultsQoS(),
     std::bind(&B601MitController::target_callback, this, std::placeholders::_1));
-  debug_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/debug", 10);
+  task_sub_ = node->create_subscription<std_msgs::msg::Float64MultiArray>(
+    "~/task_torque", b601_config::mit::topic_depth,
+    std::bind(&B601MitController::task_torque_callback, this, std::placeholders::_1));
+  ff_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/ff", b601_config::mit::topic_depth);
+  debug_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/debug", b601_config::mit::topic_depth);
 
   param_cb_handle_ = node->add_on_set_parameters_callback(
     std::bind(&B601MitController::parameter_callback, this, std::placeholders::_1));
 
-  state_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/state", 10);
+  state_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/state", b601_config::mit::topic_depth);
 
   const std::size_t n = joint_names_.size();
   TargetCommand init;
@@ -614,7 +616,7 @@ controller_interface::CallbackReturn B601MitController::on_activate(
   qd_f_.assign(n, 0.0);
   q_des_.assign(n, 0.0);
   tau_cmd_.assign(n, 0.0);
-  tau_prev_.assign(n, 0.0);
+  ff_components_.assign(n * 3, 0.0);
   kp_cur_.assign(n, 0.0);
   kd_cur_.assign(n, 0.0);
   tau_g_.fill(0.0);
@@ -630,7 +632,6 @@ controller_interface::CallbackReturn B601MitController::on_activate(
     q_ref_[i] = q_[i];
     settle_band_[i] = settle_band_max_[i];
     tau_cmd_[i] = 0.0;
-    tau_prev_[i] = 0.0;
     // 激活时刚度必须是"当前状态该有的那个"：
     //   free_enabled=true（等待模式）→ kp_free（软，可手推，符合设计）
     //   free_enabled=false（纯 PD 对标 pos_vel）→ kp_move
@@ -639,11 +640,10 @@ controller_interface::CallbackReturn B601MitController::on_activate(
     kp_cur_[i] = free_enabled_[i] ? kp_free_[i] : kp_move_[i];
     kd_cur_[i] = free_enabled_[i] ? kd_free_[i] : kd_move_[i];
     command_interfaces_[cmd_idx_[i]].set_value(0.0);
-    if (motor_impedance_) {
-      command_interfaces_[pos_cmd_idx_[i]].set_value(q_[i]);
-      command_interfaces_[kp_idx_[i]].set_value(0.0);   // 先零刚度，等第一周期再给
-      command_interfaces_[kd_idx_[i]].set_value(0.0);
-    }
+    command_interfaces_[pos_cmd_idx_[i]].set_value(q_[i]);
+    command_interfaces_[vel_cmd_idx_[i]].set_value(0.0);
+    command_interfaces_[kp_idx_[i]].set_value(0.0);
+    command_interfaces_[kd_idx_[i]].set_value(0.0);
   }
   for (std::size_t c = 0; c < chain_names_.size(); ++c) {
     chain_q_[c] = state_interfaces_[chain_pos_idx_[c]].get_value();
@@ -661,17 +661,21 @@ controller_interface::CallbackReturn B601MitController::on_activate(
     seq_seen_ = init.seq;
     target_buffer_.writeFromNonRT(init);
   }
+  task_buffer_.writeFromNonRT({});
+  activation_time_ns_ = get_node()->now().nanoseconds();
+  accepting_commands_ = true;
   RCLCPP_INFO(
     get_node()->get_logger(),
-    "已激活：%zu 关节，q_cmd=当前位形，进入**等待模式**（kp_free=%.2f，无权威）。"
-    "重力补偿 %s，摩擦补偿 %s",
-    n, kp_free_.front(), use_gravity_ ? "开" : "关", friction_scale_.load() > 1e-6 ? "开" : "关");
+    "已激活：%zu 关节，初始目标为当前位形，低刚度等待 %s，重力补偿 %s，摩擦补偿 %s",
+    n, std::any_of(free_enabled_.begin(), free_enabled_.end(), [](bool value) {return value;})
+    ? "开" : "关", use_gravity_ ? "开" : "关", friction_scale_.load() > 1e-6 ? "开" : "关");
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn B601MitController::on_deactivate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  accepting_commands_ = false;
   for (auto & ci : command_interfaces_) {
     ci.set_value(0.0);      // 退出时把力矩命令（以及 kp/kd）清零
   }
@@ -681,31 +685,49 @@ controller_interface::CallbackReturn B601MitController::on_deactivate(
 
 void B601MitController::target_callback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
-  const std::size_t n = joint_names_.size();
-  std::vector<double> tgt(n, 0.0);
+  const auto stamp_ns = get_node()->now().nanoseconds();
+  const auto n = joint_names_.size();
+  if (!accepting_commands_.load() || msg->name.size() != msg->position.size() ||
+    (!msg->velocity.empty() && msg->velocity.size() != msg->name.size()))
+  {
+    return;
+  }
+  TargetCommand cmd;
+  cmd.q.resize(n);
+  cmd.velocity.assign(n, 0.0);
   for (std::size_t i = 0; i < n; ++i) {
-    bool found = false;
-    for (std::size_t k = 0; k < msg->name.size() && k < msg->position.size(); ++k) {
-      if (msg->name[k] == joint_names_[i]) {
-        tgt[i] = msg->position[k];
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      // 消息里缺本实例的关节 → 整帧丢弃。宁愿不动，也不要"半帧生效"。
+    const auto found = std::find(msg->name.begin(), msg->name.end(), joint_names_[i]);
+    if (found == msg->name.end() || std::find(found + 1, msg->name.end(), *found) != msg->name.end()) {
       RCLCPP_WARN_THROTTLE(
-        get_node()->get_logger(), *get_node()->get_clock(), 2000,
-        "目标消息缺关节 %s —— 整帧丢弃（本实例需要 %zu 个关节名齐全）",
-        joint_names_[i].c_str(), n);
+        get_node()->get_logger(), *get_node()->get_clock(), b601_config::mit::target_warning_throttle_ms,
+        "目标缺少或重复关节 %s", joint_names_[i].c_str());
+      return;
+    }
+    const auto k = static_cast<std::size_t>(found - msg->name.begin());
+    cmd.q[i] = msg->position[k];
+    if (!msg->velocity.empty()) {
+      cmd.velocity[i] = msg->velocity[k];
+    }
+    if (!std::isfinite(cmd.q[i]) || !std::isfinite(cmd.velocity[i])) {
       return;
     }
   }
-  TargetCommand cmd;
-  cmd.q = tgt;
-  cmd.seq = ++target_seq_;      // 每帧有效目标一个序号；RT 侧据此判断"有没有新指令"
+  cmd.stamp_ns = stamp_ns;
+  cmd.seq = ++target_seq_;
   target_buffer_.writeFromNonRT(cmd);
   target_received_ = true;
+}
+
+void B601MitController::task_torque_callback(
+  const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+{
+  const auto stamp_ns = get_node()->now().nanoseconds();
+  if (!accepting_commands_.load() || msg->data.size() != joint_names_.size() ||
+    !std::all_of(msg->data.begin(), msg->data.end(), [](double x) {return std::isfinite(x);}))
+  {
+    return;
+  }
+  task_buffer_.writeFromNonRT({msg->data, stamp_ns});
 }
 
 // ---------------------------------------------------------------- 重力前馈计算
@@ -759,14 +781,15 @@ void B601MitController::compute_gravity(
 
 // ------------------------------------------------------------------ 主控制循环
 controller_interface::return_type B601MitController::update(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & period)
+  const rclcpp::Time & time, const rclcpp::Duration & period)
 {
   const std::size_t n = joint_names_.size();
   if (n == 0 || q_.size() != n) {
     return controller_interface::return_type::ERROR;
   }
 
-  const double dt = std::clamp(period.seconds(), 1e-4, 0.05);
+  const double dt = std::clamp(period.seconds(), b601_config::mit::update_period_min_sec,
+    b601_config::mit::update_period_max_sec);
 
   for (std::size_t i = 0; i < n; ++i) {
     q_[i] = state_interfaces_[pos_idx_[i]].get_value();
@@ -780,11 +803,24 @@ controller_interface::return_type B601MitController::update(
   // ================== ① 指令接受（整组） ==================
   // 判据不是"误差多大"，而是"上层目标有没有变"。人推只改 q、不改 q_cmd，
   // 所以永远不会被误判成"上层要大动作"（这是 Phase 1 的核心修正）。
-  const auto * cmd = target_buffer_.readFromNonRT();
-  if (cmd != nullptr && have_target_ && target_received_.load() && cmd->q.size() == n &&
-    cmd->seq != seq_seen_)
+  const auto activation_ns = activation_time_ns_.load();
+  const auto now_ns = time.nanoseconds();
+  const auto is_fresh = [activation_ns, now_ns](int64_t stamp_ns, double timeout_sec) {
+      return stamp_ns >= activation_ns && stamp_ns <= now_ns &&
+             (now_ns - stamp_ns) * 1e-9 < timeout_sec;
+    };
+  const auto * cmd = target_buffer_.readFromRT();
+  const bool valid_target = cmd && have_target_ && target_received_.load() &&
+    cmd->q.size() == n && cmd->stamp_ns >= activation_ns && cmd->stamp_ns <= now_ns;
+  const bool velocity_fresh = valid_target && is_fresh(cmd->stamp_ns, target_velocity_timeout_sec_);
+  const bool moving_reference = velocity_fresh &&
+    std::any_of(cmd->velocity.begin(), cmd->velocity.end(), [](double v) {return v != 0.0;});
+  const auto * task = task_buffer_.readFromRT();
+  const bool task_fresh = task && task->torque.size() == n &&
+    is_fresh(task->stamp_ns, task_torque_timeout_sec_);
+  if (valid_target && cmd->seq != seq_seen_)
   {
-    bool changed = false;
+    bool changed = done_ && moving_reference;
     for (std::size_t i = 0; i < n; ++i) {
       if (std::abs(cmd->q[i] - q_cmd_[i]) > target_deadband_[i]) {
         changed = true;
@@ -815,14 +851,8 @@ controller_interface::return_type B601MitController::update(
     q_up_[i] = move_toward(q_up_[i], q_cmd_[i], target_slew_ * dt);
   }
 
-  // ---- 速度低通（只给 kd 项用）----
-  // 真机实测：达妙电机在低速/低负载时速度反馈是量化+抖动的（LSB 约 0.007 rad/s），
-  // 且安静时也会有 ±0.02 rad/s 的跳变；kd 乘上它会产出 ±0.07 N·m 的力矩噪声，
-  // 一旦被激发（例如多条目标同时起步）就进入自激抖振，0.1 s 内把轻关节打到 ±10 N·m。
-  // 一阶低通把这类高频抖动压掉，同时不改变低频下的刚度/阻尼特性。
-  const double tau_v = 1.0 / (2.0 * M_PI * velocity_lpf_hz_.load());
-  const double a_v = std::min(1.0, dt / std::max(tau_v, 1e-4));
-  const double vfb_clamp = max_vel_feedback_.load();
+  // 速度低通仅用于主机侧摩擦补偿。
+  const double a_v = -std::expm1(-dt * 2.0 * M_PI * velocity_lpf_hz_.load());
   for (std::size_t i = 0; i < n; ++i) {
     qd_f_[i] += a_v * (qd_[i] - qd_f_[i]);
   }
@@ -836,7 +866,7 @@ controller_interface::return_type B601MitController::update(
 
   // ================== ③ 整组到位判定（对着 q_cmd，不用斜坡数据） ==================
   if (!done_) {
-    bool in_band = true;
+    bool in_band = !moving_reference;
     for (std::size_t i = 0; i < n; ++i) {
       // 允许带内小幅震荡：只看"在不在带里"，不判速度
       if (std::abs(q_cmd_[i] - q_[i]) >= settle_band_[i]) {
@@ -848,7 +878,7 @@ controller_interface::return_type B601MitController::update(
     t_track_ += dt;
     if (t_in_band_ >= settle_sec_) {
       done_ = true;          // 锁存：只有"新指令"能清
-      RCLCPP_INFO(get_node()->get_logger(), "到位（%.1f s 在带内）→ 进入等待模式（低刚度）",
+      RCLCPP_INFO(get_node()->get_logger(), "整组到位（%.1f s 在误差带内）",
         t_in_band_);
     } else if (track_timeout_sec_ > 0.0 && t_track_ > track_timeout_sec_) {
       done_ = true;
@@ -871,7 +901,6 @@ controller_interface::return_type B601MitController::update(
 
   // ================== ⑤ 变刚度（线性速率斜坡） ==================
   const double ramp_sec = done_ ? kp_down_sec_ : kp_up_sec_;
-  const double max_dtau = torque_slew_.load() * dt;   // 关节单位/周期；0 = 不限
 
   for (std::size_t i = 0; i < n; ++i) {
     const bool authoritative = !done_ || !free_enabled_[i];
@@ -883,51 +912,28 @@ controller_interface::return_type B601MitController::update(
     kp_cur_[i] = move_toward(kp_cur_[i], kp_tgt, kp_step);
     kd_cur_[i] = move_toward(kd_cur_[i], kd_tgt, kd_step);
 
-    // 误差饱和：状态反馈一旦异常（比如读数跳变），这里能拦住"巨大力矩"这种灾难
-    const double err = std::clamp(q_ref_[i] - q_[i], -max_error_, max_error_);
-    // kd 项速度钳位：正常斜坡（≤0.5 rad/s）根本碰不到它，
-    // 只有反馈出现 2 rad/s 以上的跳变时才会削平，防止阻尼力矩变成"抖振发动机"。
-    const double qd_used = std::clamp(qd_f_[i], -vfb_clamp, vfb_clamp);
-    // 摩擦前馈：−f_c·tanh(q̇/eps)，用 tanh 而不是 sign 是为了在 0 速度附近平滑
-    const double tau_f = -friction_[i] * std::tanh(qd_f_[i] / friction_vel_eps_);
-    // 重力前馈：本实例关节若不在整链里（例如夹爪），重力项按 0（prismatic 轴向重力分量为 0）
-    const double tau_grav = (gravity_row_[i] >= 0)
-      ? tau_g_[static_cast<std::size_t>(gravity_row_[i])]
-      : 0.0;
+    const double gravity = gravity_row_[i] >= 0
+      ? -gravity_scale_.load() * tau_g_[static_cast<std::size_t>(gravity_row_[i])] : 0.0;
+    const double friction =
+      -friction_scale_.load() * friction_[i] * std::tanh(qd_f_[i] / friction_vel_eps_);
+    const double task_torque = task_fresh ? task->torque[i] : 0.0;
+    ff_components_[i] = friction;
+    ff_components_[n + i] = gravity;
+    ff_components_[2 * n + i] = task_torque;
+    const double limit = torque_limit_[i];
+    tau_cmd_[i] = std::clamp(gravity + friction + task_torque, -limit, limit);
 
-    double tau = kp_cur_[i] * err + kd_cur_[i] * (-qd_used)
-      + gravity_scale_.load() * tau_grav + friction_scale_.load() * tau_f;
-
-    // 力矩斜坡：限制单周期变化量，抖振不可能一步冲到限幅值
-    if (max_dtau > 0.0) {
-      tau = std::clamp(tau, tau_prev_[i] - max_dtau, tau_prev_[i] + max_dtau);
-    }
-    if (motor_impedance_) {
-      // 电机侧阻抗：PD 由驱动器内部闭环（1 kHz 量级）。控制器只负责
-      //   · position 命令 = 参考量（斜坡后的 q_ref）
-      //   · kp/kd 命令   = 当前变刚度值（驱动器直接用）
-      //   · effort 命令  = **只含前馈**（重力+摩擦），不再重复 PD
-      const double ff = gravity_scale_.load() * tau_grav + friction_scale_.load() * tau_f;
-      const double tlim = torque_limit_[i];
-      const double ff_out = std::clamp(ff, -tlim, tlim);
-      command_interfaces_[pos_cmd_idx_[i]].set_value(q_ref_[i]);
-      command_interfaces_[kp_idx_[i]].set_value(kp_cur_[i]);
-      command_interfaces_[kd_idx_[i]].set_value(kd_cur_[i]);
-      command_interfaces_[cmd_idx_[i]].set_value(ff_out);
-      tau_cmd_[i] = ff_out;
-      tau_prev_[i] = ff_out;
-      continue;
-    }
-    const double tlim = torque_limit_[i];
-    tau = std::clamp(tau, -tlim, tlim);
-    tau_cmd_[i] = tau;
-    tau_prev_[i] = tau;
-    command_interfaces_[cmd_idx_[i]].set_value(tau);
+    command_interfaces_[pos_cmd_idx_[i]].set_value(q_ref_[i]);
+    command_interfaces_[vel_cmd_idx_[i]].set_value(
+      authoritative && velocity_fresh ? cmd->velocity[i] : 0.0);
+    command_interfaces_[kp_idx_[i]].set_value(kp_cur_[i]);
+    command_interfaces_[kd_idx_[i]].set_value(kd_cur_[i]);
+    command_interfaces_[cmd_idx_[i]].set_value(tau_cmd_[i]);
   }
 
   // ---- 低频调试输出（约 10 Hz）----
   ++debug_counter_;
-  if (debug_counter_ % 20 == 0 && state_pub_) {
+  if (debug_counter_ % b601_config::mit::diagnostic_divider == 0 && state_pub_) {
     std_msgs::msg::Float64MultiArray st;
     st.data.assign(n * 8 + 4, 0.0);
     for (std::size_t i = 0; i < n; ++i) {
@@ -948,7 +954,12 @@ controller_interface::return_type B601MitController::update(
     st.data[8 * n + 3] = t_track_;
     state_pub_->publish(st);
   }
-  if (debug_counter_ % 20 == 0 && debug_pub_) {
+  if (debug_counter_ % b601_config::mit::diagnostic_divider == 0 && ff_pub_) {
+    std_msgs::msg::Float64MultiArray ff;
+    ff.data = ff_components_;
+    ff_pub_->publish(ff);
+  }
+  if (debug_counter_ % b601_config::mit::diagnostic_divider == 0 && debug_pub_) {
     std_msgs::msg::Float64MultiArray msg;
     msg.data.resize(n * 4);
     for (std::size_t i = 0; i < n; ++i) {

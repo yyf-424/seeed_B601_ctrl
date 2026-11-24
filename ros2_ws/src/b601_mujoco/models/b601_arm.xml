@@ -1,8 +1,7 @@
 <!-- 本文件由 scripts/gen_mjcf.py 从 URDF 自动生成，请勿手改 -->
 <mujoco model="b601_dm">
   <compiler angle="radian" autolimits="true"/>
-  <!-- 1 ms 步长、implicitfast 积分器：机械臂这种刚性系统稳定且快 -->
-  <option timestep="0.001" integrator="implicitfast" iterations="50"/>
+  <option timestep="0.001" integrator="implicitfast" iterations="50" gravity="0 0 -9.81"/>
   <visual>
     <global offwidth="1280" offheight="720"/>
     <headlight ambient="0.35 0.35 0.35" diffuse="0.7 0.7 0.7" specular="0.1 0.1 0.1"/>

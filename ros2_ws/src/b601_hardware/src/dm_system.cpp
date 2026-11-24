@@ -161,9 +161,9 @@ void DmSystemHardware::parse_hardware_parameters()
   enable_motors_ = get_bool(p, "enable_motors", enable_motors_, where);
   // 温度守护阈值（真值 hardware.dm.temperature，由 xacro 透传）
   temp_guard_.configure(
-    get_double(p, "temp_warn_c", 70.0, where),
-    get_double(p, "temp_limit_c", 85.0, where),
-    get_double(p, "temp_hysteresis_c", 5.0, where));
+    get_double(p, "temp_warn_c", b601_config::dm::warn_c, where),
+    get_double(p, "temp_limit_c", b601_config::dm::limit_c, where),
+    get_double(p, "temp_hysteresis_c", b601_config::dm::hysteresis_c, where));
   RCLCPP_INFO(
     logger(), "温度守护：告警 %.0f ℃ / 失能 %.0f ℃ / 迟滞 %.0f ℃（读反馈帧的 t_mos、t_rotor）",
     temp_guard_.warn_c(), temp_guard_.limit_c(), temp_guard_.hysteresis_c());
@@ -185,7 +185,7 @@ void DmSystemHardware::parse_hardware_parameters()
   if (velocity_scale_ <= 0.0 || velocity_scale_ > 1.0) {
     RCLCPP_WARN(
       logger(), "velocity_scale=%.3f 超出 (0,1]，夹到合法范围", velocity_scale_);
-    velocity_scale_ = std::clamp(velocity_scale_, 0.01, 1.0);
+    velocity_scale_ = std::clamp(velocity_scale_, b601_config::dm::minimum_velocity_scale, 1.0);
   }
   request_feedback_ = get_bool(p, "request_feedback", request_feedback_, where);
   feedback_divider_ = std::max(1, get_int(p, "feedback_divider", feedback_divider_, where));
@@ -200,9 +200,10 @@ void DmSystemHardware::parse_hardware_parameters()
     log_csv_ = it->second;
   }
   log_rate_hz_ = get_double(p, "log_rate_hz", log_rate_hz_, where);
-  if (log_rate_hz_ < 1.0) {
-    RCLCPP_WARN(logger(), "log_rate_hz=%.1f 太小，按 1 Hz 处理", log_rate_hz_);
-    log_rate_hz_ = 1.0;
+  if (log_rate_hz_ < b601_config::dm::minimum_log_rate_hz) {
+    RCLCPP_WARN(logger(), "log_rate_hz=%.1f 太小，按 %.1f Hz 处理",
+      log_rate_hz_, b601_config::dm::minimum_log_rate_hz);
+    log_rate_hz_ = b601_config::dm::minimum_log_rate_hz;
   }
   log_period_s_ = 1.0 / log_rate_hz_;
 }
@@ -252,12 +253,15 @@ bool DmSystemHardware::parse_joint_config(
   cfg.kp = get_double(p, "kp", 0.0, where);
   cfg.kd = get_double(p, "kd", 0.0, where);
   cfg.vel_limit = get_double(p, "vel_limit", cfg.vel_limit, where);
+  cfg.mit_velocity_limit = std::clamp(
+    get_double(p, "mit_velocity_limit", cfg.vel_limit * velocity_scale_, where),
+    0.0, cfg.vel_limit);
   cfg.torque_limit = get_double(p, "torque_limit", cfg.torque_limit, where);
   if (p.find("min_pos") != p.end() && p.find("max_pos") != p.end()) {
     cfg.min_pos = get_double(p, "min_pos", 0.0, where);
     cfg.max_pos = get_double(p, "max_pos", 0.0, where);
     // 静止零位漂移许用值（rad/m）：只用于 on_activate 的超限检查
-    cfg.limit_tolerance = get_double(p, "limit_tolerance", 0.05, where);
+    cfg.limit_tolerance = get_double(p, "limit_tolerance", b601_config::dm::static_tolerance, where);
     // 反馈跳变门限（rad/周期）：0 = 按 vel_limit 自动推算（vel_limit·0.08+0.05）。
     // ⚠ 放宽 vel_limit 会顺带放松这道守卫，所以要"跑得快但守得紧"就显式钉死它。
     cfg.feedback_jump_limit = get_double(p, "feedback_jump_limit", 0.0, where);
@@ -299,6 +303,8 @@ std::vector<hardware_interface::CommandInterface> DmSystemHardware::export_comma
     for (const auto & iface : joint.command_interfaces) {
       if (iface.name == hardware_interface::HW_IF_POSITION) {
         out.emplace_back(joint.name, iface.name, &joints_[i].cmd);
+      } else if (iface.name == hardware_interface::HW_IF_VELOCITY) {
+        out.emplace_back(joint.name, iface.name, &joints_[i].cmd_velocity);
       } else if (iface.name == hardware_interface::HW_IF_EFFORT) {
         // mit_torque 模式用：控制器写力矩，插件原样转成电机 MIT 帧（kp=kd=0）
         out.emplace_back(joint.name, iface.name, &joints_[i].cmd_effort);
@@ -444,7 +450,7 @@ bool DmSystemHardware::verify_control_mode(std::uint32_t expected_mode)
     }
     std::uint32_t mode = 0;
     const std::int32_t rc =
-      motor_handle_get_register_u32(joint.handle, kRegCtrlMode, 500, &mode);
+      motor_handle_get_register_u32(joint.handle, kRegCtrlMode, b601_config::dm::mode_read_timeout_ms, &mode);
     if (rc != 0) {
       RCLCPP_ERROR(
         logger(), "%s 读回 CTRL_MODE 失败：%s —— 无法确认控制模式，拒绝使能",
@@ -483,7 +489,7 @@ bool DmSystemHardware::wait_for_first_feedback()
     if (all_received) {
       return true;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(b601_config::dm::feedback_poll_ms));
   }
 
   for (const auto & joint : joints_) {
@@ -544,6 +550,15 @@ hardware_interface::CallbackReturn DmSystemHardware::on_activate(
   consecutive_empty_reads_ = 0;
   watchdog_warned_ = false;
   has_last_command_ = false;
+  if (command_mode_ == "mit_impedance") {
+    for (auto & joint : joints_) {
+      joint.cmd = joint.state_pos;
+      joint.cmd_velocity = 0.0;
+      joint.cmd_effort = 0.0;
+      joint.cmd_kp = 0.0;
+      joint.cmd_kd = 0.0;
+    }
+  }
 
   if (!enable_motors_) {
     RCLCPP_WARN(
@@ -634,15 +649,17 @@ void DmSystemHardware::poll_state()
       // 门限：显式配置优先，否则按 vel_limit 推算（vel_limit·0.08 + 0.05）
       const double max_jump = joint.feedback_jump_limit > 0.0
         ? joint.feedback_jump_limit
-        : joint.vel_limit * 0.02 * 4.0 + 0.05;
+        : joint.vel_limit * b601_config::dm::fallback_jump_period_sec +
+        b601_config::dm::fallback_jump_margin_rad;
       const bool bad_jump = std::abs(new_pos - joint.state_pos) > max_jump;
       const bool bad_range = joint.has_position_limit &&
-        (new_pos < joint.min_pos - 0.3 || new_pos > joint.max_pos + 0.3);
+        (new_pos < joint.min_pos - b601_config::dm::invalid_feedback_margin ||
+        new_pos > joint.max_pos + b601_config::dm::invalid_feedback_margin);
       if (bad_jump || bad_range) {
         joint.reject_count++;
-        if (joint.reject_count % 200 == 1) {
+        if (joint.reject_count % b601_config::dm::rejected_feedback_log_every == 1) {
           RCLCPP_WARN_THROTTLE(
-            logger(), *clock_, 1000,
+            logger(), *clock_, b601_config::dm::feedback_warning_throttle_ms,
             "%s 的反馈值不合理（读到 %.3f，上次 %.3f，%s）—— 已丢弃该帧",
             joint.name.c_str(), new_pos, joint.state_pos,
             bad_jump ? "跳变过大" : "超出限位");
@@ -726,7 +743,7 @@ hardware_interface::return_type DmSystemHardware::read(
         log_t0_ = now;
       }
       append_log_row(now - log_t0_);
-      if (log_rows_ % 200 == 0) {   // 约每 1 s 落盘一次，避免在 RT 周期里频繁 I/O
+      if (log_rows_ % b601_config::dm::log_flush_rows == 0) {   // 约每 1 s 落盘一次，避免在 RT 周期里频繁 I/O
         flush_log_buffer();
       }
     }
@@ -739,7 +756,7 @@ hardware_interface::return_type DmSystemHardware::read(
   if (!any) {
     ++consecutive_empty_reads_;
     RCLCPP_WARN_THROTTLE(
-      logger(), *clock_, 1000,
+      logger(), *clock_, b601_config::dm::feedback_warning_throttle_ms,
       "已连续 %d 个周期读不到任何反馈（检查 request_feedback 参数、电机供电与 CAN 线）",
       consecutive_empty_reads_);
   } else {
@@ -772,7 +789,7 @@ void DmSystemHardware::command_motor(JointConfig & joint, double target, double 
   if (rc != 0) {
     ++consecutive_write_failures_;
     RCLCPP_WARN_THROTTLE(
-      logger(), *clock_, 500,
+      logger(), *clock_, b601_config::dm::write_warning_throttle_ms,
       "向 %s 写命令失败（连续 %d 次）：%s", joint.name.c_str(), consecutive_write_failures_,
       abi_error_text().c_str());
   } else {
@@ -801,40 +818,53 @@ hardware_interface::return_type DmSystemHardware::write(
     return hardware_interface::return_type::OK;  // 只读模式：不写任何命令
   }
 
-  const double dt = std::clamp(period.seconds(), 1e-4, 0.1);
+  const double dt = std::clamp(period.seconds(), b601_config::dm::write_period_min_sec,
+    b601_config::dm::write_period_max_sec);
 
   for (auto & joint : joints_) {
     if (!joint.has_command || joint.handle == nullptr) {
       continue;
     }
 
-    // ---- mit_impedance：位置环在驱动器里 —— 下发 (pos_des, kp, kd, τ_ff) ----
+    // 电机侧闭环所需的五个字段均来自命令接口。
     if (command_mode_ == "mit_impedance") {
       double pos_des = joint.cmd;
+      double velocity_des = std::clamp(
+        joint.cmd_velocity, -joint.mit_velocity_limit, joint.mit_velocity_limit);
+      if (!std::isfinite(pos_des) || !std::isfinite(velocity_des) ||
+        !std::isfinite(joint.cmd_kp) || !std::isfinite(joint.cmd_kd) ||
+        !std::isfinite(joint.cmd_effort))
+      {
+        RCLCPP_ERROR(logger(), "%s 收到无效 MIT 命令", joint.name.c_str());
+        return hardware_interface::return_type::ERROR;
+      }
       if (joint.has_position_limit) {
         pos_des = std::clamp(pos_des, joint.min_pos, joint.max_pos);
+        if ((pos_des <= joint.min_pos && velocity_des < 0.0) ||
+          (pos_des >= joint.max_pos && velocity_des > 0.0))
+        {
+          velocity_des = 0.0;
+        }
       }
       double ff = joint.cmd_effort;
       if (joint.torque_limit > 0.0) {
         ff = std::clamp(ff, -joint.torque_limit, joint.torque_limit);
       }
-      // 关节单位 → 电机单位：
-      //   位置：(pos - zero_offset) / (direction · scale)
-      //   力矩：command_sign · direction · τ_ff · effort_scale
-      //   刚度/阻尼：电机侧 kp[N·m/rad] = kp_joint · effort_scale²，kd 同理
-      //     （prismatic 的 x = r·θ ⇒ τ = kp_joint·r²·θ；revolute r=1 时就是恒等）
-      const double pos_motor =
-        (pos_des - joint.zero_offset) / (joint.direction * joint.scale);
-      const double kp_motor = std::max(0.0, joint.cmd_kp) * joint.effort_scale * joint.effort_scale;
-      const double kd_motor = std::max(0.0, joint.cmd_kd) * joint.effort_scale * joint.effort_scale;
+      const double position_scale = joint.direction * joint.scale;
+      const double pos_motor = (pos_des - joint.zero_offset) / position_scale;
+      const double velocity_motor = velocity_des / position_scale;
+      // 力矩映射乘 effort_scale，位置和速度误差映射乘 scale。
+      const double gain_scale = joint.effort_scale * joint.scale;
+      const double kp_motor = std::clamp(joint.cmd_kp * gain_scale, 0.0, 500.0);
+      const double kd_motor = std::clamp(joint.cmd_kd * gain_scale, 0.0, 5.0);
       const std::int32_t rc = motor_handle_send_mit(
-        joint.handle, static_cast<float>(pos_motor), 0.0F,
+        joint.handle, static_cast<float>(pos_motor), static_cast<float>(velocity_motor),
         static_cast<float>(kp_motor), static_cast<float>(kd_motor),
         static_cast<float>(command_sign_ * joint.direction * ff * joint.effort_scale));
       if (rc != 0) {
         ++consecutive_write_failures_;
         RCLCPP_WARN_THROTTLE(
-          logger(), *clock_, 500,
+          logger(), *clock_, b601_config::dm::write_warning_throttle_ms,
           "向 %s 写 MIT 阻抗帧失败（连续 %d 次）：%s", joint.name.c_str(),
           consecutive_write_failures_, abi_error_text().c_str());
       } else {
@@ -858,7 +888,7 @@ hardware_interface::return_type DmSystemHardware::write(
         static_cast<float>(command_sign_ * joint.direction * tau * joint.effort_scale));
       if (rc != 0) {
         ++consecutive_write_failures_;
-        RCLCPP_WARN_THROTTLE(logger(), *clock_, 500,
+        RCLCPP_WARN_THROTTLE(logger(), *clock_, b601_config::dm::write_warning_throttle_ms,
                             "向 %s 写力矩失败（连续 %d 次）：%s", joint.name.c_str(),
                             consecutive_write_failures_, abi_error_text().c_str());
       } else {
@@ -961,7 +991,7 @@ bool DmSystemHardware::open_log_file()
               << "," << joint.name << "_effort_joint"
               << "," << joint.name << "_cmd";
   }
-  log_file_ << "\n";
+  log_file_ << ",t_max_c\n";
   log_file_.flush();
   RCLCPP_INFO(
     logger(), "CSV 记录已开启：%s（%.0f Hz，%zu 关节）",
@@ -981,11 +1011,16 @@ void DmSystemHardware::append_log_row(double t_sec)
     // 原始值与过滤后的状态值都写：出问题时能一眼看出"是电机在动"还是"数据被丢了"
     const double cmd_value =
       (command_mode_ == "mit_torque") ? joint.cmd_effort : joint.cmd;
-    std::snprintf(
-      buf, sizeof(buf), ",%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
-      joint.raw_pos_motor, joint.raw_vel_motor, joint.raw_torq_motor,
-      joint.state_pos, joint.state_vel, joint.state_effort, cmd_value);
-    log_buffer_ += buf;
+    for (double value : {joint.raw_pos_motor, joint.raw_vel_motor, joint.raw_torq_motor,
+      joint.state_pos, joint.state_vel, joint.state_effort, cmd_value})
+    {
+      const int size = std::snprintf(buf, sizeof(buf), ",%.6f", value);
+      if (size > 0 && static_cast<std::size_t>(size) < sizeof(buf)) {
+        log_buffer_.append(buf, static_cast<std::size_t>(size));
+      } else {
+        log_buffer_ += ",nan";
+      }
+    }
   }
   // 温度：所有电机 max(t_mos, t_rotor) 的最高值（避免每关节两列把表撑爆；
   // 要看单台电机温度就单独用 dm_probe.py 读）

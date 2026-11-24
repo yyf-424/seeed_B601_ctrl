@@ -268,6 +268,7 @@ hardware:
                                 # ⚠ 2026-11-21：曾把反馈的 -1 误用到命令上 → PD 正反馈，
                                 #   真机首个 0.05 rad 动作 joint5 冲到 10.26 rad/s（被急停拦下）
     velocity_scale: 0.2         # 全局速度缩放，首次上电建议 0.1
+    mit_arm_velocity_limit: 5.0  # 六轴 MIT 帧速度字段，rad/s
     watchdog_timeout: 0.5       # 超时无新命令 → 原地保持
     can_timeout_ms: 0           # 电机侧 CAN 超时报警（0 = 不设）
     max_write_failures: 20      # 连续写失败这么多次即停用硬件
@@ -359,7 +360,7 @@ controllers:
 
     # ---- 参数模板：per_joint 用**关节名**给值，生成时按实例的 joints 顺序展开成数组 ----
     profiles:
-      # 冻结：= 2026-11-21 真机验证过的那一套（纯 MIT 20 姿态 / 0 急停）
+      # 电机侧 MIT 初始配置，基于历史手臂参数并按协议范围约束阻尼。
       standard_mit:
         # torque_limit 一律 ≤ 该关节 URDF 的 max_effort。
         # 2026-11-23 按「MIT 模式下的电机力矩上限」定：**j1-j3(4340P)=24 N·m、j4-j7(4310)=10 N·m**
@@ -368,63 +369,55 @@ controllers:
         # kp_free/kd_free = **等待档**（上层无权威、可手推）；kd_free 取临界阻尼 2√(kp_free·I)：
         #   I=[0.111,0.414,0.297,0.047,0.021,0.0106] → ζ=1 时 [0.36,0.70,0.60,0.24,0.16,0.11]
         per_joint:
-          joint1: {kp_hold: 6.0, kd_hold: 1.63, kp_move: 70.0, kd_move: 5.58, kp_free: 0.3, kd_free: 0.36,
-                   friction: 0.0,      torque_limit: 24.0, target_deadband: 0.001,
+          joint1: {kp_hold: 6.0, kd_hold: 1.63, kp_move: 115.0, kd_move: 5.0, kp_free: 0.3, kd_free: 0.36,
+                   friction: 0.0,      torque_limit: 24.0, target_deadband: 0.01,
                    settle_band_min: 0.01, settle_band_max: 0.05}
-          joint2: {kp_hold: 6.0, kd_hold: 3.15, kp_move: 75.0, kd_move: 11.15, kp_free: 0.3, kd_free: 0.70,
-                   friction: -0.45533, torque_limit: 24.0, target_deadband: 0.001,
+          joint2: {kp_hold: 6.0, kd_hold: 3.15, kp_move: 265.0, kd_move: 5.0, kp_free: 0.3, kd_free: 0.70,
+                   friction: -0.45533, torque_limit: 24.0, target_deadband: 0.01,
                    settle_band_min: 0.01, settle_band_max: 0.05}
-          joint3: {kp_hold: 6.0, kd_hold: 2.67, kp_move: 150.0, kd_move: 13.36, kp_free: 0.3, kd_free: 0.60,
-                   friction: 0.0,      torque_limit: 24.0, target_deadband: 0.001,
+          joint3: {kp_hold: 6.0, kd_hold: 2.67, kp_move: 190.0, kd_move: 5.0, kp_free: 0.3, kd_free: 0.60,
+                   friction: 0.0,      torque_limit: 24.0, target_deadband: 0.01,
                    settle_band_min: 0.01, settle_band_max: 0.05}
-          joint4: {kp_hold: 2.0, kd_hold: 0.37, kp_move: 35.0, kd_move: 1.55, kp_free: 0.3, kd_free: 0.24,
-                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.001,
+          joint4: {kp_hold: 2.0, kd_hold: 0.37, kp_move: 200.0, kd_move: 3.4, kp_free: 0.3, kd_free: 0.24,
+                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.01,
                    settle_band_min: 0.01, settle_band_max: 0.05}
-          joint5: {kp_hold: 1.0, kd_hold: 0.21, kp_move: 14.0, kd_move: 0.65, kp_free: 0.3, kd_free: 0.16,
-                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.001,
+          joint5: {kp_hold: 1.0, kd_hold: 0.21, kp_move: 36.0, kd_move: 1.2, kp_free: 0.3, kd_free: 0.16,
+                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.01,
                    settle_band_min: 0.01, settle_band_max: 0.05}
-          joint6: {kp_hold: 0.8, kd_hold: 0.13, kp_move: 8.0,  kd_move: 0.35, kp_free: 0.3, kd_free: 0.11,
-                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.001,
+          joint6: {kp_hold: 0.8, kd_hold: 0.13, kp_move: 28.0, kd_move: 0.82, kp_free: 0.3, kd_free: 0.11,
+                   friction: 0.0,      torque_limit: 10.0, target_deadband: 0.01,
                    settle_band_min: 0.01, settle_band_max: 0.05}
-        # 2026-11-23（第十九轮）：kp_move/kd_move 按「纯 PD 无前馈」精度需求重定标 ——
-        #   误差 = (τ_g + 静摩擦)/kp，故 kp 越大越准；上限由实测反馈延迟 12 ms 定：
-        #   ωn·τd ≤ 0.33（= 已验证的 joint6 工作点）。真机 5 姿态复测：最大误差 0.148 → 0.058 rad。
-        #   kd 按 ζ≈0.6~1.0 同步放大（kd·T/I ≤ 0.52，远低于 1 的抖动线）。
+        # 电机 MIT 协议 Kd 范围为 [0, 5]。手臂五姿态真机已运行，夹爪驱动器增益量化见测试报告。
         group:
           # ---- 指令层（Phase 1）：决定"怎么走"和"到没到" ----
-          target_slew: 0.5            # 关节单位/s：目标一律斜坡推进，实物不跳变
+          target_slew: 0.08            # 关节单位/s：目标一律斜坡推进，实物不跳变
           settle_band_pct: 0.05       # 误差带 = 5% × 本次指令位移（再夹到逐关节的 min/max）
           settle_sec: 3.0             # 全部关节连续在带内这么久 → 整组 done
           kp_up_sec: 0.8              # free → track 的刚度上升时间（线性速率）
           kp_down_sec: 2.0            # track → free 的刚度回落时间（回落要慢，避免突然变软塌下去）
           q_ref_lpf_hz: 30.0          # 等待模式下 q_ref 跟随实测的带宽
           track_timeout_sec: 0.0      # 0=关闭：目标不可达时**不**兜底（决策⑩）
-          free_enabled: true          # 本 profile 的关节是否参与等待模式
-          # 电机侧阻抗（Phase 3，可选）：true 时控制器不自己算 PD，而是把
-          # (q_up, kp, kd, τ_ff) 交给驱动器，位置环在电机里闭环（1 kHz 量级，不受
-          # 200 Hz 控制周期与反馈延迟影响）。需要 dm_command_mode:=mit_impedance。
-          motor_impedance: false
+          free_enabled: false         # 默认持位，低刚度等待需按模型验收后单独开启
+          motor_impedance: true
           # ---- 以下是 Phase 0 及以前的参数：仍声明但不参与模式判定 ----
           move_threshold: 0.08
           hold_threshold: 0.03
           vel_hold_threshold: 0.30
           kp_ramp_sec: 0.35
-          max_error: 0.45
           velocity_lpf_hz: 6.0
-          max_vel_feedback: 0.4
-          torque_slew: 50.0
-          gravity_scale: 1.0
+          gravity_scale: 0.0
           friction_scale: 0.0
           friction_vel_eps: 0.02
-          use_gravity: true
+          use_gravity: false
+          task_torque_timeout_sec: 0.0
+          target_velocity_timeout_sec: 0.25
           state_interfaces: [position, velocity]
 
-      # 夹爪：prismatic，单位 m / N，量级与手臂差 3 个数量级（见规划 §5.4.3）
+      # 夹爪纯 PD 使用关节单位 N/m、N·s/m，由硬件换算为 MIT 帧的电机侧增益。
       gripper_mit:
-        # 手指等效质量只有 ~0.025 kg：kp 用 2000 N/m 时 1 mm 误差就是 2 N，
-        # 加速度 80 m/s² —— 实测会冲到 2.3 m/s。所以量级压到 500，kd 按 ζ≈1 给。
+        # 2026-11-24 实机小行程验证通过。电机侧 Kp 6.5、Kd 1.2。
         per_joint:
-          finger_left: {kp_hold: 200.0, kd_hold: 5.0, kp_move: 500.0, kd_move: 10.0,
+          finger_left: {kp_hold: 65000.0, kd_hold: 12000.0, kp_move: 65000.0, kd_move: 12000.0,
                         kp_free: 50.0, kd_free: 2.0,
                         friction: 0.0, torque_limit: 10.0, target_deadband: 0.0001,
                         settle_band_min: 0.0005, settle_band_max: 0.0025}
@@ -436,20 +429,19 @@ controllers:
           kp_down_sec: 1.0
           q_ref_lpf_hz: 30.0
           track_timeout_sec: 0.0
-          free_enabled: true          # 决策⑭：夹爪也一起进等待模式（前期不夹物体）
-          motor_impedance: false
+          free_enabled: false         # 默认持位
+          motor_impedance: true
           move_threshold: 0.01
           hold_threshold: 0.002
           vel_hold_threshold: 0.01    # m/s
           kp_ramp_sec: 0.5
-          max_error: 0.02             # m
           velocity_lpf_hz: 6.0
-          max_vel_feedback: 0.05      # m/s
-          torque_slew: 40.0           # N/s
-          gravity_scale: 1.0
+          gravity_scale: 0.0
           friction_scale: 0.0
           friction_vel_eps: 0.002
-          use_gravity: true
+          use_gravity: false
+          task_torque_timeout_sec: 0.0
+          target_velocity_timeout_sec: 0.25
           state_interfaces: [position, velocity]
 
     # ---- 所有实例共用的东西（重力模型参数 = 整条链，与实例划分无关）----
@@ -489,6 +481,7 @@ moveit:
 #     或者反过来把真实偏移掩盖掉；
 #   · 换了机械臂/重新标定零位后，必须重新测一次并更新本节（含 raw_encoders 快照）。
 recenter:
+  position_tolerance_rad: 0.02
   calibrated_at: "2026-11-21"
   note: "实测竖直停放位：原始编码器值 = 关节值（zero_offset≈0, scale≈1）"
   joints:
@@ -533,6 +526,10 @@ recenter:
 #   解除**不会**自动重新激活控制器 —— 必须人工重新 spawn，这是故意的。
 # ---------------------------------------------------------------------------
 safety:
+  joint_states_topic: /joint_states
+  joint_state_depth: 10
+  minimum_evaluate_rate_hz: 1.0
+  minimum_publish_rate_hz: 0.5
   enabled: true
   node_name: b601_safety_monitor
   status_topic: /b601_safety/status
@@ -571,8 +568,407 @@ safety:
     deactivate_hardware: true
     hardware_component: b601     # 与 robot.ros2_control_name 一致（sync 时校验）
     service_timeout_sec: 2.0
+    service_discovery_timeout_sec: 0.5
     latch: true
 
+# 工程工具与节点的默认值。命令行和 ROS 参数可针对本次运行覆盖。
+
+tools:
+  dm_probe:
+    duration_sec: 3.0
+    poll_sec: 0.01
+    register_retry_sec: 0.1
+    register_attempts: 2
+    register_timeout_ms: 300
+    enable_hold_sec: 0.3
+  dm_mit_move:
+    ready_timeout_sec: 15.0
+    poll_sec: 0.1
+    slew: 0.2
+    rate: 50.0
+    max_delta: 0.15
+    tolerance: 0.05
+    settle: 1.0
+    log_interval_sec: 1.0
+    no_progress_margin_rad: 0.05
+    no_progress_initial_error_fraction: 0.8
+    no_progress_speed_rad_s: 0.02
+    no_progress_timeout_sec: 1.2
+    settled_speed_rad_s: 0.05
+    settled_initial_error_fraction: 0.5
+    deadline_scale: 3.0
+    deadline_floor_sec: 1.0
+    deadline_grace_sec: 8.0
+  sim_mit_ros:
+    publish_rate_hz: 50.0
+    executor_poll_sec: 0.02
+    ready_poll_sec: 0.05
+    sim_initial:
+    - 0.0
+    - -0.6
+    - -0.6
+    - 0.0
+    - 0.0
+    - 0.0
+    default_poses:
+    - - 0.0
+      - -0.45
+      - -0.45
+      - 0.0
+      - 0.0
+      - 0.0
+    - - 0.25
+      - -0.65
+      - -0.55
+      - 0.15
+      - 0.1
+      - 0.25
+    - - 0.0
+      - -0.8
+      - -0.7
+      - -0.15
+      - -0.1
+      - -0.25
+    slew: 0.5
+    hold: 3.0
+    settle_window: 0.6
+    tol: 0.05
+    max_vel: 2.0
+    startup_timeout: 40.0
+    joint_friction: 0.0
+    temp_limit: 27.0
+    hold_only: 0.0
+    state_machine:
+      reference_slew_rad_s: 0.5
+      parameter_timeout_sec: 5.0
+      warmup_sec: 1.0
+      claim_timeout_sec: 2.0
+      step_rad: 0.2
+      kp_fraction: 0.8
+      kp_rise_timeout_sec: 3.0
+      settle_timeout_sec: 12.0
+      kp_free_ceiling: 1.5
+      kp_free_timeout_sec: 6.0
+      large_step_rad: 2.0
+      mixed_steps_rad:
+        joint1: 0.05
+        joint3: 0.6
+      mixed_settle_timeout_sec: 14.0
+      mixed_min_sec: 3.6
+      deadband_observation_sec: 1.0
+    mit_frame:
+      warmup_sec: 0.7
+      hold_sec: 0.5
+      velocity_cadence_sec: 0.05
+      velocity_samples: 12
+      velocity_rad_s: 0.16
+      velocity_timeout_wait_sec: 0.8
+      task_torque_nm: 0.8
+      task_observation_sec: 0.25
+      task_timeout_wait_sec: 0.65
+      gravity_scale: 0.1
+      friction_scale: 0.2
+      task_torque_timeout_sec: 0.5
+      minimum_gravity_nm: 0.01
+      friction_motion_rad: 0.15
+      friction_sample_sec: 0.06
+      minimum_friction_nm: 0.02
+      displacement_threshold_rad: 0.004
+    thermal_fixture:
+      warning_offset_c: 1.0
+      ambient_offset_c: 2.0
+      heat_c_per_s: 6.0
+      observe_sec: 20.0
+    state_ready_timeout_sec: 20.0
+    controller_service_timeout_sec: 10.0
+    controller_response_timeout_sec: 3.0
+    restart_wait_sec: 3.0
+    action_result_timeout_sec: 30.0
+    action_request_timeout_sec: 10.0
+    parameter_process_timeout_sec: 15
+    interfaces_process_timeout_sec: 20
+    shutdown_timeout_sec: 15
+    shutdown_poll_sec: 0.2
+  sim_mit_check:
+    kd_hold:
+    - 1.63
+    - 3.15
+    - 2.67
+    - 1.07
+    - 0.71
+    - 0.5
+    kd_move:
+    - 5.17
+    - 9.97
+    - 8.45
+    - 3.38
+    - 2.26
+    - 1.59
+    friction_scale: 0.0
+    kp_hold: 6.0
+    kp_move: 60.0
+    move_threshold_rad: 0.08
+    hold_threshold_rad: 0.03
+    torque_limit_nm: 15.0
+    substeps: 10
+    snapshot_divider: 20
+    start_rad:
+    - 0.0
+    - -0.9
+    - -1.1
+    - 0.0
+    - 0.0
+    - 0.0
+    sign_test_kp: 40.0
+    observe_sec: 3.0
+    sign_tol_rad: 0.15
+    push_sec: 0.8
+    push_force_n: 3.0
+    push_rest_sec: 2.0
+    initial_hold_sec: 1.0
+    step_rad:
+    - 0.25
+    - 0.25
+    - 0.25
+    - 0.2
+    - 0.2
+    - 0.2
+    step_tol_rad: 0.02
+  preflight:
+    mock_domain_id: 181
+    mit_domain_id: 182
+    shutdown_attempts: 20
+    shutdown_poll_sec: 0.25
+    discovery_timeout_sec: 40
+    discovery_poll_sec: 0.5
+    record_startup_sec: 0.6
+    status_timeout_sec: 8
+    injection_duration_sec: 1.5
+    deactivate_injection_duration_sec: 0.6
+    injection_timeout_sec: 40
+    injection_settle_sec: 0.4
+    spawner_settle_sec: 2
+    initial_clear_timeout_sec: 60
+    estop_action_settle_sec: 2.5
+    clear_timeout_sec: 25
+    clear_retry_timeout_sec: 40
+    mit_timeout_sec: 300
+    track_tol_rad: 0.02
+    track_speed_rad_s: 1.5
+    gripper_poses: 0.0;0.02;0.04
+    gripper_tol_m: 0.004
+    gripper_peak_m_s: 0.3
+    thermal_nonbinding_tol: 99
+    pose_warning_joint: joint3
+    pose_warning_position_rad: -1.2
+    position_estop_joint: joint1
+    position_estop_rad: 3.0
+    safe_left_position_rad: -2.4
+    safe_right_position_rad: 2.4
+    speed_estop_joint: joint2
+    speed_estop_rad_s: 999.0
+  test_safety:
+    pose_deviation_rad: 0.6
+    position_near_lower_rad: -3.05
+    warning_speed_ratio: 0.85
+    estop_speed_ratio: 1.05
+    arm_position_overrun_rad: 0.1
+    gripper_overrun_m: 0.01
+    dual_fault_speed_ratio: 2.0
+    normal_speed_ratio: 0.5
+    gripper_encoder_noise_m: 1.9e-06
+    measured_static_drift_rad: 0.0261
+    static_overrun_rad: 0.06
+    limit_encoder_noise_rad: 1.0e-06
+implementation:
+  dm:
+    default_joint_velocity_rad_s: 5.0
+    minimum_velocity_scale: 0.01
+    minimum_log_rate_hz: 1.0
+    mode_read_timeout_ms: 500
+    feedback_poll_ms: 10
+    fallback_jump_period_sec: 0.08
+    fallback_jump_margin_rad: 0.05
+    invalid_feedback_margin: 0.3
+    rejected_feedback_log_every: 200
+    feedback_warning_throttle_ms: 1000
+    write_warning_throttle_ms: 500
+    log_flush_rows: 200
+    write_period_min_sec: 0.0001
+    write_period_max_sec: 0.1
+  mujoco:
+    velocity_scale: 1.0
+    effort_sign: 1.0
+    verbose: 0
+    physics_wait_cycles: 2000
+    max_substeps: 200
+    write_period_min_sec: 0.0001
+    write_period_max_sec: 0.2
+    startup_log_steps: 20
+    diagnostic_log_steps: 200
+  mit:
+    legacy_torque_default: 20.0
+    gravity_scale_max: 1.5
+    friction_scale_max: 2.0
+    settle_sec_min: 0.05
+    position_filter_hz_min: 0.5
+    velocity_filter_hz_min: 0.5
+    ramp_time_sec_min: 0.001
+    slew_min: 0.001
+    friction_velocity_epsilon_min: 0.0001
+    update_period_min_sec: 0.0001
+    update_period_max_sec: 0.05
+    diagnostic_divider: 20
+    topic_depth: 10
+    target_warning_throttle_ms: 2000
+model:
+  gravity_m_s2: 9.81
+  joints:
+    world_to_base:
+      origin:
+        xyz:
+        - 0.0
+        - 0.0
+        - 0.0
+        rpy:
+        - 0.0
+        - 0.0
+        - 0.0
+    joint1:
+      origin:
+        xyz:
+        - -8.416e-05
+        - 0.0
+        - 0.08465
+        rpy:
+        - 0.0
+        - 0.0
+        - 0.0
+      axis:
+        xyz:
+        - 0.0
+        - 0.0
+        - 1.0
+    joint2:
+      origin:
+        xyz:
+        - 0.020084
+        - 0.031625
+        - 0.05555
+        rpy:
+        - -1.5708
+        - 0.0
+        - 0.0
+      axis:
+        xyz:
+        - 0.0
+        - 0.0
+        - -1.0
+    joint3:
+      origin:
+        xyz:
+        - -0.264
+        - 0.0
+        - 0.0
+        rpy:
+        - 0.0
+        - 0.0
+        - 0.0
+      axis:
+        xyz:
+        - 0.0
+        - 0.0
+        - 1.0
+    joint4:
+      origin:
+        xyz:
+        - 0.2426
+        - -0.054
+        - -0.001625
+        rpy:
+        - 0.0
+        - 0.0
+        - 0.0
+      axis:
+        xyz:
+        - 0.0
+        - 0.0
+        - 1.0
+    joint5:
+      origin:
+        xyz:
+        - 0.078308
+        - -0.0375
+        - -0.03
+        rpy:
+        - -1.5708
+        - 0.0
+        - 0.0
+      axis:
+        xyz:
+        - 0.0
+        - 0.0
+        - 1.0
+    joint6:
+      origin:
+        xyz:
+        - 0.028008
+        - 0.0
+        - 0.04
+        rpy:
+        - 0.0
+        - 1.5708
+        - 0.0
+      axis:
+        xyz:
+        - 0.0
+        - 0.0
+        - 1.0
+    end_joint:
+      origin:
+        xyz:
+        - 0.0
+        - 0.0
+        - 0.15539
+        rpy:
+        - 0.0
+        - -1.5708
+        - 3.1415
+      axis:
+        xyz:
+        - 0.0
+        - 0.0
+        - 0.0
+    finger_left:
+      origin:
+        xyz:
+        - 0.0
+        - 0.0
+        - 0.0
+        rpy:
+        - 0.0
+        - 0.0
+        - 0.0
+      axis:
+        xyz:
+        - 0.0
+        - 1.0
+        - 0.0
+    finger_right:
+      origin:
+        xyz:
+        - 0.0
+        - 0.0
+        - 0.0
+        rpy:
+        - 0.0
+        - 0.0
+        - 0.0
+      axis:
+        xyz:
+        - 0.0
+        - 1.0
+        - 0.0
 validation:
   pos_vel_five_poses:
     slew_rad_s: 0.15
@@ -584,3 +980,120 @@ validation:
     - [-0.10, -1.25, -1.50, 0.10, -0.30, 0.00]
     - [0.35, -0.75, -0.90, -0.30, 0.20, 0.40]
     - [-0.20, -1.05, -1.30, 0.10, -0.30, -0.10]
+  mit_five_poses:
+    start:
+    - 0.0
+    - -0.3
+    - -0.6
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    arm_slew_rad_s: 0.08
+    gripper_slew_m_s: 0.008
+    publish_rate_hz: 50
+    poses:
+    - name: P1
+      target:
+      - 0.1
+      - -0.4
+      - -0.7
+      - 0.1
+      - 0.09
+      - -0.1
+      - 0.014
+    - name: P2
+      target:
+      - -0.04
+      - -0.52
+      - -0.58
+      - -0.03
+      - 0.2
+      - 0.03
+      - 0.027
+    - name: P3
+      target:
+      - 0.09
+      - -0.43
+      - -0.73
+      - 0.09
+      - 0.08
+      - -0.11
+      - 0.012
+    - name: P4
+      target:
+      - -0.03
+      - -0.55
+      - -0.61
+      - -0.05
+      - 0.19
+      - 0.02
+      - 0.03
+    - name: P5
+      target:
+      - 0.08
+      - -0.45
+      - -0.76
+      - 0.06
+      - 0.06
+      - -0.09
+      - 0.016
+    criteria:
+      min_signed_arm_movement_rad: 0.03
+      min_signed_gripper_movement_m: 0.005
+      arm_max_error_rad: 0.11
+      gripper_max_error_m: 0.002
+      arm_end_speed_rad_s: 0.025
+      gripper_end_speed_m_s: 0.001
+    collision_samples_per_segment: 21
+    mimic_tolerance_m: 0.0005
+    feedback_timeout_sec: 0.25
+    callback_poll_sec: 0.02
+    setup_hold_sec: 1.5
+    steady_sample_count: 40
+    settle_sec: 1.8
+    settle_window_sec: 0.4
+    controller_timeout_sec: 15
+    startup_attempts: 2
+    joint_state_timeout_sec: 5
+    moveit_timeout_sec: 15
+    state_check_timeout_sec: 3
+    forward_observation_sec: 0.3
+    shutdown_timeout_sec: 15
+    ros_domain_id: 184
+    output_dir: .verify/mit_6plus1_five_poses_current
+    hardware_retest:
+      output_dir: .verify/mit_hardware_five_poses
+      gripper_tracking_ceiling_m: 0.0025
+      arm_step_error_fraction: 0.05
+      arm_min_error_band_rad: 0.01
+      joint_error_bands:
+        joint3:
+          step_error_fraction: 0.1
+          min_error_band_rad: 0.05
+      gripper_max_error_m: 0.003
+      gripper_slew_m_s: 0.001
+      gripper_measured_speed_ceiling_m_s: 0.008
+      arm_measured_speed_ceiling_rad_s: 1.5
+      initial_arm_tolerance_rad: 0.05
+      initial_gripper_tolerance_m: 0.003
+      minimum_motion_samples: 10
+      collision_samples_per_transit: 51
+      small_step_joint: joint1
+      small_step_rad: 0.035
+      small_min_actual_rad: 0.018
+      small_max_error_rad: 0.08
+      small_slew_rad_s: 0.04
+      approach_slew_rad_s: 0.06
+      park_slew_rad_s: 0.045
+      park_settle_sec: 3.0
+      park_fine_max_rad: 0.035
+      park_fine_slew_rad_s: 0.025
+      park_fine_settle_sec: 2.5
+      state_average_sec: 0.35
+      observation_pause_sec: 0.5
+      readonly_duration_sec: 4.0
+      ros_domain_id: 191
+      estop_arm_speed_rad_s: 0.65
+      gripper_torque_ceiling_nm: 0.5
+      gripper_parking_target_m: 0.0

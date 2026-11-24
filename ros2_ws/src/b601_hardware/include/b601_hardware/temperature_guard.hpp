@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "b601_description/project_parameters.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -70,9 +72,9 @@ public:
   double hysteresis_c() const {return hysteresis_c_;}
 
 private:
-  double warn_c_{70.0};
-  double limit_c_{85.0};
-  double hysteresis_c_{5.0};
+  double warn_c_{b601_config::dm::warn_c};
+  double limit_c_{b601_config::dm::limit_c};
+  double hysteresis_c_{b601_config::dm::hysteresis_c};
   double max_seen_{0.0};
   bool latched_{false};
   bool cooled_{false};

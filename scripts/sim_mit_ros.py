@@ -7,7 +7,7 @@
     MuJoCo 硬件插件 → 安全节点），验证的是"控制器实现"。改控制器代码时必须用它做回归。
 
 它做什么：
-    1) 起 `bringup.launch.py hardware:=mujoco dm_command_mode:=mit_torque`（可指定控制器 yaml）；
+    1) 起 `bringup.launch.py hardware:=mujoco dm_command_mode:=mit_impedance`（可指定控制器 yaml）；
     2) 等控制器 active、等到 /joint_states；
     3) 按 `--slew` 逐姿态发**斜坡**目标（不阶跃：阶跃会把手臂打飞，见 docs/test-log.md 第七轮）；
     4) 每个姿态停稳后采样稳态误差，并统计全程每关节峰值 |q̇|；
@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import re
 import json
 import math
 import os
@@ -35,6 +34,7 @@ import signal
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import rclpy
@@ -46,15 +46,16 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 
+from project_config import load_project_config
+
+PROJECT = load_project_config()
+SETTINGS = PROJECT["tools"]["sim_mit_ros"]
+
 # 仿真专用起始位形：真值的 startup 是"竖直位"（真机上电姿态），那是**不稳定平衡点** ——
 # 仿真里重力前馈稍有偏差就会倾倒，一开局就把手臂甩到 6 rad/s。所以回归用弯曲位形。
-SIM_INITIAL = [0.0, -0.60, -0.60, 0.0, 0.0, 0.0]
+SIM_INITIAL = SETTINGS["sim_initial"]
 
-DEFAULT_POSES = [
-    [0.0, -0.45, -0.45, 0.0, 0.0, 0.0],
-    [0.25, -0.65, -0.55, 0.15, 0.10, 0.25],
-    [0.0, -0.80, -0.70, -0.15, -0.10, -0.25],
-]
+DEFAULT_POSES = SETTINGS["default_poses"]
 
 
 class Harness(Node):
@@ -79,6 +80,9 @@ class Harness(Node):
         self.create_subscription(
             Float64MultiArray, f"/{controller}/state", self._on_state_msg, 10)
         self.pub = self.create_publisher(JointState, f"/{controller}/joint_target", 10)
+        self.task_pub = self.create_publisher(Float64MultiArray, f"/{controller}/task_torque", 10)
+        self.ff: list[float] = []
+        self.create_subscription(Float64MultiArray, f"/{controller}/ff", self._on_ff, 10)
         self.extra_pubs = []      # 拆分实例时，其余实例的目标话题
         qos = QoSProfile(
             depth=1,
@@ -121,6 +125,9 @@ class Harness(Node):
             self.first_debug_q = self.q()[:] if self.arm_joints else []
         self.last_debug = list(msg.data)
 
+    def _on_ff(self, msg) -> None:
+        self.ff = list(msg.data)
+
     def _on_status(self, msg) -> None:
         level = msg.level
         if isinstance(level, (bytes, bytearray)):
@@ -132,13 +139,13 @@ class Harness(Node):
     def spin_for(self, seconds: float) -> None:
         end = time.monotonic() + seconds
         while time.monotonic() < end:
-            rclpy.spin_once(self, timeout_sec=0.02)
+            rclpy.spin_once(self, timeout_sec=SETTINGS["executor_poll_sec"])
 
     def wait_ready(self, timeout: float) -> bool:
         """等到 /joint_states 有本实例全部关节。"""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            rclpy.spin_once(self, timeout_sec=0.05)
+            rclpy.spin_once(self, timeout_sec=SETTINGS["ready_poll_sec"])
             if self.arm_joints and all(j in self.latest for j in self.arm_joints):
                 return True
         return False
@@ -146,16 +153,18 @@ class Harness(Node):
     def q(self) -> list[float]:
         return [self.latest[j] for j in self.arm_joints]
 
-    def send(self, target: list[float]) -> None:
+    def send(self, target: list[float], velocity: list[float] | None = None) -> None:
         msg = JointState()
         msg.name = list(self.arm_joints)
         msg.position = list(target)
+        if velocity is not None:
+            msg.velocity = velocity
         self.pub.publish(msg)
         for extra in self.extra_pubs:
             extra.publish(msg)
 
     def send_ramp_trajectory(self, target: list[float], slew: float, action_client,
-                             result_timeout: float = 30.0) -> bool:
+                             result_timeout: float = SETTINGS["action_result_timeout_sec"]) -> bool:
         """位置模式：把"当前位形 → target"拼成一条线性斜坡轨迹，走 JTC action 下发。"""
         start = self.q()
         delta = [t - s for t, s in zip(target, start)]
@@ -171,11 +180,11 @@ class Harness(Node):
             point.velocities = [d / duration for d in delta]
             point.time_from_start = MsgDuration(sec=int(sec), nanosec=int((sec % 1) * 1e9))
             goal.trajectory.points.append(point)
-        if not action_client.wait_for_server(timeout_sec=10.0):
+        if not action_client.wait_for_server(timeout_sec=SETTINGS["action_request_timeout_sec"]):
             print("   ❌ 找不到 JTC action server（位置模式控制器在跑吗）")
             return False
         send_future = action_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, send_future, timeout_sec=10.0)
+        rclpy.spin_until_future_complete(self, send_future, timeout_sec=SETTINGS["action_request_timeout_sec"])
         handle = send_future.result()
         if handle is None or not handle.accepted:
             print("   ❌ 轨迹 goal 被拒绝")
@@ -189,7 +198,7 @@ class Harness(Node):
             return code == 0
         return True
 
-    def ramp_to(self, target: list[float], slew: float, rate_hz: float = 50.0, tag: str = "") -> None:
+    def ramp_to(self, target: list[float], slew: float, rate_hz: float = SETTINGS["publish_rate_hz"], tag: str = "") -> None:
         """从当前位置按 slew（关节单位/s）斜坡逼近目标，绝不阶跃。"""
         start = self.q()
         delta = [t - s for t, s in zip(target, start)]
@@ -209,9 +218,41 @@ def state_machine_test(node, joints, args) -> int:
     步骤：
       A 等 1 s：应是等待档（done=1，kp≈kp_free）
       B 发一个新目标（+0.2 rad）：done→0，kp 线性升到 kp_track；到位后 3 s 内 done→1，kp 落回 kp_free
-      C 在 done=1 时发 +0.0005 rad（< 死区 0.001）：**不许**重新索权（done 仍为 1、kp 不升）
-      D 再发 +0.002 rad（> 死区）：必须重新索权（done→0、kp 升起）
+      C 在 done=1 时发半个死区的位移：**不许**重新索权（done 仍为 1、kp 不升）
+      D 再发两个死区的位移：必须重新索权（done→0、kp 升起）
     """
+    fixture = SETTINGS["state_machine"]
+    from rcl_interfaces.msg import ParameterType
+    from rcl_interfaces.srv import GetParameters
+
+    client = node.create_client(GetParameters, f"/{args.controller}/get_parameters")
+    if not client.wait_for_service(timeout_sec=fixture["parameter_timeout_sec"]):
+        print("❌ 读不到控制器的 target_deadband 参数服务")
+        return 1
+    future = client.call_async(GetParameters.Request(
+        names=["target_deadband", "kp_move", "settle_band_max"]))
+    rclpy.spin_until_future_complete(node, future, timeout_sec=fixture["parameter_timeout_sec"])
+    response = future.result() if future.done() else None
+    if response is None or not response.values:
+        print("❌ 读不到控制器的 target_deadband")
+        return 1
+    def first_joint(value):
+        if value.type == ParameterType.PARAMETER_DOUBLE:
+            return value.double_value
+        if value.type == ParameterType.PARAMETER_DOUBLE_ARRAY and value.double_array_value:
+            return value.double_array_value[0]
+        raise ValueError("预期逐关节浮点参数")
+
+    try:
+        deadband, kp_move, max_band = map(first_joint, response.values)
+    except ValueError as error:
+        print(f"❌ {error}")
+        return 1
+    kp_threshold = kp_move * fixture["kp_fraction"]
+    if deadband <= 0.0:
+        print("❌ 该测试要求 target_deadband 为正")
+        return 1
+
     n = len(joints)
     def snapshot():
         if not node.state or len(node.state) < 8 * n + 4:
@@ -229,7 +270,7 @@ def state_machine_test(node, joints, args) -> int:
     def wait_state(pred, timeout, label):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            node.spin_for(0.02)
+            node.spin_for(SETTINGS["executor_poll_sec"])
             s = snapshot()
             if s is not None and pred(s):
                 return s
@@ -237,7 +278,7 @@ def state_machine_test(node, joints, args) -> int:
         return None
 
     ok = True
-    node.spin_for(1.0)
+    node.spin_for(fixture["warmup_sec"])
     s = snapshot()
     if s is None:
         print("❌ 收不到 ~/state（控制器没在发？）")
@@ -246,26 +287,26 @@ def state_machine_test(node, joints, args) -> int:
 
     base = node.q()
     target = list(base)
-    target[0] += 0.2
-    print(f"  B 发目标 joint1+0.2 rad …")
+    target[0] += fixture["step_rad"]
+    print(f"  B 发目标 joint1+{fixture['step_rad']:g} rad …")
     t0 = time.monotonic()
     node.send(target)
-    s = wait_state(lambda s: (not s["done"]), 2.0, "done→0（重新索权）")
+    s = wait_state(lambda s: (not s["done"]), fixture["claim_timeout_sec"], "done→0（重新索权）")
     if s is None:
         ok = False
     else:
         print(f"     done=0 用时 {time.monotonic() - t0:.3f}s；band={s['band'][0]:.4f}")
-    s = wait_state(lambda s: s["kp"][0] > 0.8 * 60.0, 3.0, "kp 升到 80%")
+    s = wait_state(lambda s: s["kp"][0] > kp_threshold, fixture["kp_rise_timeout_sec"], "kp 升到 80%")
     if s is None:
         ok = False
     else:
-        print(f"     kp 升到 48 用时 {time.monotonic() - t0:.3f}s（期望≈{0.8 * 0.8:.2f}s 量级）")
-    s = wait_state(lambda s: s["done"], 12.0, "done→1（到位锁存）")
+        print(f"     kp 升到 {kp_threshold:g} 用时 {time.monotonic() - t0:.3f}s")
+    s = wait_state(lambda s: s["done"], fixture["settle_timeout_sec"], "done→1（到位锁存）")
     if s is None:
         ok = False
     else:
         print(f"     整组 done 用时 {time.monotonic() - t0:.2f}s；此时 err={json.dumps([round(e, 4) for e in s['err_cmd']])}")
-    s = wait_state(lambda s: s["kp"][0] < 1.5, 6.0, "kp 落回 kp_free")
+    s = wait_state(lambda s: s["kp"][0] < fixture["kp_free_ceiling"], fixture["kp_free_timeout_sec"], "kp 落回 kp_free")
     if s is None:
         ok = False
     else:
@@ -273,65 +314,69 @@ def state_machine_test(node, joints, args) -> int:
 
     # B2：误差带上限（大位移时 5% 会被 cap 到 settle_band_max=0.05）
     big = list(node.q())
-    big[0] += 2.0                       # joint1 走 2 rad（限位 ±2.6）：5% = 0.1 > cap 0.05
+    big[0] += fixture["large_step_rad"]                       # joint1 走 2 rad（限位 ±2.6）：5% = 0.1 > cap 0.05
     node.send(big)
-    s = wait_state(lambda s: (not s["done"]), 2.0, "B2 索权")
+    s = wait_state(lambda s: (not s["done"]), fixture["claim_timeout_sec"], "B2 索权")
     if s is not None:
-        cap_ok = abs(s["band"][0] - 0.05) < 1e-6
-        print(f"  B2 大位移 2 rad → band={s['band'][0]:.4f}（cap 0.05）"
+        cap_ok = abs(s["band"][0] - max_band) < 1e-6
+        print(f"  B2 大位移 {fixture['large_step_rad']:g} rad → band={s['band'][0]:.4f}（cap {max_band:g}）"
               f"{'✅' if cap_ok else '❌'}")
         ok = ok and cap_ok
-    s = wait_state(lambda s: s["done"], 12.0, "B2 到位")
+    s = wait_state(lambda s: s["done"], fixture["settle_timeout_sec"], "B2 到位")
     if s is None:
         ok = False
 
     # B3：整组 done 由**最慢**关节决定（joint1 只动 0.05、joint3 动 0.6）
     base3 = node.q()
     mix = list(base3)
-    mix[0] += 0.05
-    mix[2] += 0.60
+    for joint, step in fixture["mixed_steps_rad"].items():
+        mix[joints.index(joint)] += step
     t3 = time.monotonic()
     node.send(mix)
-    if wait_state(lambda s: (not s["done"]), 2.0, "B3 索权") is None:
+    if wait_state(lambda s: (not s["done"]), fixture["claim_timeout_sec"], "B3 索权") is None:
         ok = False
-    s = wait_state(lambda s: s["done"], 14.0, "B3 整组 done")
+    s = wait_state(lambda s: s["done"], fixture["mixed_settle_timeout_sec"], "B3 整组 done")
     if s is None:
         ok = False
     else:
         el = time.monotonic() - t3
         # 慢的 joint3：0.6/0.5 = 1.2 s 斜坡 + 3 s 判定 ≈ 4.2 s；快的 joint1 只需 0.1+3 = 3.1 s
-        slow_ok = el > 3.6
-        print(f"  B3 混合目标（j1+0.05 / j3+0.6）→ 整组 done 用时 {el:.2f}s "
-              f"（最慢关节理论≈4.2s，最快≈3.1s）{'✅ 由慢关节决定' if slow_ok else '❌ 偏快'}")
+        slow_ok = el > fixture["mixed_min_sec"]
+        print(f"  B3 混合目标→ 整组 done 用时 {el:.2f}s "
+              f"{'✅ 由慢关节决定' if slow_ok else '❌ 偏快'}")
         ok = ok and slow_ok
 
     # 回到"已到位"状态，才能验死区（否则 C 的前提不成立）
     hold = list(node.q())
     node.send(hold)
-    if wait_state(lambda s: s["done"], 14.0, "回到 done") is None:
+    if wait_state(lambda s: s["done"], fixture["mixed_settle_timeout_sec"], "回到 done") is None:
         ok = False
 
     # C：小于死区的目标变化不应重新索权
     s_now = snapshot()
-    tiny = [node.q()[i] + (s_now["err_cmd"][i] if s_now else 0.0) for i in range(n)]
-    tiny[0] += 0.0005
+    reference = [node.q()[i] + (s_now["err_cmd"][i] if s_now else 0.0) for i in range(n)]
+    tiny = reference.copy()
+    tiny_delta = deadband * 0.5
+    tiny[0] += tiny_delta
     seq_before = snapshot()["seq"] if snapshot() else -1
     node.send(tiny)
-    node.spin_for(1.0)
+    node.spin_for(fixture["warmup_sec"])
     s = snapshot()
     # 判据用 done：seq 是"收到过几帧"（每帧都 +1，与是否重新索权无关），
     #   kp 可能还在从上一段 TRACK 回落；**只有 done 反映"是否重新索权"**。
     claimed = not s["done"]
-    print(f"  C 发 +0.0005 rad（< 死区 0.001）：done={s['done']} seq={s['seq']}（前 {seq_before}）"
+    print(f"  C 发 +{tiny_delta:g} rad（< 死区 {deadband:g}）：done={s['done']} seq={s['seq']}（前 {seq_before}）"
           f"→ {'❌ 不该重新索权' if claimed else '✅ 正确忽略'}")
     ok = ok and not claimed
 
     # D：超过死区的目标变化必须重新索权
-    real = list(node.q())
-    real[0] += 0.002
+    real = reference.copy()
+    real_delta = deadband * 2.0
+    real[0] += real_delta
     node.send(real)
-    s = wait_state(lambda s: not s["done"], 2.0, "D 重新索权")
-    print(f"  D 发 +0.002 rad（> 死区）：{'✅ 重新索权（done=0）' if s else '❌ 没有索权'}")
+    s = wait_state(lambda s: not s["done"], fixture["claim_timeout_sec"], "D 重新索权")
+    print(f"  D 发 +{real_delta:g} rad（> 死区 {deadband:g}）："
+          f"{'✅ 重新索权（done=0）' if s else '❌ 没有索权'}")
     ok = ok and s is not None
     return 0 if ok else 1
 
@@ -346,21 +391,73 @@ def node_wait_controllers(node, names: list[str], timeout: float) -> bool:
     from controller_manager_msgs.srv import ListControllers
 
     client = node.create_client(ListControllers, "/controller_manager/list_controllers")
-    if not client.wait_for_service(timeout_sec=10.0):
+    if not client.wait_for_service(timeout_sec=SETTINGS["controller_service_timeout_sec"]):
         return False
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if client.service_is_ready():
             future = client.call_async(ListControllers.Request())
-            t_end = time.monotonic() + 3.0
+            t_end = time.monotonic() + SETTINGS["controller_response_timeout_sec"]
             while not future.done() and time.monotonic() < t_end:
-                rclpy.spin_once(node, timeout_sec=0.02)
+                rclpy.spin_once(node, timeout_sec=SETTINGS["executor_poll_sec"])
             if future.done() and future.result() is not None:
                 active = {c.name for c in future.result().controller if c.state == "active"}
                 if all(n in active for n in names):
                     return True
-        rclpy.spin_once(node, timeout_sec=0.05)
+        rclpy.spin_once(node, timeout_sec=SETTINGS["ready_poll_sec"])
     return False
+
+
+def mit_frame_test(node: Harness) -> int:
+    """在零重力夹具上，用反馈验证速度目标，并观测三段力矩的合成与超时。"""
+    from std_msgs.msg import Float64MultiArray
+
+    fixture = SETTINGS["mit_frame"]
+    node.spin_for(fixture["warmup_sec"])
+    position = node.q()
+    n = len(position)
+    node.send(position)
+    node.spin_for(fixture["hold_sec"])
+    for _ in range(fixture["velocity_samples"]):
+        node.send(position, [fixture["velocity_rad_s"]] + [0.0] * (n - 1))
+        node.spin_for(fixture["velocity_cadence_sec"])
+    velocity_displacement = node.q()[0] - position[0]
+    node.spin_for(fixture["velocity_timeout_wait_sec"])
+    after_timeout = abs(node.q()[0] - position[0])
+
+    # 任务力矩在发送窗口内有效，过期后保留位置目标和其他前馈。
+    node.task_pub.publish(Float64MultiArray(data=[fixture["task_torque_nm"]] + [0.0] * (n - 1)))
+    node.spin_for(fixture["task_observation_sec"])
+    task_applied = node.ff[2 * n] if len(node.ff) == 3 * n else None
+    combined = node.state[0] if len(node.state) == 8 * n + 4 else None
+    node.spin_for(fixture["task_timeout_wait_sec"])
+    task_expired = len(node.ff) == 3 * n and abs(node.ff[2 * n]) < 1e-8
+    gravity = node.ff[n:2 * n]
+    gravity_nonzero = any(abs(x) > fixture["minimum_gravity_nm"] for x in gravity)
+
+    # joint2 的已辨识系数只在实际运动时产生摩擦前馈。
+    position[1] -= fixture["friction_motion_rad"]
+    node.send(position)
+    friction_peak = 0.0
+    for _ in range(10):
+        node.spin_for(fixture["friction_sample_sec"])
+        if len(node.ff) == 3 * n:
+            friction_peak = max(friction_peak, abs(node.ff[1]))
+
+    passed = (
+        velocity_displacement > fixture["displacement_threshold_rad"]
+        and after_timeout < fixture["displacement_threshold_rad"]
+        and task_applied is not None and abs(task_applied - fixture["task_torque_nm"]) < 1e-6
+        and combined is not None and abs(combined - fixture["task_torque_nm"]) < 1e-6
+        and task_expired and gravity_nonzero and friction_peak > fixture["minimum_friction_nm"]
+    )
+    print("  RESULT " + json.dumps({
+        "mode": "mit_frame", "velocity_displacement_rad": velocity_displacement,
+        "after_velocity_timeout_rad": after_timeout, "task_torque_nm": task_applied,
+        "combined_joint1_nm": combined, "task_expired": task_expired,
+        "gravity_nm": gravity, "friction_peak_nm": friction_peak, "pass": passed,
+    }))
+    return 0 if passed else 1
 
 
 def main() -> int:
@@ -369,13 +466,13 @@ def main() -> int:
                     help="要驱动的 MIT 控制器名（决定 __/joint_target 的话题前缀）")
     ap.add_argument("--controllers-file", default="",
                     help="控制器 yaml（默认用 b601_bringup 里的 MIT 那份）")
-    ap.add_argument("--joints", default="joint1,joint2,joint3,joint4,joint5,joint6")
-    ap.add_argument("--slew", type=float, default=0.5, help="目标斜坡速度（关节单位/s）")
-    ap.add_argument("--hold", type=float, default=3.0, help="每个姿态到位后保持多久再采样")
-    ap.add_argument("--settle-window", type=float, default=0.6, help="稳态采样窗口（s）")
-    ap.add_argument("--tol", type=float, default=0.05, help="稳态误差判据（关节单位）")
-    ap.add_argument("--max-vel", type=float, default=2.0, help="峰值角速度判据（关节单位/s）")
-    ap.add_argument("--startup-timeout", type=float, default=40.0)
+    ap.add_argument("--joints", default=",".join(PROJECT["robot"]["arm_joints"]))
+    ap.add_argument("--slew", type=float, default=SETTINGS["slew"], help="目标斜坡速度（关节单位/s）")
+    ap.add_argument("--hold", type=float, default=SETTINGS["hold"], help="每个姿态到位后保持多久再采样")
+    ap.add_argument("--settle-window", type=float, default=SETTINGS["settle_window"], help="稳态采样窗口（s）")
+    ap.add_argument("--tol", type=float, default=SETTINGS["tol"], help="稳态误差判据（关节单位）")
+    ap.add_argument("--max-vel", type=float, default=SETTINGS["max_vel"], help="峰值角速度判据（关节单位/s）")
+    ap.add_argument("--startup-timeout", type=float, default=SETTINGS["startup_timeout"])
     ap.add_argument("--tag", default="run", help="CSV 文件名后缀")
     ap.add_argument("--csv", default="", help="CSV 输出路径（默认 .verify/sim_mit_ros_<tag>.csv）")
     ap.add_argument("--no-launch", action="store_true", help="外部已起 bringup 时用")
@@ -396,9 +493,9 @@ def main() -> int:
                          "于是 τ = kp·err + kd·(−q̇) 是纯 PD，可与旧实现逐帧对比；"
                          "重力补偿准不准是另一条线（Phase 4），不要混在一起验")
     ap.add_argument("--mode", default="mit", choices=["mit", "pos_vel"],
-                    help="mit=力控模式（话题发目标，本仓库自己算 τ）；"
+                    help="mit=电机侧 MIT（话题发位置和速度目标）；"
                          "pos_vel=位置模式（JTC action 发轨迹，电机内部位置环）")
-    ap.add_argument("--joint-friction", type=float, default=0.0,
+    ap.add_argument("--joint-friction", type=float, default=SETTINGS["joint_friction"],
                     help="给 MJCF 每个关节加库仑摩擦 frictionloss=N·m（真机有齿箱摩擦，"
                          "官方 MJCF 只有 viscous damping=0.02）——用来判断仿真失败是不是"
                          "『缺少静摩擦』造成的")
@@ -409,24 +506,29 @@ def main() -> int:
     ap.add_argument("--kp", default="", help="覆盖 kp_move，例 '60,60,60,20,10,8' 或单值")
     ap.add_argument("--kd", default="", help="覆盖 kd_move，例 '5.17,9.97,8.45,1.17,0.55,0.35' 或单值")
     ap.add_argument("--motor-impedance", action="store_true",
-                    help="用电机侧阻抗（Phase 3，dm_command_mode:=mit_impedance）："
-                         "位置环在驱动器里闭环，控制器只下发 pos/kp/kd/前馈")
+                    help="兼容参数，MIT 现已默认运行电机侧阻抗")
     ap.add_argument("--temp-trip-test", action="store_true",
                     help="过温守护端到端：把失能线压到很低 + 加大热模型升温速率，"
                          "看「持续大扭矩 → 升温 → 过温失能（硬件 error）」是否真的发生")
-    ap.add_argument("--temp-limit", type=float, default=27.0,
+    ap.add_argument("--temp-limit", type=float, default=SETTINGS["temp_limit"],
                     help="--temp-trip-test 用的失能线（℃）")
+    ap.add_argument("--mit-frame-test", action="store_true",
+                    help="验证 MIT 速度目标和三段前馈（使用零重力夹具）")
     ap.add_argument("--state-machine-test", action="store_true",
                     help="跑「指令层 + 整组 done + 变刚度」状态机专项测试（不看轨迹看时序）")
     ap.add_argument("--dump-interfaces", action="store_true",
                     help="启动后打印控制器状态与硬件接口归属（验证「每关节恰好一个属主」）")
-    ap.add_argument("--hold-only", type=float, default=0.0,
+    ap.add_argument("--hold-only", type=float, default=SETTINGS["hold_only"],
                     help="不跑姿态，只在起始位形悬停 N 秒并报告漂移/峰值速度（用来量重力前馈是否撑得住）")
     ap.add_argument("--initial-poses", default=",".join(str(v) for v in SIM_INITIAL),
                     help="仿真起始位形（关节1..6，逗号分隔）。默认弯曲位形，避开竖直不稳定点")
     ap.add_argument("--gravity-scale", type=float, default=None,
                     help="启动后用 ros2 param set 设重力前馈系数（0 = 纯 PD，与真机 11-21 的测试口径一致）")
     args = ap.parse_args()
+    if args.mit_frame_test and (
+        args.mode != "mit" or not args.zero_gravity or args.no_launch or args.split
+    ):
+        ap.error("--mit-frame-test 需要由脚本启动零重力 MIT 单实例")
 
     joints = [j for j in args.joints.split(",") if j]
     project = Path(__file__).resolve().parent.parent
@@ -453,7 +555,7 @@ def main() -> int:
         cmds = [
             "ros2", "launch", "b601_bringup", "bringup.launch.py",
             "hardware:=mujoco", "use_rviz:=false",
-            "dm_command_mode:=mit_torque",
+            "dm_command_mode:=mit_impedance",
             f"controllers:=joint_state_broadcaster {args.controller}",
         ]
         if args.controllers:
@@ -462,8 +564,8 @@ def main() -> int:
 
         if args.mode == "pos_vel":
             # 位置模式：controller_manager 用生成的位置模式 yaml，命令接口是 position
-            cmds = [c for c in cmds if not c.startswith("controllers_file:=")
-                    and not c.startswith("controllers:=")]
+            cmds = [c for c in cmds if not c.startswith(
+                ("controllers_file:=", "controllers:=", "dm_command_mode:="))]
             cmds.append("dm_command_mode:=pos_vel")
             cmds.append("controllers:=joint_state_broadcaster b601_arm_controller b601_gripper_controller")
             args.controllers_file = ""
@@ -529,6 +631,7 @@ def main() -> int:
                     rp["gravity_scale"] = 0.0
                     rp["use_gravity"] = False
                     rp["friction_scale"] = 0.0
+                    rp["task_torque_timeout_sec"] = 0.0
                     n = len(rp.get("joints", []))
                     rp["free_enabled"] = [False] * n   # 关键：永不进入"参考跟随实测"
                 def _vec(spec, old):
@@ -547,20 +650,6 @@ def main() -> int:
                                + _yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
                                encoding="utf-8")
             args.controllers_file = str(pd_path)
-        if args.motor_impedance:
-            import yaml as _yaml
-            cfg = _yaml.safe_load(Path(args.controllers_file).read_text(encoding="utf-8")) or {}
-            for key, val in (cfg or {}).items():
-                if isinstance(val, dict) and "ros__parameters" in val:
-                    if "gravity_params" in val["ros__parameters"]:
-                        val["ros__parameters"]["motor_impedance"] = True
-            imp_path = project / ".verify" / f"mit_impedance_{args.tag}.yaml"
-            imp_path.write_text(
-                "# 回归工具生成：电机侧阻抗（motor_impedance=true）\n"
-                + _yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding="utf-8")
-            args.controllers_file = str(imp_path)
-            cmds = [c for c in cmds if not c.startswith("dm_command_mode:=")]
-            cmds.append("dm_command_mode:=mit_impedance")
         if args.temp_trip_test:
             import yaml as _yaml
             truth_path = subprocess.run(
@@ -570,44 +659,36 @@ def main() -> int:
             cfg = _yaml.safe_load(Path(truth_path).read_text(encoding="utf-8"))
             hw = cfg["hardware"]["dm"]
             hw["temperature"]["limit_c"] = args.temp_limit
-            hw["temperature"]["warn_c"] = args.temp_limit - 1.0
-            hw["thermal"]["ambient_c"] = args.temp_limit - 2.0
-            hw["thermal"]["heat_c_per_s"] = 6.0    # 满载 6 ℃/s：几秒内就能到线
+            hw["temperature"]["warn_c"] = args.temp_limit - SETTINGS["thermal_fixture"]["warning_offset_c"]
+            hw["thermal"]["ambient_c"] = args.temp_limit - SETTINGS["thermal_fixture"]["ambient_offset_c"]
+            hw["thermal"]["heat_c_per_s"] = SETTINGS["thermal_fixture"]["heat_c_per_s"]  # 满载 6 ℃/s：几秒内就能到线
             patched = project / ".verify" / f"truth_temp_{args.tag}.yaml"
             patched.write_text(_yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
                                encoding="utf-8")
             cmds.append(f"project_config_file:={patched}")
-        if args.joint_friction > 0.0:
-            src = subprocess.run(
-                ["ros2", "pkg", "prefix", "b601_mujoco"],
-                capture_output=True, text=True, check=False,
-            ).stdout.strip() + "/share/b601_mujoco/models/b601_arm.xml"
-            text = Path(src).read_text(encoding="utf-8")
-            patched, n_sub = re.subn(
-                r'(<joint name="[^"]+" type="(?:hinge|slide)"[^/]*?)damping="[0-9.]+"',
-                rf'\1frictionloss="{args.joint_friction}" damping="0.02"', text)
-            if n_sub == 0:
-                print("❌ 没能在 MJCF 里找到 joint 的 damping 属性，摩擦夹具未生效")
-                return 1
-            fr = project / ".verify" / f"b601_friction_{args.tag}.xml"
-            fr.write_text(patched, encoding="utf-8")
-            cmds.append(f"mujoco_model:={fr}")
-            print(f"   已注入关节库仑摩擦 frictionloss={args.joint_friction} N·m（{n_sub} 个关节）")
-        if args.zero_gravity:
-            src = subprocess.run(
-                ["ros2", "pkg", "prefix", "b601_mujoco"],
-                capture_output=True, text=True, check=False,
-            ).stdout.strip() + "/share/b601_mujoco/models/b601_arm.xml"
-            text = Path(src).read_text(encoding="utf-8")
-            patched = text.replace("<option ", '<option gravity="0 0 0" ', 1)
-            if patched == text:
-                print(f"❌ 没能在 {src} 里找到 <option> 标签，零重力夹具没生效")
-                return 1
-            zg = project / ".verify" / f"b601_zero_g_{args.tag}.xml"
-            zg.write_text(patched, encoding="utf-8")
-            cmds.append(f"mujoco_model:={zg}")
-            if args.gravity_scale is None:
-                args.gravity_scale = 0.0
+        if args.joint_friction > 0.0 or args.zero_gravity:
+            from ament_index_python.packages import get_package_share_directory
+
+            source = Path(get_package_share_directory("b601_mujoco")) / "models" / "b601_arm.xml"
+            model = ET.parse(source)
+            if args.joint_friction > 0.0:
+                joints = [joint for joint in model.findall(".//joint")
+                          if joint.get("type") in ("hinge", "slide")]
+                if not joints:
+                    raise RuntimeError("MJCF 缺少可以注入摩擦的关节")
+                for joint in joints:
+                    joint.set("frictionloss", str(args.joint_friction))
+                print(f"   已注入关节库仑摩擦 frictionloss={args.joint_friction}（{len(joints)} 个关节）")
+            if args.zero_gravity:
+                option = model.find("option")
+                if option is None:
+                    raise RuntimeError(f"{source} 缺少 MuJoCo option")
+                option.set("gravity", "0 0 0")
+                if args.gravity_scale is None:
+                    args.gravity_scale = 0.0
+            fixture = project / ".verify" / f"b601_fixture_{args.tag}.xml"
+            model.write(fixture, encoding="unicode")
+            cmds.append(f"mujoco_model:={fixture}")
         if args.initial_poses:
             import yaml as _yaml
             vals = [float(v) for v in args.initial_poses.split(",") if v]
@@ -633,6 +714,23 @@ def main() -> int:
                 + _yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
                 encoding="utf-8")
             args.controllers_file = str(patched_yaml)
+        if args.mit_frame_test or args.state_machine_test:
+            import yaml as _yaml
+            config = _yaml.safe_load(Path(args.controllers_file).read_text(encoding="utf-8"))
+            params = config[args.controller]["ros__parameters"]
+            params["free_enabled"] = [args.state_machine_test] * len(params["joints"])
+
+            if args.state_machine_test:
+                params["target_slew"] = SETTINGS["state_machine"]["reference_slew_rad_s"]
+            if args.mit_frame_test:
+                fixture = SETTINGS["mit_frame"]
+                params.update(gravity_scale=fixture["gravity_scale"], use_gravity=True,
+                              friction_scale=fixture["friction_scale"],
+                              task_torque_timeout_sec=fixture["task_torque_timeout_sec"])
+                args.gravity_scale = None
+            test_config = project / ".verify" / f"mit_test_{args.tag}.yaml"
+            test_config.write_text(_yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            args.controllers_file = str(test_config)
         # controllers_file 只追加一次（拆分/gravity 补丁都可能改过它）
         cmds = [c for c in cmds if not c.startswith("controllers_file:=")]
         if args.controllers_file:
@@ -655,9 +753,9 @@ def main() -> int:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             return
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + SETTINGS["shutdown_timeout_sec"]
         while time.monotonic() < deadline and proc.poll() is None:
-            time.sleep(0.2)
+            time.sleep(SETTINGS["shutdown_poll_sec"])
         if proc.poll() is None:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -684,7 +782,7 @@ def main() -> int:
                 # 连续多次 launch 时更容易出现）→ 清场后整条重试一次
                 print("   ⚠ 控制器没起来，清理后重试一次（spawner 偶发 DDS 抖动）")
                 cleanup()
-                time.sleep(3.0)
+                time.sleep(SETTINGS["restart_wait_sec"])
                 proc = _spawn()
                 ok_up = node_wait_controllers(
                     node, ["joint_state_broadcaster"] + ctrl_names, args.startup_timeout)
@@ -694,24 +792,26 @@ def main() -> int:
                 for line in tail:
                     print("   " + line)
                 return 1
-        if not node.wait_ready(20.0):
+        if not node.wait_ready(SETTINGS["state_ready_timeout_sec"]):
             print("❌ 收不到 /joint_states")
             return 1
         if args.gravity_scale is not None:
             out = subprocess.run(
                 ["ros2", "param", "set", f"/{args.controller}", "gravity_scale",
                  f"{args.gravity_scale}"],
-                capture_output=True, text=True, timeout=15, check=False,
+                capture_output=True, text=True, timeout=SETTINGS["parameter_process_timeout_sec"], check=False,
             )
             print(f"gravity_scale := {args.gravity_scale}（启动前已写入控制器 yaml；"
                   f"此处再 set 一次做确认：{out.stdout.strip() or out.stderr.strip()}）")
             node.spin_for(0.5)
 
+        if args.mit_frame_test:
+            return mit_frame_test(node)
         if args.temp_trip_test:
             print(f"过温测试：失能线 {args.temp_limit:.0f} ℃，热模型满载 6 ℃/s（需真实重力负载）")
             node.spin_for(1.0)
             hold = node.q()
-            end = time.monotonic() + 20.0
+            end = time.monotonic() + SETTINGS["thermal_fixture"]["observe_sec"]
             tripped = False
             while time.monotonic() < end:
                 node.send(hold)          # 持续要"保持"，控制器会用 τ 顶重力 → 发热
@@ -736,7 +836,7 @@ def main() -> int:
         if args.dump_interfaces:
             for cmd in (["ros2", "control", "list_controllers"],
                         ["ros2", "control", "list_hardware_interfaces"]):
-                out = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False).stdout
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=SETTINGS["interfaces_process_timeout_sec"], check=False).stdout
                 print(f"--- {' '.join(cmd[2:])} ---")
                 for line in out.splitlines():
                     if "effort" in line or "controller" in line.lower() or "active" in line:

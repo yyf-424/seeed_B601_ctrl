@@ -115,15 +115,21 @@ def generate_launch_description():
 
     # controller_manager：唯一“知道硬件存在”的节点。
     # 它按 URDF 里的 <ros2_control> 加载硬件插件，按 controllers yaml 加载控制器。
-    controller_manager = Node(
-        package="controller_manager",
-        executable="ros2_control_node",
-        output="screen",
-        parameters=[
-            {"robot_description": robot_description, "use_sim_time": use_sim_time},
-            controllers_file,
-        ],
-    )
+    def launch_manager(context):
+        is_mit = dm_command_mode.perform(context) == "mit_impedance"
+        default_file = "b601_mit_controllers.yaml" if is_mit else "b601_controllers.yaml"
+        config_file = controllers_file.perform(context) or PathJoinSubstitution(
+            [bringup_share, "config", default_file]
+        ).perform(context)
+        return [Node(
+            package="controller_manager",
+            executable="ros2_control_node",
+            output="screen",
+            parameters=[
+                {"robot_description": robot_description, "use_sim_time": use_sim_time},
+                config_file,
+            ],
+        )]
 
     # 安全监控：独立节点，只读 /joint_states；急停时停控制器并把硬件置 INACTIVE。
     safety_monitor = Node(
@@ -141,6 +147,11 @@ def generate_launch_description():
 
     def launch_spawners(context, *args, **kwargs):
         names = controllers_arg.perform(context).split()
+        if not names:
+            if dm_command_mode.perform(context) == "mit_impedance":
+                names = ["joint_state_broadcaster", *ctrls["mit"]["instances"]]
+            else:
+                names = ["joint_state_broadcaster", ctrls["arm"]["name"], ctrls["gripper"]["name"]]
         return [
             Node(
                 package="controller_manager",
@@ -157,10 +168,6 @@ def generate_launch_description():
         arguments=["-d", PathJoinSubstitution([description_share, "rviz", "b601_display.rviz"])],
         parameters=[{"use_sim_time": use_sim_time}],
         condition=IfCondition(use_rviz),
-    )
-
-    default_controllers = " ".join(
-        ["joint_state_broadcaster", ctrls["arm"]["name"], ctrls["gripper"]["name"]]
     )
 
     return LaunchDescription(
@@ -186,7 +193,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "dm_command_mode", default_value=str(dm_cfg["command_mode"]),
-                description="控制模式：pos_vel（电机位置环）/ mit / mit_torque（纯力矩，重力补偿用）",
+                description="控制模式：pos_vel / mit / mit_impedance（电机侧 PD）/ mit_torque（原始力矩接口）",
             ),
             DeclareLaunchArgument(
                 "dm_log_csv", default_value=str(dm_cfg.get("log_csv", "")),
@@ -205,14 +212,12 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "controllers_file",
-                default_value=PathJoinSubstitution(
-                    [bringup_share, "config", "b601_controllers.yaml"]),
-                description="controller_manager 要加载的控制器配置文件",
+                default_value="",
+                description="控制器配置文件，留空按 dm_command_mode 自动选择",
             ),
             DeclareLaunchArgument(
-                "controllers", default_value=default_controllers,
-                description="要加载并激活的控制器名（空格分隔）。MIT 模式用 "
-                            "'joint_state_broadcaster b601_mit_controller'",
+                "controllers", default_value="",
+                description="控制器名称（空格分隔），留空按 dm_command_mode 自动选择",
             ),
             DeclareLaunchArgument(
                 "safety_params_file",
@@ -234,7 +239,7 @@ def generate_launch_description():
             ),
 
             robot_state_publisher,
-            controller_manager,
+            OpaqueFunction(function=launch_manager),
             safety_monitor,
             rviz,
 

@@ -87,44 +87,20 @@ class SafetyMonitor(Node):
     def __init__(self) -> None:
         super().__init__("b601_safety_monitor")
 
-        # ---------------- 参数（全部有安全侧默认值，缺 yaml 也能跑） ----------------
-        self.declare_parameter("joint_states_topic", "/joint_states")
-        self.declare_parameter("status_topic", "/b601_safety/status")
-        self.declare_parameter("clear_service", "/b601_safety/clear_estop")
+        # 默认参数随包安装，启动时可用标准 ROS 参数覆盖。
+        from pathlib import Path
 
-        self.declare_parameter("joint_names", ["joint1"])
-        self.declare_parameter("pos_min", [0.0])
-        self.declare_parameter("pos_max", [0.0])
-        self.declare_parameter("vel_max", [1.0])
-        self.declare_parameter("startup_pose", [0.0])
-        self.declare_parameter("warn_pos_margin", [0.12])
-        self.declare_parameter("warn_near_limit", [True])
-        self.declare_parameter("warn_pose_deviation_joint", [True])
+        from ament_index_python.packages import get_package_share_directory
+        import yaml
 
-        self.declare_parameter("evaluate_rate_hz", 100.0)
-        self.declare_parameter("publish_rate_hz", 20.0)
-        self.declare_parameter("feedback_timeout_sec", 0.3)
-        self.declare_parameter("estop_on_feedback_timeout", False)
-        self.declare_parameter("startup_grace_sec", 3.0)
-
-        self.declare_parameter("estop_pos_margin", 0.0)
-        # 静止零位漂移容差：与硬件插件 on_activate 的检查用同一个真值。
-        # 生成的是逐关节数组（夹爪单位 m，更小），所以必须允许运行期类型为数组；
-        # 用 dynamic_typing 是为了同时兼容"只写一个标量"的手工配置。
-        self.declare_parameter("static_tolerance", 0.05,
-                              ParameterDescriptor(dynamic_typing=True))
-        # 软警告阈值（逐关节的开关与余量在上面 warn_* 三个数组里）
-        self.declare_parameter("warn_vel_ratio", 0.8)
-        self.declare_parameter("estop_vel_ratio", 1.0)
-        self.declare_parameter("estop_vel_absolute", 0.0)
-        self.declare_parameter("warn_on_pose_deviation", True)
-        self.declare_parameter("warn_pose_threshold", 0.35)
-
-        self.declare_parameter("deactivate_controllers", [ALL_CONTROLLERS])
-        self.declare_parameter("deactivate_hardware", True)
-        self.declare_parameter("hardware_component", "b601")
-        self.declare_parameter("service_timeout_sec", 2.0)
-        self.declare_parameter("latch", True)
+        path = Path(get_package_share_directory("b601_safety")) / "config" / "safety_params.yaml"
+        all_params = yaml.safe_load(path.read_text(encoding="utf-8"))
+        defaults = next(iter(all_params.values()))["ros__parameters"]
+        for name, value in defaults.items():
+            if name == "static_tolerance":
+                self.declare_parameter(name, value, ParameterDescriptor(dynamic_typing=True))
+            else:
+                self.declare_parameter(name, value)
 
         names = list(self.get_parameter("joint_names").value)
         pos_min = _as_float_list(self.get_parameter("pos_min").value)
@@ -171,6 +147,7 @@ class SafetyMonitor(Node):
         self.deactivate_hardware = bool(self.get_parameter("deactivate_hardware").value)
         self.hardware_component = str(self.get_parameter("hardware_component").value)
         self.service_timeout = float(self.get_parameter("service_timeout_sec").value)
+        self.service_discovery_timeout = float(self.get_parameter("service_discovery_timeout_sec").value)
         self.deactivate_list = list(self.get_parameter("deactivate_controllers").value)
 
         # ---------------- 状态 ----------------
@@ -197,7 +174,8 @@ class SafetyMonitor(Node):
 
         joint_states_topic = str(self.get_parameter("joint_states_topic").value)
         self.joint_sub = self.create_subscription(
-            JointState, joint_states_topic, self._on_joint_states, 10
+            JointState, joint_states_topic, self._on_joint_states,
+            int(self.get_parameter("joint_state_depth").value)
         )
 
         self.clear_srv = self.create_service(
@@ -215,8 +193,8 @@ class SafetyMonitor(Node):
         )
 
         # ---------------- 定时器 ----------------
-        eval_hz = max(1.0, float(self.get_parameter("evaluate_rate_hz").value))
-        pub_hz = max(0.5, float(self.get_parameter("publish_rate_hz").value))
+        eval_hz = max(float(self.get_parameter("minimum_evaluate_rate_hz").value), float(self.get_parameter("evaluate_rate_hz").value))
+        pub_hz = max(float(self.get_parameter("minimum_publish_rate_hz").value), float(self.get_parameter("publish_rate_hz").value))
         self.eval_timer = self.create_timer(1.0 / eval_hz, self._evaluate_tick)
         self.pub_timer = self.create_timer(1.0 / pub_hz, self._publish_tick)
 
@@ -351,7 +329,7 @@ class SafetyMonitor(Node):
         self._run_step_list_controllers()
 
     def _run_step_list_controllers(self) -> None:
-        if not self.list_client.wait_for_service(timeout_sec=0.5):
+        if not self.list_client.wait_for_service(timeout_sec=self.service_discovery_timeout):
             self.get_logger().warn(
                 "拿不到 /controller_manager/list_controllers，按配置列表停控制器"
             )
@@ -380,7 +358,7 @@ class SafetyMonitor(Node):
             self.get_logger().warn("没有 active 控制器可停（可能已经停了）")
             self._run_step_hardware()
             return
-        if not self.switch_client.wait_for_service(timeout_sec=0.5):
+        if not self.switch_client.wait_for_service(timeout_sec=self.service_discovery_timeout):
             self.get_logger().error(
                 "拿不到 /controller_manager/switch_controller，控制器仍在运行！"
             )
@@ -411,7 +389,7 @@ class SafetyMonitor(Node):
         if not self.deactivate_hardware:
             self._finish_actions("按配置跳过硬件失能")
             return
-        if not self.hw_state_client.wait_for_service(timeout_sec=0.5):
+        if not self.hw_state_client.wait_for_service(timeout_sec=self.service_discovery_timeout):
             self.get_logger().error(
                 "拿不到 /controller_manager/set_hardware_component_state —— "
                 "硬件没有失能，电机可能仍在出力！请立即断 24 V 电源。"

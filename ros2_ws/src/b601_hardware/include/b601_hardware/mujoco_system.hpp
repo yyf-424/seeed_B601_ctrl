@@ -26,6 +26,8 @@
 
 #pragma once
 
+#include "b601_description/project_parameters.hpp"
+
 #include <chrono>
 #include <string>
 #include <unordered_map>
@@ -80,13 +82,15 @@ private:
     int actuator{-1};          // -1 = 无执行器（手指）
     double kp{0.0};            // pos_vel/mit 模式内部 PD
     double kd{0.0};
-    double vel_limit{5.0};
+    double vel_limit{b601_config::dm::default_joint_velocity_rad_s};
+    double mit_velocity_limit{0.0};  // MIT 帧速度目标的关节单位上限
     double torque_limit{0.0};
     double min_pos{0.0};
     double max_pos{0.0};
     bool has_position_limit{false};
     bool has_command{false};
     bool is_finger{false};
+    bool implicit_impedance{false};
     // 运动学直通（命令即位置，不走物理）：没有执行器的关节必然如此；
     // 夹爪在**位置模式**下也保持直通 —— 那是 2026-11-21 验证过的行为（否则真机/仿真不一致、
     // 也会打破"夹爪 0/45 mm"的既有验收）。mit_torque 模式下夹爪改用 MJCF 执行器，让它"真的有力"。
@@ -94,6 +98,7 @@ private:
     // 运行时
     double init_position{0.0};   // URDF state_interface 的 initial_value（仿真初值，避免起点压在限位上）
     double cmd_position{0.0};
+    double cmd_velocity{0.0};
     double cmd_effort{0.0};
     // mit_impedance（Phase 3）：位置环在"驱动器"里闭环 —— 仿真里就是插件按物理步长
     // 用 cmd_kp/cmd_kd 自己算力矩，从而和真机一样把带宽提到 1 kHz 量级。
@@ -113,23 +118,24 @@ private:
   void step_sim(double dt);
   /// mit_impedance：按物理步长对每个关节做阻抗闭环（模拟驱动器内部位置环）
   void apply_impedance_inside_physics();
+  double applied_effort(const JointMap & joint) const;
   void mirror_finger();
 
   // 配置
   std::string model_path_;
   std::string command_mode_{"pos_vel"};
-  double velocity_scale_{1.0};        // 位置模式下的每周期限速缩放（1.0 = 不额外收紧）
+  double velocity_scale_{b601_config::mujoco::velocity_scale};        // 位置模式下的每周期限速缩放（1.0 = 不额外收紧）
   // 力矩命令符号：与真机插件保持**同一约定**。
   // b601_mit_controller 输出的 τ_cmd 是"−g"约定，dm 插件靠 effort_sign=−1 翻成关节正方向；
   // 仿真后端如果直接用原值，重力前馈就会变成"重力放大"——2026-11-21 实测：
   // 纯 MIT 启动 170 ms 内 joint3 冲到限位（约 27 N·m 满力矩反向）。
-  double effort_sign_{-1.0};
+  double effort_sign_{b601_config::mujoco::effort_sign};
   // mit_torque 模式下，"控制器还没接管"之前不要推进物理：
   // 真机在控制器未激活时电机未使能/抱闸，而仿真若此刻就积分，手臂会自由落体扑到限位上，
   // 安全节点第一帧就判急停。收到第一份非零力矩命令（或超过 300 个周期）后才开始积分。
   bool sim_started_{false};
   long cycles_since_activate_{0};
-  long physics_wait_cycles_{2000};   // mit_torque 下等控制器写入力矩的周期数上限
+  long physics_wait_cycles_{b601_config::mujoco::physics_wait_cycles};   // mit_torque 下等控制器写入力矩的周期数上限
                                      // （200 Hz × 2000 = 10 s；两个控制器实例的加载/激活
                                      //  在慢机器上可能超过 1.5 s，早于它积分会让手臂自由落体）
   bool verbose_{false};
@@ -142,10 +148,10 @@ private:
   TemperatureGuard temp_guard_;
   bool over_temp_{false};
   bool temp_warned_{false};
-  double thermal_ambient_c_{25.0};
-  double thermal_heat_c_per_s_{1.5};
-  double thermal_cooling_tau_s_{60.0};
-  double temp_now_c_{25.0};
+  double thermal_ambient_c_{b601_config::mujoco::ambient_c};
+  double thermal_heat_c_per_s_{b601_config::mujoco::heat_c_per_s};
+  double thermal_cooling_tau_s_{b601_config::mujoco::cooling_tau_s};
+  double temp_now_c_{b601_config::mujoco::ambient_c};
 
   mjModel * model_{nullptr};
   mjData * data_{nullptr};

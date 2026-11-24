@@ -4,9 +4,9 @@
 #    改完执行：  ./scripts/sync_config.py
 # ============================================================================
 # MIT 力控（变刚度）控制器：一个实例控一组关节，参数来自真值的 controllers.mit 段。
-# 启动示例（真机/仿真，纯力矩模式）：
+# 启动示例（电机侧 MIT，仿真）：
 #   ros2 launch b601_bringup bringup.launch.py hardware:=mujoco \
-#       dm_command_mode:=mit_torque \
+#       dm_command_mode:=mit_impedance \
 #       controllers_file:=<本文件> \
 #       controllers:="joint_state_broadcaster b601_mit_arm b601_mit_gripper"
 controller_manager:
@@ -55,19 +55,19 @@ b601_mit_arm:
     - 0.21
     - 0.13
     kp_move:
-    - 70.0
-    - 75.0
-    - 150.0
-    - 35.0
-    - 14.0
-    - 8.0
+    - 115.0
+    - 265.0
+    - 190.0
+    - 200.0
+    - 36.0
+    - 28.0
     kd_move:
-    - 5.58
-    - 11.15
-    - 13.36
-    - 1.55
-    - 0.65
-    - 0.35
+    - 5.0
+    - 5.0
+    - 5.0
+    - 3.4
+    - 1.2
+    - 0.82
     friction:
     - 0.0
     - -0.45533
@@ -96,14 +96,14 @@ b601_mit_arm:
     - 0.24
     - 0.16
     - 0.11
-    free_enabled: true
+    free_enabled: false
     target_deadband:
-    - 0.001
-    - 0.001
-    - 0.001
-    - 0.001
-    - 0.001
-    - 0.001
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
     settle_band_min:
     - 0.01
     - 0.01
@@ -118,26 +118,25 @@ b601_mit_arm:
     - 0.05
     - 0.05
     - 0.05
-    target_slew: 0.5
+    target_slew: 0.08
     settle_band_pct: 0.05
     settle_sec: 3.0
     kp_up_sec: 0.8
     kp_down_sec: 2.0
     q_ref_lpf_hz: 30.0
     track_timeout_sec: 0.0
-    motor_impedance: false
+    motor_impedance: true
     move_threshold: 0.08
     hold_threshold: 0.03
     vel_hold_threshold: 0.3
     kp_ramp_sec: 0.35
-    max_error: 0.45
     velocity_lpf_hz: 6.0
-    max_vel_feedback: 0.4
-    torque_slew: 50.0
-    gravity_scale: 1.0
+    gravity_scale: 0.0
     friction_scale: 0.0
     friction_vel_eps: 0.02
-    use_gravity: true
+    use_gravity: false
+    task_torque_timeout_sec: 0.0
+    target_velocity_timeout_sec: 0.25
     gravity_params:
     - 1.3266
     - -0.124435
@@ -186,13 +185,13 @@ b601_mit_gripper:
     - position
     - velocity
     kp_hold:
-    - 200.0
+    - 65000.0
     kd_hold:
-    - 5.0
+    - 12000.0
     kp_move:
-    - 500.0
+    - 65000.0
     kd_move:
-    - 10.0
+    - 12000.0
     friction:
     - 0.0
     torque_limit:
@@ -201,7 +200,7 @@ b601_mit_gripper:
     - 50.0
     kd_free:
     - 2.0
-    free_enabled: true
+    free_enabled: false
     target_deadband:
     - 0.0001
     settle_band_min:
@@ -215,19 +214,18 @@ b601_mit_gripper:
     kp_down_sec: 1.0
     q_ref_lpf_hz: 30.0
     track_timeout_sec: 0.0
-    motor_impedance: false
+    motor_impedance: true
     move_threshold: 0.01
     hold_threshold: 0.002
     vel_hold_threshold: 0.01
     kp_ramp_sec: 0.5
-    max_error: 0.02
     velocity_lpf_hz: 6.0
-    max_vel_feedback: 0.05
-    torque_slew: 40.0
-    gravity_scale: 1.0
+    gravity_scale: 0.0
     friction_scale: 0.0
     friction_vel_eps: 0.002
-    use_gravity: true
+    use_gravity: false
+    task_torque_timeout_sec: 0.0
+    target_velocity_timeout_sec: 0.25
     gravity_params:
     - 1.3266
     - -0.124435

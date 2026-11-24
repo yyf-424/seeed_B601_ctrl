@@ -59,21 +59,22 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_init(
       logger(), "未知 command_mode='%s'，回落 pos_vel", command_mode_.c_str());
     command_mode_ = "pos_vel";
   }
-  velocity_scale_ = std::clamp(get_double(hp, "velocity_scale", 1.0, "hardware"), 0.01, 1.0);
+  velocity_scale_ = std::clamp(get_double(hp, "velocity_scale", velocity_scale_, "hardware"),
+    b601_config::dm::minimum_velocity_scale, 1.0);
   effort_sign_ = get_double(hp, "effort_sign", effort_sign_, "hardware");
   if (effort_sign_ != 1.0 && effort_sign_ != -1.0) {
     RCLCPP_WARN(logger(), "effort_sign=%.2f 不是 ±1，按符号处理", effort_sign_);
     effort_sign_ = effort_sign_ < 0.0 ? -1.0 : 1.0;
   }
-  verbose_ = get_double(hp, "verbose", 0.0, "hardware") > 0.5;
+  verbose_ = get_double(hp, "verbose", b601_config::mujoco::verbose, "hardware") != 0.0;
   // 温度守护 + 一阶热模型（阈值与真机同一套参数名）
   temp_guard_.configure(
-    get_double(hp, "temp_warn_c", 70.0, "hardware"),
-    get_double(hp, "temp_limit_c", 85.0, "hardware"),
-    get_double(hp, "temp_hysteresis_c", 5.0, "hardware"));
-  thermal_ambient_c_ = get_double(hp, "thermal_ambient_c", 25.0, "hardware");
-  thermal_heat_c_per_s_ = get_double(hp, "thermal_heat_c_per_s", 1.5, "hardware");
-  thermal_cooling_tau_s_ = std::max(1.0, get_double(hp, "thermal_cooling_tau_s", 60.0, "hardware"));
+    get_double(hp, "temp_warn_c", b601_config::dm::warn_c, "hardware"),
+    get_double(hp, "temp_limit_c", b601_config::dm::limit_c, "hardware"),
+    get_double(hp, "temp_hysteresis_c", b601_config::dm::hysteresis_c, "hardware"));
+  thermal_ambient_c_ = get_double(hp, "thermal_ambient_c", thermal_ambient_c_, "hardware");
+  thermal_heat_c_per_s_ = get_double(hp, "thermal_heat_c_per_s", thermal_heat_c_per_s_, "hardware");
+  thermal_cooling_tau_s_ = std::max(1.0, get_double(hp, "thermal_cooling_tau_s", thermal_cooling_tau_s_, "hardware"));
   temp_now_c_ = thermal_ambient_c_;
   RCLCPP_INFO(
     logger(),
@@ -81,7 +82,7 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_init(
     temp_guard_.warn_c(), temp_guard_.limit_c(), thermal_ambient_c_,
     thermal_heat_c_per_s_, thermal_cooling_tau_s_);
   physics_wait_cycles_ = static_cast<long>(
-    std::max(1.0, get_double(hp, "physics_wait_cycles", 2000.0, "hardware")));
+    std::max(1.0, get_double(hp, "physics_wait_cycles", physics_wait_cycles_, "hardware")));
 
   if (model_path_.empty()) {
     RCLCPP_ERROR(logger(), "缺少 model_path 参数（指向 MJCF 文件）");
@@ -107,7 +108,9 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_init(
       };
     jm.kp = num("kp", 0.0);
     jm.kd = num("kd", 0.0);
-    jm.vel_limit = num("vel_limit", 5.0);
+    jm.vel_limit = num("vel_limit", b601_config::dm::default_joint_velocity_rad_s);
+    jm.mit_velocity_limit = std::clamp(
+      num("mit_velocity_limit", jm.vel_limit * velocity_scale_), 0.0, jm.vel_limit);
     jm.torque_limit = num("torque_limit", 0.0);
     const auto lo = p.find("min_pos");
     const auto hi = p.find("max_pos");
@@ -158,6 +161,24 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_configure(
     jm.actuator = mj_name2id(model_, mjOBJ_ACTUATOR, act_name.c_str());
     jm.is_finger = (jm.actuator < 0);
     const bool is_prismatic_finger = (jm.name == "finger_left" || jm.name == "finger_right");
+    const int actuator = jm.actuator;
+    jm.implicit_impedance = command_mode_ == "mit_impedance" && is_prismatic_finger &&
+      actuator >= 0 && model_->actuator_trntype[actuator] == mjTRN_JOINT &&
+      model_->actuator_trnid[2 * actuator] == jid &&
+      model_->actuator_dyntype[actuator] == mjDYN_NONE &&
+      model_->actuator_gear[6 * actuator] == 1.0;
+    if (jm.implicit_impedance) {
+      model_->actuator_gaintype[actuator] = mjGAIN_FIXED;
+      model_->actuator_gainprm[mjNGAIN * actuator] = 1.0;
+      model_->actuator_biastype[actuator] = mjBIAS_AFFINE;
+      mju_zero(model_->actuator_biasprm + mjNBIAS * actuator, mjNBIAS);
+      model_->actuator_ctrllimited[actuator] = 0;
+      if (jm.torque_limit > 0.0) {
+        model_->actuator_forcelimited[actuator] = 1;
+        model_->actuator_forcerange[2 * actuator] = -jm.torque_limit;
+        model_->actuator_forcerange[2 * actuator + 1] = jm.torque_limit;
+      }
+    }
     jm.passthrough = (jm.actuator < 0) ||
       (is_prismatic_finger && command_mode_ != "mit_torque" &&
        command_mode_ != "mit_impedance");
@@ -173,11 +194,13 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_configure(
     jm.cmd_position = jm.init_position;
     jm.cmd_sent = jm.init_position;
   }
+  mirror_finger();
   mj_forward(model_, data_);
   steps_total_ = 0;
   RCLCPP_INFO(
-    logger(), "已加载 MuJoCo 模型：nq=%d nv=%d nu=%d，dt=%.4f s",
-    model_->nq, model_->nv, model_->nu, model_->opt.timestep);
+    logger(), "已加载 MuJoCo 模型：nq=%lld nv=%lld nu=%lld，dt=%.4f s",
+    static_cast<long long>(model_->nq), static_cast<long long>(model_->nv),
+    static_cast<long long>(model_->nu), model_->opt.timestep);
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -213,6 +236,9 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_activate(
   for (auto & jm : joints_) {
     jm.cmd_position = data_->qpos[jm.qpos_adr];
     jm.cmd_sent = jm.cmd_position;
+    jm.cmd_velocity = 0.0;
+    jm.cmd_kp = 0.0;
+    jm.cmd_kd = 0.0;
     jm.cmd_effort = 0.0;
   }
   mju_zero(data_->ctrl, model_->nu);
@@ -237,8 +263,9 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_deactivate(
 {
   if (model_ != nullptr && data_ != nullptr) {
     mju_zero(data_->ctrl, model_->nu);
-  sim_started_ = false;
-  cycles_since_activate_ = 0;
+    mju_zero(data_->qfrc_actuator, model_->nv);
+    sim_started_ = false;
+    cycles_since_activate_ = 0;
   }
   RCLCPP_INFO(logger(), "已停用（仿真）：控制量清零");
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -281,6 +308,7 @@ std::vector<hardware_interface::CommandInterface> MujocoSystemHardware::export_c
     }
     if (command_mode_ == "mit_impedance") {
       commands.emplace_back(jm.name, hardware_interface::HW_IF_POSITION, &jm.cmd_position);
+      commands.emplace_back(jm.name, hardware_interface::HW_IF_VELOCITY, &jm.cmd_velocity);
       commands.emplace_back(jm.name, "kp", &jm.cmd_kp);
       commands.emplace_back(jm.name, "kd", &jm.cmd_kd);
       commands.emplace_back(jm.name, hardware_interface::HW_IF_EFFORT, &jm.cmd_effort);
@@ -300,9 +328,11 @@ void MujocoSystemHardware::mirror_finger()
   {
     return;
   }
-  auto & left = joints_[finger_left_index_];
-  auto & right = joints_[finger_right_index_];
-  right.cmd_position = -left.cmd_position;
+  const auto & left = joints_[finger_left_index_];
+  const auto & right = joints_[finger_right_index_];
+  // 从动指没有执行器和命令接口，直接镜像主动指的物理状态。
+  data_->qpos[right.qpos_adr] = -data_->qpos[left.qpos_adr];
+  data_->qvel[right.dof_adr] = -data_->qvel[left.dof_adr];
 }
 
 void MujocoSystemHardware::apply_impedance_inside_physics()
@@ -314,22 +344,51 @@ void MujocoSystemHardware::apply_impedance_inside_physics()
     if (jm.actuator < 0) {
       continue;
     }
-    if (jm.cmd_kp <= 0.0 && jm.cmd_kd <= 0.0 && std::abs(jm.cmd_effort) < 1e-9) {
+    if (!jm.implicit_impedance &&
+      jm.cmd_kp <= 0.0 && jm.cmd_kd <= 0.0 && std::abs(jm.cmd_effort) < 1e-9)
+    {
       data_->ctrl[jm.actuator] = 0.0;
       continue;
     }
     double pos_des = jm.cmd_position;
+    double velocity_des = std::clamp(
+      jm.cmd_velocity, -jm.mit_velocity_limit, jm.mit_velocity_limit);
     if (jm.has_position_limit) {
       pos_des = std::clamp(pos_des, jm.min_pos, jm.max_pos);
+      if ((pos_des <= jm.min_pos && velocity_des < 0.0) ||
+        (pos_des >= jm.max_pos && velocity_des > 0.0))
+      {
+        velocity_des = 0.0;
+      }
+    }
+    if (jm.implicit_impedance) {
+      // Put the velocity bias in the actuator so MuJoCo can integrate damping implicitly.
+      auto * bias = model_->actuator_biasprm + mjNBIAS * jm.actuator;
+      bias[0] = 0.0;
+      bias[1] = -jm.cmd_kp;
+      bias[2] = -jm.cmd_kd;
+      data_->ctrl[jm.actuator] = jm.cmd_kp * pos_des + jm.cmd_kd * velocity_des +
+        effort_sign_ * jm.cmd_effort;
+      continue;
     }
     const double q = data_->qpos[jm.qpos_adr];
     const double qd = data_->qvel[jm.dof_adr];
-    double tau = jm.cmd_kp * (pos_des - q) - jm.cmd_kd * qd + effort_sign_ * jm.cmd_effort;
+    double tau = jm.cmd_kp * (pos_des - q) + jm.cmd_kd * (velocity_des - qd) +
+      effort_sign_ * jm.cmd_effort;
     if (jm.torque_limit > 0.0) {
       tau = std::clamp(tau, -jm.torque_limit, jm.torque_limit);
     }
     data_->ctrl[jm.actuator] = tau;
   }
+}
+
+double MujocoSystemHardware::applied_effort(const JointMap & joint) const
+{
+  if (joint.actuator < 0) {
+    return 0.0;
+  }
+  return joint.implicit_impedance ? data_->qfrc_actuator[joint.dof_adr] :
+         data_->ctrl[joint.actuator];
 }
 
 void MujocoSystemHardware::step_sim(double dt)
@@ -339,14 +398,13 @@ void MujocoSystemHardware::step_sim(double dt)
   if (steps < 1) {
     steps = 1;
   }
-  if (steps > 200) {          // 上限保护：单周期最多 0.2 s 的物理时间（200 × 1 ms）
-    steps = 200;
-  }
+  steps = std::min(steps, b601_config::mujoco::max_substeps);
   for (int k = 0; k < steps; ++k) {
     if (command_mode_ == "mit_impedance") {
       apply_impedance_inside_physics();
     }
     mj_step(model_, data_);
+    mirror_finger();
   }
   steps_total_ += steps;
 }
@@ -360,9 +418,9 @@ hardware_interface::return_type MujocoSystemHardware::read(
   for (auto & jm : joints_) {
     jm.state_position = data_->qpos[jm.qpos_adr];
     jm.state_velocity = data_->qvel[jm.dof_adr];
-    jm.state_effort = (jm.actuator >= 0) ? data_->ctrl[jm.actuator] : 0.0;
+    jm.state_effort = applied_effort(jm);
   }
-  if (verbose_ && steps_total_ < 20) {
+  if (verbose_ && steps_total_ < b601_config::mujoco::startup_log_steps) {
     std::string line;
     char buf[128];
     for (const auto & jm : joints_) {
@@ -381,7 +439,8 @@ hardware_interface::return_type MujocoSystemHardware::write(
   if (model_ == nullptr || data_ == nullptr) {
     return hardware_interface::return_type::ERROR;
   }
-  const double dt = std::clamp(period.seconds(), 1e-4, 0.2);
+  const double dt = std::clamp(period.seconds(), b601_config::mujoco::write_period_min_sec,
+    b601_config::mujoco::write_period_max_sec);
 
   // ---- 温度守护（决策③）----
   {
@@ -391,7 +450,7 @@ hardware_interface::return_type MujocoSystemHardware::write(
       if (jm.actuator < 0 || jm.torque_limit <= 0.0) {
         continue;
       }
-      const double frac = std::abs(data_->ctrl[jm.actuator]) / jm.torque_limit;
+      const double frac = std::abs(applied_effort(jm)) / jm.torque_limit;
       load = std::max(load, frac);
     }
     const double cooling = (temp_now_c_ - thermal_ambient_c_) / thermal_cooling_tau_s_;
@@ -411,6 +470,7 @@ hardware_interface::return_type MujocoSystemHardware::write(
           data_->ctrl[jm.actuator] = 0.0;
         }
       }
+      mju_zero(data_->qfrc_actuator, model_->nv);
       return hardware_interface::return_type::ERROR;
     }
     if (r.warn && !temp_warned_) {
@@ -445,8 +505,6 @@ hardware_interface::return_type MujocoSystemHardware::write(
       logger(), "仿真开始积分物理（%s，等待了 %ld 个周期）",
       any_torque ? "收到控制器力矩命令" : "超时兜底", cycles_since_activate_);
   }
-
-  mirror_finger();
 
   // 位置模式必须补重力项（qfrc_bias）：
   //   真机的 pos_vel 模式是**电机内部位置环**在顶着重力保持，而我们这里是自己做 PD。
@@ -517,7 +575,7 @@ hardware_interface::return_type MujocoSystemHardware::write(
     data_->qvel[jm.dof_adr] = 0.0;
   }
 
-  if (verbose_ && steps_total_ % 200 == 0) {
+  if (verbose_ && steps_total_ % b601_config::mujoco::diagnostic_log_steps == 0) {
     RCLCPP_INFO(
       logger(), "[sim] t=%.2fs q2=%.3f q3=%.3f q6=%.3f",
       steps_total_ * model_->opt.timestep, data_->qpos[joints_[1].qpos_adr],

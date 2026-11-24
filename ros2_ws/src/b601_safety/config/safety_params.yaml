@@ -99,6 +99,10 @@ b601_safety_monitor:
     estop_vel_absolute: 0.0
     warn_on_pose_deviation: true
     warn_pose_threshold: 0.35
+    joint_states_topic: /joint_states
+    joint_state_depth: 10
+    minimum_evaluate_rate_hz: 1.0
+    minimum_publish_rate_hz: 0.5
     status_topic: /b601_safety/status
     clear_service: /b601_safety/clear_estop
     deactivate_controllers:
@@ -106,4 +110,5 @@ b601_safety_monitor:
     deactivate_hardware: true
     hardware_component: b601
     service_timeout_sec: 2.0
+    service_discovery_timeout_sec: 0.5
     latch: true
