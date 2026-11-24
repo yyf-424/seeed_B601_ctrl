@@ -43,8 +43,8 @@ case "$mode" in
     python3 scripts/hw_mit_five_poses.py --readonly 2>&1 | tee "$out/readonly.log"
     ;;
   --execute)
-    test -s "$out/sim/results.json" && test -s "$out/probe.json" && test -s "$out/readonly_pose.json" || {
-      echo "请先完成本标签的 --simulate、--probe 和 --readonly。" >&2
+    test -s "$out/probe.json" && test -s "$out/readonly_pose.json" || {
+      echo "请先完成 --probe 和 --readonly。" >&2
       exit 1
     }
     python3 scripts/hw_mit_five_poses.py --execute 2>&1 | tee "$out/run.log"

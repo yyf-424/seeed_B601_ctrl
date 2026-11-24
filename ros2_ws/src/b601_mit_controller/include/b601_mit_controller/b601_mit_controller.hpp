@@ -43,7 +43,7 @@ private:
   enum class Mode { kHold, kMove };
 
   /// 用链常量 + 辨识参数算重力力矩（Newton-Euler 的静态项，见 b601_chain.hpp 注释）。
-  /// 输入是**整条链**的 6 个关节角，输出是 6 个关节各自的保持力矩。
+  /// 输入是整链的关节角，输出重力施加的力矩。保持力矩取其反向。
   void compute_gravity(
     const std::array<double, chain::kNumJoints> & q,
     std::array<double, chain::kNumJoints> & tau) const;
@@ -68,6 +68,7 @@ private:
   // 运行时可调（ros2 param set 立即生效），因此用 atomic 避免与实时线程竞争。
   // 首调安全流程就是靠它：先把 gravity_scale 设 0，确认稳定再逐级升到 1。
   std::atomic<double> gravity_scale_{b601_config::mit::gravity_scale};
+  std::vector<double> gravity_joint_scale_, gravity_bias_;
   std::atomic<double> friction_scale_{b601_config::mit::friction_scale};
   double task_torque_timeout_sec_{b601_config::mit::task_torque_timeout_sec};
   double target_velocity_timeout_sec_{b601_config::mit::target_velocity_timeout_sec};

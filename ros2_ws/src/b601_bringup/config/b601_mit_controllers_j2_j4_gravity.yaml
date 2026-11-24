@@ -1,0 +1,265 @@
+# ============================================================================
+# ⚠ 本文件由 scripts/sync_config.py 自动生成，请勿手工编辑。
+#    要改参数请改：ros2_ws/src/b601_description/config/b601_project.yaml
+#    改完执行：  ./scripts/sync_config.py
+# ============================================================================
+# MIT 力控（变刚度）控制器：一个实例控一组关节，参数来自真值的 controllers.mit 段。
+# 启动示例（电机侧 MIT，仿真）：
+#   ros2 launch b601_bringup bringup.launch.py hardware:=mujoco \
+#       dm_command_mode:=mit_impedance \
+#       controllers_file:=<本文件> \
+#       controllers:="joint_state_broadcaster b601_mit_arm b601_mit_gripper"
+# bringup 参数：mit_preset:=j2_j4_gravity
+controller_manager:
+  ros__parameters:
+    update_rate: 200
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    b601_mit_arm:
+      type: b601_mit_controller/B601MitController
+    b601_mit_gripper:
+      type: b601_mit_controller/B601MitController
+joint_state_broadcaster:
+  ros__parameters:
+    use_local_topics: false
+b601_mit_arm:
+  ros__parameters:
+    joints:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    chain_joints:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    target_slew:
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
+    state_interfaces:
+    - position
+    - velocity
+    kp_hold:
+    - 6.0
+    - 6.0
+    - 6.0
+    - 2.0
+    - 1.0
+    - 0.8
+    kd_hold:
+    - 1.63
+    - 3.15
+    - 2.67
+    - 0.37
+    - 0.21
+    - 0.13
+    kp_move:
+    - 115.0
+    - 120.025
+    - 190.0
+    - 30.0
+    - 36.0
+    - 28.0
+    kd_move:
+    - 5.0
+    - 5.0
+    - 5.0
+    - 3.501
+    - 1.2
+    - 0.82
+    friction:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    kp_free:
+    - 0.3
+    - 0.3
+    - 0.3
+    - 0.3
+    - 0.3
+    - 0.3
+    kd_free:
+    - 0.36
+    - 0.7
+    - 0.6
+    - 0.24
+    - 0.16
+    - 0.11
+    free_enabled: false
+    settle_band_min:
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    settle_band_max:
+    - 0.05
+    - 0.05
+    - 0.05
+    - 0.05
+    - 0.05
+    - 0.05
+    gravity_joint_scale:
+    - 0.0
+    - 1.0
+    - 0.0
+    - 1.0
+    - 0.0
+    - 0.0
+    gravity_bias:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    settle_band_pct: 0.05
+    settle_sec: 3.0
+    kp_up_sec: 0.8
+    kp_down_sec: 2.0
+    q_ref_lpf_hz: 30.0
+    track_timeout_sec: 0.0
+    motor_impedance: true
+    move_threshold: 0.08
+    hold_threshold: 0.03
+    vel_hold_threshold: 0.3
+    kp_ramp_sec: 0.35
+    velocity_lpf_hz: 6.0
+    gravity_scale: 1.0
+    friction_scale: 0.0
+    friction_vel_eps: 0.02
+    use_gravity: true
+    task_torque_timeout_sec: 0.0
+    target_velocity_timeout_sec: 0.25
+    gravity_params:
+    - 1.3266
+    - -0.124435
+    - -0.086111
+    - -0.0409
+    - 0.821833
+    - 0.070095
+    - 0.029823
+    - -0.025906
+    - 0.494982
+    - 0.06164
+    - -0.024109
+    - -0.015756
+    - 0.360243
+    - -0.013547
+    - -0.007382
+    - 0.017297
+    - 0.343277
+    - -0.002668
+    - -0.000196
+    - -0.002202
+    - 0.475011
+    - -0.048506
+    - 0.000262
+    - -0.002781
+    - 0.025011
+    - -0.011623
+    - 0.000267
+    - -0.002785
+    - 0.025011
+    - -0.011623
+    - 0.000267
+    - -0.002785
+b601_mit_gripper:
+  ros__parameters:
+    joints:
+    - finger_left
+    chain_joints:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    target_slew:
+    - 0.5
+    state_interfaces:
+    - position
+    - velocity
+    kp_hold:
+    - 65000.0
+    kd_hold:
+    - 12000.0
+    kp_move:
+    - 65000.0
+    kd_move:
+    - 12000.0
+    friction:
+    - 0.0
+    kp_free:
+    - 50.0
+    kd_free:
+    - 2.0
+    free_enabled: false
+    settle_band_min:
+    - 0.0005
+    settle_band_max:
+    - 0.0025
+    settle_band_pct: 0.05
+    settle_sec: 2.0
+    kp_up_sec: 0.5
+    kp_down_sec: 1.0
+    q_ref_lpf_hz: 30.0
+    track_timeout_sec: 0.0
+    motor_impedance: true
+    move_threshold: 0.01
+    hold_threshold: 0.002
+    vel_hold_threshold: 0.01
+    kp_ramp_sec: 0.5
+    velocity_lpf_hz: 6.0
+    gravity_scale: 0.0
+    friction_scale: 0.0
+    friction_vel_eps: 0.002
+    use_gravity: false
+    task_torque_timeout_sec: 0.0
+    target_velocity_timeout_sec: 0.25
+    gravity_params:
+    - 1.3266
+    - -0.124435
+    - -0.086111
+    - -0.0409
+    - 0.821833
+    - 0.070095
+    - 0.029823
+    - -0.025906
+    - 0.494982
+    - 0.06164
+    - -0.024109
+    - -0.015756
+    - 0.360243
+    - -0.013547
+    - -0.007382
+    - 0.017297
+    - 0.343277
+    - -0.002668
+    - -0.000196
+    - -0.002202
+    - 0.475011
+    - -0.048506
+    - 0.000262
+    - -0.002781
+    - 0.025011
+    - -0.011623
+    - 0.000267
+    - -0.002785
+    - 0.025011
+    - -0.011623
+    - 0.000267
+    - -0.002785

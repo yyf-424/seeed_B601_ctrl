@@ -38,12 +38,12 @@ b601_mit_arm:
     - joint5
     - joint6
     target_slew:
-    - 0.08
-    - 0.08
-    - 0.08
-    - 0.08
-    - 0.08
-    - 0.08
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
     state_interfaces:
     - position
     - velocity
@@ -174,7 +174,7 @@ b601_mit_gripper:
     - joint5
     - joint6
     target_slew:
-    - 0.02
+    - 0.5
     state_interfaces:
     - position
     - velocity

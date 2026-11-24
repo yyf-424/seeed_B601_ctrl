@@ -18,7 +18,9 @@ xacro、演示节点及命令行工具直接读取真值。MuJoCo 模型由 gen_
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import difflib
+import math
 import re
 import sys
 from pathlib import Path
@@ -183,6 +185,11 @@ def validate_mit(cfg: dict) -> list[str]:
                 errors.append(f"profile {pname} 的 per_joint 缺关节 {jname}（实例 {iname} 要用）")
     if not mit.get("shared", {}).get("gravity_params"):
         errors.append("control.mit.shared.gravity_params 为空（重力前馈会全是 0）")
+    for name in mit.get("presets", {}):
+        try:
+            apply_mit_preset(mit, name)
+        except ValueError as error:
+            errors.append(f"MIT 档位 {name}：{error}")
     return errors
 
 
@@ -321,8 +328,64 @@ MIT_ARRAY_KEYS = (
     "kp_hold", "kd_hold", "kp_move", "kd_move", "friction",
     "kp_free", "kd_free", "free_enabled",
     "settle_band_min", "settle_band_max",
+    "gravity_joint_scale", "gravity_bias",
 )
 # 组级（标量）键透传白名单不需要维护：group 里除 state_interfaces 外都原样透传。
+
+
+def apply_mit_preset(mit: dict, name: str) -> dict:
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", name) or name == "default":
+        raise ValueError("档位名称须为小写标识符且不能使用 default")
+    preset = mit["presets"][name]
+    configured = deepcopy(mit)
+    profiles = configured["profiles"]
+    arm = mit["instances"]["b601_mit_arm"]["profile"]
+    arm_profile = profiles[arm]
+    arm_joints = set(mit["instances"]["b601_mit_arm"]["joints"])
+    compensation_name = preset.get("compensation")
+    if compensation_name is not None:
+        compensation = mit.get("compensations", {}).get(compensation_name)
+        if compensation is None:
+            raise ValueError(f"未知重力补偿 {compensation_name}")
+        selected = set(preset.get("compensation_joints", arm_joints))
+        if not selected or not selected <= arm_joints or not selected <= compensation["per_joint"].keys():
+            raise ValueError("重力补偿必须覆盖所选手臂关节")
+        arm_profile["group"].update(compensation["group"])
+        for joint in arm_joints:
+            values = (
+                compensation["per_joint"][joint] if joint in selected
+                else dict.fromkeys(("gravity_joint_scale", "gravity_bias"), 0.0)
+            )
+            arm_profile["per_joint"][joint].update(values)
+    gain_name = preset.get("gain_reference")
+    if gain_name is not None:
+        gains = mit.get("gain_references", {}).get(gain_name)
+        if gains is None:
+            raise ValueError(f"未知参考增益 {gain_name}")
+        selected = set(preset.get("gain_joints", arm_joints))
+        if not selected or not selected <= arm_joints or not selected <= gains["per_joint"].keys():
+            raise ValueError("参考增益必须覆盖所选手臂关节")
+        for joint in selected:
+            arm_profile["per_joint"][joint].update(gains["per_joint"][joint])
+    for profile_name, overlay in preset.get("profiles", {}).items():
+        if profile_name not in profiles:
+            raise ValueError(f"未知 profile {profile_name}")
+        profile = profiles[profile_name]
+        profile["group"].update(overlay.get("group", {}))
+        for joint, values in overlay.get("per_joint", {}).items():
+            if joint not in profile["per_joint"] or not values.keys() <= set(MIT_ARRAY_KEYS):
+                raise ValueError(f"{profile_name}.{joint} 含未知关节或逐关节参数")
+            profile["per_joint"][joint].update(values)
+    for profile in profiles.values():
+        for joint, values in profile["per_joint"].items():
+            for key in ("gravity_joint_scale", "gravity_bias"):
+                if key not in values:
+                    continue
+                value = values[key]
+                if (not isinstance(value, (float, int)) or not math.isfinite(value)
+                        or (key != "gravity_bias" and value < 0.0)):
+                    raise ValueError(f"{joint}.{key} 非法")
+    return configured
 
 
 def _mit_params(cfg: dict, mit: dict, inst: dict) -> dict:
@@ -340,6 +403,9 @@ def _mit_params(cfg: dict, mit: dict, inst: dict) -> dict:
         "state_interfaces": list(group.pop("state_interfaces", ["position", "velocity"])),
     }
     for key in MIT_ARRAY_KEYS:
+        if key in group and not any(key in per_joint.get(jname, {}) for jname in joints):
+            params[key] = group.pop(key)  # 保留兼容的组级标量
+            continue
         values = []
         ok = True
         for jname in joints:
@@ -349,10 +415,9 @@ def _mit_params(cfg: dict, mit: dict, inst: dict) -> dict:
                 ok = False
                 break
             values.append(float(v) if not isinstance(v, bool) else bool(v))
+        group.pop(key, None)
         if ok and values:
             params[key] = values
-        else:
-            group.pop(key, None)
 
     for key, val in group.items():
         params[key] = val
@@ -361,9 +426,11 @@ def _mit_params(cfg: dict, mit: dict, inst: dict) -> dict:
     return params
 
 
-def render_mit_controllers(cfg: dict) -> str:
+def render_mit_controllers(cfg: dict, preset: str | None = None) -> str:
     """MIT 力控控制器 yaml（controller_manager 声明 + 每个实例的参数块）。"""
     mit = cfg["controllers"]["mit"]
+    if preset is not None:
+        mit = apply_mit_preset(mit, preset)
     instances = mit["instances"]
     cm_params: dict = {"update_rate": mit.get("update_rate", 200)}
     cm_params["joint_state_broadcaster"] = {
@@ -382,6 +449,8 @@ def render_mit_controllers(cfg: dict) -> str:
         + "#       controllers_file:=<本文件> \\\n"
         + "#       controllers:=\"joint_state_broadcaster " + " ".join(instances) + "\"\n"
     )
+    if preset is not None:
+        head += f"# bringup 参数：mit_preset:={preset}\n"
     data = {"controller_manager": {"ros__parameters": cm_params}}
     data.update(body)
     return head + dump_yaml(data)
@@ -450,7 +519,7 @@ def render_srdf(cfg: dict, path: Path) -> str:
 def render_all(cfg: dict) -> dict[Path, str]:
     moveit = WS_SRC / "b601_moveit_config" / "config"
     srdf = moveit / "b601_dm.srdf"
-    return {
+    outputs = {
         WS_SRC / "b601_description" / "config" / "initial_positions.yaml":
             render_initial_positions(cfg),
         WS_SRC / "b601_bringup" / "config" / "b601_controllers.yaml":
@@ -468,6 +537,10 @@ def render_all(cfg: dict) -> dict[Path, str]:
         moveit / "kinematics.yaml": GENERATED_NOTE + dump_yaml(cfg["moveit"]["kinematics"]),
         moveit / "ompl_planning.yaml": GENERATED_NOTE + dump_yaml(cfg["moveit"]["ompl_planning"]),
     }
+    for preset in cfg["controllers"]["mit"].get("presets", {}):
+        path = WS_SRC / "b601_bringup" / "config" / f"b601_mit_controllers_{preset}.yaml"
+        outputs[path] = render_mit_controllers(cfg, preset)
+    return outputs
 
 
 # ------------------------------------------------------------------------- 主流程

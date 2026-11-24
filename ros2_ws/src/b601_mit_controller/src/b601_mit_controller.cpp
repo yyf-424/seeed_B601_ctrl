@@ -316,6 +316,22 @@ controller_interface::CallbackReturn B601MitController::on_init()
 
     ensure("gravity_scale", gravity_scale_.load());
     gravity_scale_ = std::min(b601_config::mit::gravity_scale_max, std::max(0.0, node->get_parameter("gravity_scale").as_double()));
+    const auto n = joint_names_.size();
+    ensure("gravity_joint_scale", b601_config::mit::gravity_joint_scale_default);
+    ensure("gravity_bias", b601_config::mit::gravity_bias_default);
+    gravity_joint_scale_ = to_per_joint("gravity_joint_scale", node->get_parameter("gravity_joint_scale"), n);
+    gravity_bias_ = to_per_joint("gravity_bias", node->get_parameter("gravity_bias"), n);
+    const auto valid_values = [n](const std::vector<double> & values, bool signed_values) {
+        return values.size() == n &&
+               std::all_of(values.begin(), values.end(), [signed_values](double value) {
+                 return std::isfinite(value) && (signed_values || value >= 0.0);
+               });
+      };
+    if (!valid_values(gravity_joint_scale_, false) || !valid_values(gravity_bias_, true))
+    {
+      RCLCPP_ERROR(node->get_logger(), "逐关节重力补偿参数或变化率无效");
+      return controller_interface::CallbackReturn::ERROR;
+    }
     ensure("friction_scale", friction_scale_.load());
     friction_scale_ = std::min(b601_config::mit::friction_scale_max, std::max(0.0, node->get_parameter("friction_scale").as_double()));
     // 旧的"误差阈值调度"参数（move/hold_threshold、vel_hold_threshold、kp_ramp_sec）
@@ -901,6 +917,8 @@ controller_interface::return_type B601MitController::update(
 
   // ================== ⑤ 变刚度（线性速率斜坡） ==================
   const double ramp_sec = done_ ? kp_down_sec_ : kp_up_sec_;
+  const double gravity_scale = gravity_scale_.load();
+  const double friction_scale = friction_scale_.load();
 
   for (std::size_t i = 0; i < n; ++i) {
     const bool authoritative = !done_ || !free_enabled_[i];
@@ -912,10 +930,12 @@ controller_interface::return_type B601MitController::update(
     kp_cur_[i] = move_toward(kp_cur_[i], kp_tgt, kp_step);
     kd_cur_[i] = move_toward(kd_cur_[i], kd_tgt, kd_step);
 
-    const double gravity = gravity_row_[i] >= 0
-      ? -gravity_scale_.load() * tau_g_[static_cast<std::size_t>(gravity_row_[i])] : 0.0;
+    const double gravity = use_gravity_ && gravity_row_[i] >= 0
+      ? gravity_scale * (gravity_bias_[i] -
+        gravity_joint_scale_[i] * tau_g_[static_cast<std::size_t>(gravity_row_[i])])
+      : 0.0;
     const double friction =
-      -friction_scale_.load() * friction_[i] * std::tanh(qd_f_[i] / friction_vel_eps_);
+      -friction_scale * friction_[i] * std::tanh(qd_f_[i] / friction_vel_eps_);
     const double task_torque = task_fresh ? task->torque[i] : 0.0;
     ff_components_[i] = friction;
     ff_components_[n + i] = gravity;

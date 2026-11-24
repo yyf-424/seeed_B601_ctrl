@@ -18,12 +18,24 @@ from b601_description.project_config import load_project_config
 _PROJECT = load_project_config()
 ARM_JOINTS = tuple(_PROJECT["robot"]["arm_joints"])
 GRIPPER_JOINT = _PROJECT["robot"]["gripper_joint"]
+RECENTER_POSITIONS = tuple(_PROJECT["recenter"]["joints"][name] for name in ARM_JOINTS)
+RECENTER_TOLERANCE = _PROJECT["recenter"]["position_tolerance_rad"]
 _JOINTS = _PROJECT["joints"]
 
 # 限位直接来自统一配置，不再在本文件抄一份（历史上抄过 ±2.8，和 URDF 的 ±2.60 打架）
 JOINT_LOWER = {name: float(j["min_pos"]) for name, j in _JOINTS.items()}
 JOINT_UPPER = {name: float(j["max_pos"]) for name, j in _JOINTS.items()}
 JOINT_VEL_MAX = {name: float(j["max_velocity"]) for name, j in _JOINTS.items()}
+
+
+def at_recenter(positions):
+    """检查六轴反馈是否同时满足停放位容差和关节限位。"""
+    return len(positions) == len(ARM_JOINTS) and all(
+        max(JOINT_LOWER[name], target - RECENTER_TOLERANCE)
+        <= actual
+        <= min(JOINT_UPPER[name], target + RECENTER_TOLERANCE)
+        for name, actual, target in zip(ARM_JOINTS, positions, RECENTER_POSITIONS)
+    )
 
 
 def check_limits(joint_names, positions):

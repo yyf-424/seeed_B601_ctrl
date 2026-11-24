@@ -4,7 +4,7 @@
 重力、摩擦和任务力矩，验收配置三项均为零。手臂六轴和主动夹爪五姿态通过 5/5，
 逐轴通过 35/35。见 [发布记录](CHANGELOG.md) 和 [逐姿态反馈](validation/results.json)。
 
-## 环境和离线门禁
+## 环境和离线回归
 
 在本标签的检出目录执行。需要 Ubuntu 22.04、ROS 2 Humble、ros2_control、MoveIt 2、Python
 `motorbridge` 和 `mujoco`。可用 `./scripts/install_deps.sh core control moveit` 查看 ROS 依赖。
@@ -29,7 +29,7 @@ source ros2_ws/install/setup.bash
 
 整机运动约束由 `joints.min_pos/max_pos`、`joints.max_velocity`、`joints.max_effort` 和
 `target_slew` 提供。手臂速度上限为 6.0 rad/s，夹爪为 0.05 m/s。位置目标的斜率分别为
-0.08 rad/s 和 0.02 m/s。MIT 的总输出包括 PD 和前馈。关节端 MIT 在下发前用最新反馈估算
+0.5 rad/s 和 0.5 m/s。MIT 的总输出包括 PD 和前馈。关节端 MIT 在下发前用最新反馈估算
 总力矩，电机仍按内部高速闭环计算。温度、总线故障和反馈失效继续触发停机保护。
 
 ```bash
@@ -50,7 +50,34 @@ rm "$model"
 ```
 
 位置回路使用 `./scripts/dm_park.sh` 核对归中并失能，`--keep-enabled` 用于只归中核对。
-关节端 MIT 验收脚本使用自身的归中和失能流程。
+关节端 MIT 归中核对使用 `recenter.joints` 的校准停放位。六轴实测位置须同时落在整机关节限位内，与各自停放目标相差不超过 0.01 rad。
+
+## 电机侧 MIT 重力补偿
+
+档位从统一配置的 `controllers.mit` 生成。下列实机档关闭变刚度和摩擦前馈，
+手臂的 PD 在电机侧闭环。未启用重力补偿的关节及夹爪沿用基线 PD。
+
+| `mit_preset` | 重力补偿关节 |
+|---|---|
+| `j4_gravity_friction_pd` | J4 |
+| `j2_j4_gravity` | J2、J4 |
+| `j2_j3_j4_gravity` | J2、J3、J4 |
+| `j2_j3_j4_j5_gravity` | J2、J3、J4、J5 |
+
+合并档中 J2/J3 为 120.025/5.0，J4 为 30.0/3.501，J5 为 18.0/2.0。
+J2/J3/J5 的增益编码与 Orin 0002 一致。J4 用实机结果选定比例增益，阻尼编码与 Orin 一致。
+
+2026-11-25 实机复测中，J2/J3 的负向 0.10、0.30、0.50 rad 均通过 5% 误差带。
+J4 的负向 0.30 和 0.50 rad 通过，0.10 rad 末段误差为 10.01%。
+J4 上抬至约 −45.3° 时，J5 的负向和正向 0.30 rad 末段误差分别为 2.22% 和 0.18%。
+
+以下命令用合并档回读实机状态。使能和运动需现场确认。
+
+```bash
+ros2 launch b601_bringup bringup.launch.py hardware:=dm \
+  dm_command_mode:=mit_impedance mit_preset:=j2_j3_j4_j5_gravity \
+  dm_enable_motors:=false use_rviz:=false
+```
 
 ## 6+1 MIT 真机复测
 
@@ -66,6 +93,7 @@ export B601_VENDOR_DESCRIPTION=/path/to/rebotarm_ros2/src/rebotarm_bringup
 ./scripts/hw_mit_five_poses.sh --readonly
 ```
 
+仿真结果只用于评估控制器稳定性。真机复测以现场确认、探针和只读回读为准。
 确认探针回读的七台电机处于 MIT 模式，方向已核对，机械臂与夹爪均处于配置的停放范围。
 现场确认后执行。入口先检查厂商网格碰撞，再从小幅动作开始。
 

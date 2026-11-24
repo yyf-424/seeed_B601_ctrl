@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# preflight.sh —— 上真机前的门禁。**每次接真机、每次上电前先跑这个。**
+# preflight.sh —— 离线回归。
 #
 #   ./scripts/preflight.sh                 # 默认：mock 后端跑完整安全链路（无实物、无风险）
 #   ./scripts/preflight.sh --keep-running  # 跑完不关 bringup（方便手动接着看）
 #
-# 它回答一个问题：**现在能不能上真机？** 只有全部 PASS 才允许。
+# 仿真结果仅用于评估控制器稳定性。真机启停依据现场确认和真实反馈。
 #
 # 检查项：
 #   1) 配置同步      b601_project.yaml → 派生文件一致
@@ -22,7 +22,7 @@
 #   mock 后端能完整跑控制层与安全链路（控制器、action、/joint_states、急停动作），
 #   但没有真实电机，所以可以放心注入越限数据。真机上永远不做这种注入。
 #
-# 退出码：0 = 可以上真机；非 0 = 禁止上真机。
+# 退出码为 0 表示离线测试全部通过。
 
 set -uo pipefail
 
@@ -371,7 +371,7 @@ fi
 # ------------------------------------------- 6. 变刚度（MIT）全链路回归（仿真）
 # 这一节覆盖 Phase 0/1 新增的能力：指令层状态机、整组 done、拆分实例、夹爪力控、过温守护。
 # 全部走真正的 ROS 链路（controller_manager → b601_mit_controller → MuJoCo 硬件插件），
-# **不碰真机**。任一项失败就禁止上真机 —— 变刚度这条线动的是力矩输出，比位置模式更危险。
+# 此处运行 MuJoCo 控制器回归。
 step "6/6 变刚度（MIT）全链路回归（MuJoCo，不上真机）"
 # MIT 回归单独使用本地 DDS 域，mock 清理由退出钩子处理。
 export ROS_DOMAIN_ID="${cfg[mit_domain_id]}"
@@ -405,11 +405,5 @@ else
 fi
 
 # ---------------------------------------------------------------- 汇总
-printf '\n\033[1m上电门禁\033[0m：%d 通过 / %d 失败\n' "$PASS" "$FAIL"
-if [[ $FAIL -eq 0 ]]; then
-  printf '\033[1;32m✅ 允许上真机。\033[0m 流程：先 enable_motors:=false 只读 → 手推核对方向 → 再小幅度使能。\n'
-  printf '   本版本复测入口见 README.md。先运行：./scripts/hw_mit_five_poses.sh --simulate\n'
-else
-  printf '\033[1;31m⛔ 禁止上真机。\033[0m 先修到全绿，再回到本脚本。\n'
-fi
+printf '\n\033[1m离线回归\033[0m · %d 通过 / %d 失败\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

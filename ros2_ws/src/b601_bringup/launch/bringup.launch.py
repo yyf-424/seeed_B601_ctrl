@@ -74,6 +74,7 @@ def generate_launch_description():
     use_safety = LaunchConfiguration("use_safety")
     use_sim_time = LaunchConfiguration("use_sim_time")
     controllers_file = LaunchConfiguration("controllers_file")
+    mit_preset = LaunchConfiguration("mit_preset")
     safety_params_file = PathJoinSubstitution([safety_share, "config", "safety_params.yaml"])
     initial_positions_file = LaunchConfiguration("initial_positions_file")
     project_config_file = LaunchConfiguration("project_config_file")
@@ -117,8 +118,17 @@ def generate_launch_description():
     # 它按 URDF 里的 <ros2_control> 加载硬件插件，按 controllers yaml 加载控制器。
     def launch_manager(context):
         is_mit = dm_command_mode.perform(context) == "mit_impedance"
-        default_file = "b601_mit_controllers.yaml" if is_mit else "b601_controllers.yaml"
-        config_file = controllers_file.perform(context) or PathJoinSubstitution(
+        preset = mit_preset.perform(context)
+        config_override = controllers_file.perform(context)
+        if preset != "default":
+            if not is_mit or hardware.perform(context) not in ("dm", "mujoco"):
+                raise RuntimeError("mit_preset 需要 dm 或 mujoco 后端及 dm_command_mode:=mit_impedance")
+            if config_override:
+                raise RuntimeError("mit_preset 与 controllers_file 只能指定其中一个")
+            default_file = f"b601_mit_controllers_{preset}.yaml"
+        else:
+            default_file = "b601_mit_controllers.yaml" if is_mit else "b601_controllers.yaml"
+        config_file = config_override or PathJoinSubstitution(
             [bringup_share, "config", default_file]
         ).perform(context)
         return [Node(
@@ -214,6 +224,11 @@ def generate_launch_description():
                 "controllers_file",
                 default_value="",
                 description="控制器配置文件，留空按 dm_command_mode 自动选择",
+            ),
+            DeclareLaunchArgument(
+                "mit_preset", default_value="default",
+                choices=["default", *ctrls["mit"].get("presets", {})],
+                description="电机侧 MIT 档位，参数来自 b601_project.yaml",
             ),
             DeclareLaunchArgument(
                 "controllers", default_value="",

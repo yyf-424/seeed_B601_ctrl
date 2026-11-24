@@ -22,6 +22,8 @@ from mit_five_poses import (
     check_plan, checked_sample, score_hardware_pose, validate_configuration,
 )
 
+from b601_demos.trajectory_utils import RECENTER_POSITIONS, RECENTER_TOLERANCE, at_recenter
+
 from project_config import ROOT
 
 HARDWARE = PLAN["hardware_retest"]
@@ -33,10 +35,7 @@ CONTROLLERS = ["joint_state_broadcaster", "b601_mit_arm", "b601_mit_gripper"]
 ARM = CONFIG["robot"]["arm_joints"]
 GRIPPER = CONFIG["robot"]["gripper_joint"]
 GRIPPER_INDEX = len(ARM)
-PARK_TOLERANCE = CONFIG["recenter"]["position_tolerance_rad"]
-PARK = [CONFIG["recenter"]["joints"][name] for name in ARM] + [
-    HARDWARE["gripper_parking_target_m"],
-]
+PARK = [*RECENTER_POSITIONS, HARDWARE["gripper_parking_target_m"]]
 PERIOD = 1 / PLAN["publish_rate_hz"]
 
 
@@ -294,7 +293,7 @@ def run(node):
     validate_configuration(bringup_config('b601_mit_controllers.yaml'))
     probe = json.loads((OUT / "probe.json").read_text())
     initial = json.loads((OUT / "readonly_pose.json").read_text())
-    if max(abs(a - b) for a, b in zip(initial[:6], PARK[:6])) > HARDWARE["initial_arm_tolerance_rad"]:
+    if not at_recenter(initial[:GRIPPER_INDEX]):
         raise RuntimeError(f"初始手臂超出归中启动范围：{initial[:GRIPPER_INDEX]}")
     if abs(initial[GRIPPER_INDEX] - PARK[GRIPPER_INDEX]) > HARDWARE["initial_gripper_tolerance_m"]:
         raise RuntimeError(f"初始夹爪未接近闭合：{initial[6]:.5f} m")
@@ -324,7 +323,7 @@ def run(node):
         process = bringup(True)
         ready(node, process, "hardware")
         q, _ = state(node)
-        if max(abs(a - b) for a, b in zip(q[:6], PARK[:6])) > HARDWARE["initial_arm_tolerance_rad"]:
+        if not at_recenter(q[:GRIPPER_INDEX]):
             raise RuntimeError(f"使能后起点漂移超限：{q}")
         print(f'6+1 电机侧 MIT 已使能，执行 {HARDWARE["small_step_joint"]} '
               f'{HARDWARE["small_step_rad"]} rad 预检查。', flush=True)
@@ -363,7 +362,8 @@ def run(node):
                                        settle=HARDWARE["park_settle_sec"])
                     print("归中", json.dumps(park), flush=True)
                     summary["park"] = park
-                    if park["arm_max_error_rad"] > PARK_TOLERANCE:
+                    parked = at_recenter(park["after"][:GRIPPER_INDEX])
+                    if not parked:
                         correction = in_range([
                             2 * goal - feedback
                             for goal, feedback in zip(PARK, park["after"])
@@ -375,18 +375,19 @@ def run(node):
                             abs(a - b) for a, b in zip(PARK[:6], fine["after"][:6]))
                         summary["park_fine"] = fine
                         print("归中微调", json.dumps(fine), flush=True)
-                        park_error = fine["arm_max_park_error_rad"]
+                        parked = at_recenter(fine["after"][:GRIPPER_INDEX])
                         park_speed = fine["arm_end_speed_rad_s"]
                     else:
-                        park_error = park["arm_max_error_rad"]
                         park_speed = park["arm_end_speed_rad_s"]
-                    if park_error <= PARK_TOLERANCE and park_speed <= CRITERIA["arm_end_speed_rad_s"]:
+                    if parked and park_speed <= CRITERIA["arm_end_speed_rad_s"]:
                         disable_parked(node)
                         summary["disabled"] = True
                         safe_to_stop = True
                         print("已确认归中，硬件 INACTIVE。", flush=True)
                     else:
-                        raise RuntimeError(f"归中反馈未达 {PARK_TOLERANCE} rad，保留当前控制器持位")
+                        raise RuntimeError(
+                            f"归中未通过位置容差 {RECENTER_TOLERANCE:g} rad 或停稳检查，保留当前控制器持位"
+                        )
     except RuntimeError as exc:
         if process is not None and node.status_level >= 2:
             summary["estop_fault"] = str(exc)

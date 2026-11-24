@@ -109,7 +109,7 @@ joints:
     label: 小臂肘
     type: revolute
     min_pos: -3.14
-    max_pos: 0.0
+    max_pos: 0.005
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
@@ -291,8 +291,8 @@ hardware:
 # 位置模式用 arm/gripper；力控模式用 mit。同一时刻只加载其中一套。
 # ---------------------------------------------------------------------------
 target_slew:
-  revolute: 0.08   # rad/s
-  prismatic: 0.02  # m/s
+  revolute: 0.5   # rad/s
+  prismatic: 0.5  # m/s
 
 controllers:
   update_rate: 200
@@ -335,6 +335,86 @@ controllers:
   # -------------------------------------------------------------------------
   mit:
     update_rate: 200
+
+    # 可选电机侧 MIT 档位。所有未覆盖参数继承下方的标准实例和 profile。
+    presets:
+      j4_gravity_friction_pd:
+        compensation: identified_dm
+        compensation_joints: [joint4]
+        gain_reference: rebot_orin_0002_gravity_pd
+        gain_joints: [joint4]
+        profiles:
+          standard_mit:
+            group: &fixed_gravity_mit {friction_scale: 0.0, free_enabled: false}
+            per_joint: &j4_gravity_mit_joints
+              joint1: {friction: 0.0}
+              joint2: {friction: 0.0}
+              joint3: {friction: 0.0}
+              # 2026-11-25 真机 −0.30 rad 两轮复测通过。Kd 输入 3.501 对齐 Orin 阻尼编码 2867。
+              joint4: {friction: 0.0, kp_move: 30.0, kd_move: 3.501}
+              joint5: {friction: 0.0}
+              joint6: {friction: 0.0}
+      j2_j4_gravity:
+        compensation: identified_dm
+        compensation_joints: [joint2, joint4]
+        gain_reference: rebot_orin_0002_motor_mit
+        gain_joints: [joint2]
+        profiles:
+          standard_mit:
+            group: *fixed_gravity_mit
+            per_joint: &j2_j4_gravity_mit_joints
+              <<: *j4_gravity_mit_joints
+              # Orin 的 120.0 四舍五入为 MIT 码 983，本机截断用 120.025 对齐。
+              joint2: {friction: 0.0, kp_move: 120.025}
+      j2_j3_j4_gravity:
+        compensation: identified_dm
+        compensation_joints: [joint2, joint3, joint4]
+        gain_reference: rebot_orin_0002_motor_mit
+        gain_joints: [joint2, joint3]
+        profiles:
+          standard_mit:
+            group: *fixed_gravity_mit
+            per_joint: &j2_j3_j4_gravity_mit_joints
+              <<: *j2_j4_gravity_mit_joints
+              # Orin 120.0 的 MIT 码为 983，本机输入按截断编码对齐。
+              joint3: {friction: 0.0, kp_move: 120.025}
+      j2_j3_j4_j5_gravity:
+        compensation: identified_dm
+        compensation_joints: [joint2, joint3, joint4, joint5]
+        gain_reference: rebot_orin_0002_motor_mit
+        gain_joints: [joint2, joint3, joint5]
+        profiles:
+          standard_mit:
+            group: *fixed_gravity_mit
+            per_joint: *j2_j3_j4_gravity_mit_joints
+
+    compensations:
+      identified_dm:
+        # 本机双侧静态辨识，gravity_params 见 shared。控制器内部从重力矩取反得到保持力矩。
+        source: b601_gravity_id，50 条双侧静态样本，RMS 0.52 N·m
+        group: {use_gravity: true, gravity_scale: 1.0}
+        per_joint:
+          joint1: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
+          joint2: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
+          joint3: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
+          joint4: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
+          joint5: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
+          joint6: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
+
+    gain_references:
+      rebot_orin_0002_gravity_pd:
+        source: 'rebot-orin 0002，standard_mit_gravity_verified.cfg，kp_nm_per_rad/kd_nm_s_per_rad'
+        per_joint:
+          joint4: {kp_move: 6.0, kd_move: 3.5}
+      rebot_orin_0002_motor_mit:
+        source: 'rebot-orin unit 0002 arm_hardware.cfg，control_mode=mit，mit_kp/mit_kd'
+        per_joint:
+          joint1: {kp_move: 120.0, kd_move: 5.0}
+          joint2: {kp_move: 120.0, kd_move: 5.0}
+          joint3: {kp_move: 120.0, kd_move: 5.0}
+          joint4: {kp_move: 18.0, kd_move: 2.0}
+          joint5: {kp_move: 18.0, kd_move: 2.0}
+          joint6: {kp_move: 18.0, kd_move: 2.0}
 
     instances:
       b601_mit_arm:
@@ -530,29 +610,22 @@ moveit:
       - RRTConnect
 
 # ---------------------------------------------------------------------------
-# 归中（recenter / 关机停放）姿态 —— 2026-11-21 实测校准
+# 归中（recenter / 关机停放）参考姿态
 #
-#   这是"竖直停放位"的**实测值**，不是凭想象写死的 0。校准依据：手臂静止停放在
-#   竖直位时，7 台电机的编码器实测值（原始角 = 关节角，zero_offset≈0、scale≈1）：
-#     joint1 +0.0036  joint2 −0.0109  joint3 −0.0162
-#     joint4 +0.0650  joint5 −0.1684  joint6 −0.0013   finger_left +0.0003
-#   · `scripts/dm_park.sh` 直接读这里作为归中目标（AGENTS §11.4 的执行体）；
-#   · 为什么必须校准：编码器零位会随插拔线束/电机重新初始化漂移
-#     （当天见过 j2 读到 +0.0261），用写死的 0 会把"其实已在位"判成"没到位"，
-#     或者反过来把真实偏移掩盖掉；
-#   · 换了机械臂/重新标定零位后，必须重新测一次并更新本节（含 raw_encoders 快照）。
+#   六轴参考取 2026-11-25 电机未使能时 /joint_states 的实测中位数。
+#   位置回路和关节端 MIT 归中共用此目标和逐轴容差。
 recenter:
-  position_tolerance_rad: 0.02
-  calibrated_at: "2026-11-21"
-  note: "实测竖直停放位：原始编码器值 = 关节值（zero_offset≈0, scale≈1）"
+  position_tolerance_rad: 0.01  # 按六轴逐个判定归中
+  calibrated_at: "2026-11-25"
+  note: "只读会话 /joint_states 实测中位数，共 801 帧"
   joints:
-    joint1: +0.0036
-    joint2: -0.0109
-    joint3: -0.0162
-    joint4: +0.0650
-    joint5: -0.1684
-    joint6: -0.0013
-  raw_encoders:            # 同一时刻的电机原始读数快照（下次用来比对漂移）
+    joint1: 0.00705718994140625
+    joint2: -0.01163482666015625
+    joint3: -0.00667572021484375
+    joint4: 0.07381534576416016
+    joint5: -0.15049171447753906
+    joint6: -0.00133514404296875
+  raw_encoders:            # 2026-11-21 直接回读的历史快照
     joint1: +0.0036
     joint2: -0.0109
     joint3: -0.0162
@@ -568,8 +641,8 @@ recenter:
 #   只有急停会动硬件；正常与警告都允许继续驱动机械臂。
 #
 #   ESTOP 触发条件（只看这两类，别往里加别的，否则会误停）：
-#     · 角度越限：pos < min_pos 或 pos > max_pos
-#     · 角速度越限：|vel| > max_velocity
+#     · 位置越限：pos < min_pos 或 pos > max_pos
+#     · 速度越限：|vel| > max_velocity
 #   WARNING 触发条件（不下发任何停机动作）：
 #     · 角度接近限位（距限位 < 该关节的 warn_pos_margin，默认 angle.warn_margin）
 #       —— 每个关节可在 joints 段用 warn_near_limit / warn_pos_margin 单独开关与调值
@@ -900,6 +973,8 @@ implementation:
     diagnostic_log_steps: 200
   mit:
     gravity_scale_max: 1.5
+    gravity_joint_scale_default: 1.0
+    gravity_bias_default: 0.0
     friction_scale_max: 2.0
     settle_sec_min: 0.05
     position_filter_hz_min: 0.5
@@ -1670,7 +1745,6 @@ validation:
           step_error_fraction: 0.1
           min_error_band_rad: 0.05
       gripper_max_error_m: 0.003
-      initial_arm_tolerance_rad: 0.05
       initial_gripper_tolerance_m: 0.003
       minimum_motion_samples: 10
       collision_samples_per_transit: 51

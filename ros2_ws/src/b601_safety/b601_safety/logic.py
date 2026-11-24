@@ -34,15 +34,6 @@ LEVEL_ERROR = 2
 
 STATE_LEVEL = {NORMAL: LEVEL_OK, WARNING: LEVEL_WARN, EMERGENCY_STOP: LEVEL_ERROR}
 
-# 判定容差：浮点比较用的"物理噪声底"，不是数学 ε。
-#   · 关节角单位 rad：1e-3 rad ≈ 0.057°，远小于任何真实安全余量（警告余量 0.12 rad）
-#   · 夹爪单位 m：1e-3 m = 1 mm
-# 为什么不能取 1e-6：2026-11-21 真机实测，夹爪停在 0.000（限位边界）时编码器量化
-# 会报 ±1.9e-6，1e-6 的容差挡不住 → 判定"越限"→ 假急停把整条手臂失能。
-# 编码器/ADC 的量化台阶（夹爪约 2e-6 m、关节约 2e-3 rad 量级）必须在容差里被吸收。
-EPS = 1e-3
-
-
 def _broadcast(value, n: int) -> list:
     """标量 → 长度 n 的列表（兼容"只配一个值"的写法）。"""
     if isinstance(value, (list, tuple)):
@@ -156,18 +147,18 @@ def evaluate(
         # ---- 急停条件 ①：角度越限 ----
         low_limit = limits.pos_min[i]
         high_limit = limits.pos_max[i]
-        over_low = pos < low_limit - EPS
-        over_high = pos > high_limit + EPS
+        over_low = pos < low_limit
+        over_high = pos > high_limit
         if over_low or over_high:
             details[name]["violation"] = "position"
             estop_reasons.append(
-                f"{name} 角度 {pos:+.4f} 越限 [{limits.pos_min[i]:.3f}, {limits.pos_max[i]:.3f}]"
+                f"{name} 位置 {pos:+.4f} 越限 [{low_limit:.4f}, {high_limit:.4f}]"
             )
 
         # ---- 急停条件 ②：角速度越限 ----
         vel_threshold = limits.velocity_estop_threshold(i)
         speed = abs(vel)
-        if speed > vel_threshold + EPS:
+        if speed > vel_threshold:
             details[name]["violation"] = "velocity"
             estop_reasons.append(
                 f"{name} 角速度 {speed:.3f} 超过上限 {vel_threshold:.3f}"
