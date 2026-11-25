@@ -11,6 +11,7 @@ const rows = new Map();
 const edited = new Set();
 let snapshot = { feedback: {}, limits: {} };
 let busy = false;
+let recenterPending = false;
 let robotView;
 
 function sourceLabel(source) {
@@ -20,13 +21,16 @@ function sourceLabel(source) {
 function refreshRobotView() {
   if (!robotView) return;
   const state = snapshot.status;
-  const target = { ...(!state?.holding_after_loss && state?.last_forwarded?.position) };
-  let label = "最近下发目标";
-  for (const name of edited) {
-    const input = rows.get(name).number;
-    if (Number.isFinite(input.valueAsNumber) && input.checkValidity()) {
-      target[name] = input.valueAsNumber;
-      label = "待发送预览";
+  const forwarded = state?.last_forwarded;
+  const target = { ...(!state?.holding_after_loss && forwarded?.position) };
+  let label = forwarded?.source === "recenter" ? "归中目标" : "最近下发目标";
+  if (!recenterPending && state?.source !== "recenter") {
+    for (const name of edited) {
+      const input = rows.get(name).number;
+      if (Number.isFinite(input.valueAsNumber) && input.checkValidity()) {
+        target[name] = input.valueAsNumber;
+        label = "待发送预览";
+      }
     }
   }
   robotView.update({
@@ -234,12 +238,15 @@ element("release").addEventListener("click", () => mutate(async () => {
 }));
 recenterButton.addEventListener("click", () => mutate(async () => {
   const current = session?.publicId === snapshot.status?.session ? session : undefined;
+  recenterPending = true;
   recenterButton.textContent = "正在归中…";
   notice("正在归中…");
+  refreshRobotView();
   try {
     const result = await api("/api/recenter", { session_id: current?.id });
     notice(result.message);
   } finally {
+    recenterPending = false;
     recenterButton.textContent = "一键归中";
   }
 }));
