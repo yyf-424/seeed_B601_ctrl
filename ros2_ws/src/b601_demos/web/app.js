@@ -4,7 +4,7 @@ const element = (id) => document.getElementById(id);
 const inputSource = element("input-source");
 const backendSelect = element("backend");
 const connectButton = element("connect");
-const disconnectSimulation = element("disconnect-simulation");
+const disableButton = element("disable");
 const recenterButton = element("recenter");
 const sourceLabels = new Map([
   ["web", "网页"], ["policy", "外部策略"], ["external", "外部接口"], ["recenter", "归中"],
@@ -112,17 +112,17 @@ function refreshBackend() {
   const backend = snapshot.backend;
   if (backend?.name && backend.name !== shownBackend) backendSelect.value = backend.name;
   shownBackend = backend?.name;
-  backendSelect.disabled = busy || !backend || (!backend.can_connect && !backend.can_disconnect);
-  connectButton.disabled = busy || !backend || (!backend.can_connect && backendSelect.value !== "mock");
-  disconnectSimulation.hidden = !backend?.can_disconnect;
-  disconnectSimulation.disabled = busy;
+  backendSelect.disabled = busy || !backend?.can_connect;
+  connectButton.disabled = busy || !backend?.can_connect;
+  disableButton.disabled = busy || !backend?.can_disable;
   const connection = element("connection");
   connection.dataset.connected = String(backend?.phase === "connected");
   connection.textContent = backend?.message || "等待连接";
   const feedback = element("backend-feedback");
   feedback.dataset.error = String(!!backendReply?.error || backend?.phase === "error");
   feedback.textContent = backend?.log || backendReply?.message
-    || (backendSelect.value === "dm" && backend?.can_connect ? "连接实机将使能电机，请先确认现场可运动。" : "");
+    || (backend?.phase === "connected" && !backend.can_disable ? "归中到位后可点击 Disable。"
+      : backendSelect.value === "dm" && backend?.can_connect ? "连接实机将使能电机，请先确认现场可运动。" : "");
 }
 
 async function changeBackend(path, payload) {
@@ -254,7 +254,7 @@ backendSelect.addEventListener("change", () => {
 });
 connectButton.addEventListener("click", () => mutate(() =>
   changeBackend("/api/connect", { backend: backendSelect.value })));
-disconnectSimulation.addEventListener("click", () => mutate(() => changeBackend("/api/disconnect_simulation", {})));
+disableButton.addEventListener("click", () => mutate(() => changeBackend("/api/disable", {})));
 
 inputSource.addEventListener("input", refresh);
 element("acquire").addEventListener("click", () => mutate(async () => {

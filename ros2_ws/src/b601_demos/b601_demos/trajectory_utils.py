@@ -21,6 +21,7 @@ _PROJECT = load_project_config()
 ARM_JOINTS = tuple(_PROJECT["robot"]["arm_joints"])
 GRIPPER_JOINT = _PROJECT["robot"]["gripper_joint"]
 RECENTER_POSITIONS = tuple(_PROJECT["recenter"]["joints"][name] for name in ARM_JOINTS)
+RECENTER_COMPLETED = "/b601_mit_recenter/completed_dispatch"
 RECENTER_TOLERANCE = _PROJECT["recenter"]["position_tolerance_rad"]
 _JOINTS = _PROJECT["joints"]
 
@@ -45,6 +46,14 @@ def mit_recenter_tolerances(project):
 def recenter_position_bounds(home, tolerances, bounds):
     return tuple((max(low, target - tolerance), min(high, target + tolerance))
                  for target, tolerance, (low, high) in zip(home, tolerances, bounds))
+
+
+def mit_recenter_bounds(project):
+    arm = project["robot"]["arm_joints"]
+    home = (project["recenter"]["joints"][name] for name in arm)
+    limits = ((project["joints"][name]["min_pos"], project["joints"][name]["max_pos"])
+              for name in arm)
+    return recenter_position_bounds(home, mit_recenter_tolerances(project), limits)
 
 
 def at_recenter(positions, *, mit=False):

@@ -12,11 +12,14 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String, UInt64
+from std_srvs.srv import SetBool
 
 from b601_target_interfaces.msg import AuthorizedTarget, TargetFrame
 from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource, SelectSource, SetAuthority, SetTarget
 
 from b601_description.project_config import load_project_config
+
+from .trajectory_utils import RECENTER_COMPLETED, mit_recenter_bounds
 
 ARBITER = "/b601_target_arbiter"
 
@@ -39,7 +42,12 @@ class TargetArbiter(Node):
         self.routes = {name: tuple(joints) for name, joints in json.loads(routes).items()}
         self.limits = project["joints"]
         robot = project["robot"]
-        self.joints = (*robot["arm_joints"], robot["gripper_joint"])
+        self.arm_joints = tuple(robot["arm_joints"])
+        self.joints = (*self.arm_joints, robot["gripper_joint"])
+        self.home_bounds = mit_recenter_bounds(project)
+        self.completed_recenter = 0
+        self.disable_ready = False
+        self.disabling = False
         if not self.routes:
             raise ValueError("No MIT target controller routes")
         if any(not names or any(j not in self.joints for j in names)
@@ -81,6 +89,10 @@ class TargetArbiter(Node):
         self.create_subscription(JointState, "/joint_states", self.on_feedback, qos_profile_sensor_data)
         self.create_subscription(TargetFrame, "~/target", self.on_target, 10)
         self.create_subscription(String, "~/source_heartbeat", self.source_heartbeat, 10)
+        self.create_subscription(
+            UInt64, RECENTER_COMPLETED, self.on_recenter_completed,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.create_service(SetBool, "~/reserve_disable", self.reserve_disable)
         self.create_service(SelectSource, "~/select_source", self.select_source)
         self.create_service(SetAuthority, "~/set_authority", self.set_authority)
         self.create_service(ReleaseSource, "~/release_source", self.release_source)
@@ -103,7 +115,9 @@ class TargetArbiter(Node):
         now = monotonic_ns()
         self.expire_sessions(now)
         source = request.source.strip()
-        if not source:
+        if self.disabling:
+            response.message = "整机正在失能"
+        elif not source:
             response.message = "source is required"
         elif self.authority is not None and source != self.authority:
             response.message = f"authority designated to {self.authority}"
@@ -120,6 +134,9 @@ class TargetArbiter(Node):
         return response
 
     def set_authority(self, request, response):
+        if self.disabling:
+            response.message = "整机正在失能"
+            return response
         self.expire_sessions(monotonic_ns())
         source = request.source.strip() or None
         if self.session and source != self.session.source:
@@ -148,9 +165,33 @@ class TargetArbiter(Node):
         self.expire_sessions(now)
         self.announce_heartbeat(now)
         available = self.feedback_is_fresh(now) and all(name in self.feedback for name in self.joints)
-        if available != self.feedback_ready:
+        if available != self.feedback_ready or (not self.disabling and self.parked(now)) != self.disable_ready:
             self.feedback_ready = available
             self.publish_status()
+
+    def on_recenter_completed(self, message):
+        self.completed_recenter = message.data
+        self.publish_status()
+
+    def parked(self, now):
+        dispatch = str(self.completed_recenter)
+        return (self.session is None and self.completed_recenter != 0
+                and self.dispatched is not None and self.dispatched["source"] == "recenter"
+                and self.dispatched["dispatch_id"] == dispatch
+                and all(self.applied.get(route) == self.completed_recenter for route in self.routes)
+                and self.feedback_is_fresh(now)
+                and all(name in self.feedback and low <= self.feedback[name] <= high
+                        for name, (low, high) in zip(self.arm_joints, self.home_bounds)))
+
+    def reserve_disable(self, request, response):
+        self.expire_sessions(monotonic_ns())
+        if request.data and (self.disabling or not self.parked(monotonic_ns())):
+            response.message = "需要先完成归中并确认六轴实测到位"
+        else:
+            self.disabling = request.data
+            self.publish_status()
+            response.success = True
+        return response
 
     def feedback_is_fresh(self, now):
         return self.feedback_stamp is not None and now - self.feedback_stamp <= self.feedback_timeout_ns
@@ -319,8 +360,10 @@ class TargetArbiter(Node):
     def publish_status(self):
         acknowledgments = {self.applied.get(controller) for controller in self.routes}
         applied = next(iter(acknowledgments)) if len(acknowledgments) == 1 else None
+        self.disable_ready = not self.disabling and self.parked(monotonic_ns())
         state = {
             "joints": self.joints,
+            "disable_ready": self.disable_ready,
             "feedback_ready": self.feedback_ready,
             "authority": self.authority,
             "source": self.session.source if self.session else None,

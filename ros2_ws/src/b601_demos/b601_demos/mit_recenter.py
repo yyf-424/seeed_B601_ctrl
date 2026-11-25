@@ -11,11 +11,12 @@ from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
+from std_msgs.msg import UInt64
 from std_srvs.srv import Trigger
 
 from b601_description.project_config import load_project_config
 from b601_demos.target_client import TargetClient
-from b601_demos.trajectory_utils import mit_recenter_tolerances, recenter_position_bounds
+from b601_demos.trajectory_utils import RECENTER_COMPLETED, mit_recenter_bounds
 
 
 RECENTER_SERVICE = "/b601_mit_recenter/recenter"
@@ -41,8 +42,7 @@ class MitRecenter(Node):
         self.bounds = [(project["joints"][name]["min_pos"], project["joints"][name]["max_pos"])
                        for name in self.joints]
         self.lift_tracking_tolerance = mit_park["joint4_lift_tracking_tolerance_rad"]
-        self.tolerances = mit_recenter_tolerances(project)
-        self.home_bounds = recenter_position_bounds(self.home, self.tolerances, self.bounds)
+        self.home_bounds = mit_recenter_bounds(project)
         self.clearance = mit_park["joint4_clearance_rad"]
         self.minimum_lift = mit_park["joint4_minimum_lift_rad"]
         if not self.bounds[self.j4][0] < self.clearance < 0 or self.minimum_lift <= 0:
@@ -71,6 +71,9 @@ class MitRecenter(Node):
             from moveit_msgs.srv import GetStateValidity
 
             self.collision_client = self.create_client(GetStateValidity, "/check_state_validity")
+        self.completed = self.create_publisher(
+            UInt64, RECENTER_COMPLETED, QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.last_dispatch = 0
         self.service_group = ReentrantCallbackGroup()
         self.create_service(
             Trigger, RECENTER_SERVICE, self.recenter, callback_group=self.service_group)
@@ -189,7 +192,7 @@ class MitRecenter(Node):
             stamp = monotonic()
             if stamp >= deadline:
                 raise RuntimeError("归中阶段已超时")
-        self.target_client.set_joints(
+        self.last_dispatch = self.target_client.set_joints(
             dict(zip(self.joints, target)), min(self.state_check_timeout, deadline - stamp), spinning=True)
         ramp_time = max(abs(end - start) for start, end in zip(before, target)) / self.slew
         return stamp, ramp_time
@@ -216,25 +219,40 @@ class MitRecenter(Node):
     def move(self, label, target, reached, correction_axes=(), reference=None):
         deadline = monotonic() + self.phase_timeout
         target = list(target)
-        correction_reference = self.home if reference is None else reference
+        correction_reference = (
+            tuple((low + high) / 2.0 for low, high in self.home_bounds)
+            if reference is None else reference
+        )
         self.get_logger().info(f"归中阶段 {label}")
         try:
             stamp, ramp_time = self.publish(target, deadline)
-            first_check = min(deadline, stamp + ramp_time + self.correction_delay)
-            reached_target, actual = self.wait_for_position(stamp, first_check, reached)
-            if reached_target:
-                return target
-            corrected = target.copy()
-            for i in correction_axes:
-                error = correction_reference[i] - actual[i]
-                tolerance = self.tolerances[i] if reference is None else self.lift_tracking_tolerance
-                if abs(error) > tolerance:
-                    corrected[i] = self.bounded(i, target[i] + error)
-            if corrected != target:
-                stamp, _ = self.publish(corrected, deadline)
+            previous_errors = {}
+            while True:
+                check = min(deadline, stamp + ramp_time + self.correction_delay)
+                reached_target, actual = self.wait_for_position(stamp, check, reached)
+                if reached_target:
+                    return target
+                corrected = target.copy()
+                stalled = False
+                for i in correction_axes:
+                    error = correction_reference[i] - actual[i]
+                    needs_correction = (
+                        not self.at_home(actual, (i,)) if reference is None
+                        else abs(error) > self.lift_tracking_tolerance
+                    )
+                    if needs_correction:
+                        if abs(error) >= previous_errors.get(i, float("inf")):
+                            stalled = True
+                            break
+                        previous_errors[i] = abs(error)
+                        corrected[i] = self.bounded(i, target[i] + error)
+                if stalled or corrected == target or check == deadline:
+                    break
+                target = corrected
+                stamp, ramp_time = self.publish(target, deadline)
             reached_target, actual = self.wait_for_position(stamp, deadline, reached)
             if reached_target:
-                return corrected
+                return target
             raise RuntimeError(f"位置未到位，实测 {list(round(q, 4) for q in actual)} rad")
         except RuntimeError as error:
             raise RuntimeError(f"{label}：{error}") from error
@@ -274,6 +292,7 @@ class MitRecenter(Node):
         try:
             self.wait_for_start_feedback()
             self.target_client.select(self.state_check_timeout, spinning=True)
+            self.completed.publish(UInt64())
             self.run_sequence()
             response.success = True
             response.message = "六轴已归中"
@@ -287,6 +306,8 @@ class MitRecenter(Node):
                 response.success = False
                 response.message = str(error)
             finally:
+                if response.success:
+                    self.completed.publish(UInt64(data=self.last_dispatch))
                 self.running.release()
         return response
 

@@ -83,7 +83,9 @@ class TargetWeb(Node):
         fresh = age is not None and age <= self.feedback_timeout
         return {
             "status": status,
-            "backend": self.backend.snapshot(fresh and bool(status and status["feedback_ready"])),
+            "backend": self.backend.snapshot(
+                fresh and bool(status and status["feedback_ready"]),
+                fresh and bool(status and status.get("disable_ready"))),
             "recenter_ready": self.recenter.service_is_ready(),
             "feedback": self.feedback,
             "limits": self.limits,
@@ -94,8 +96,8 @@ class TargetWeb(Node):
     def request(self, path, data):
         if path == "/api/connect":
             return self.backend.connect(data["backend"])
-        if path == "/api/disconnect_simulation":
-            return self.backend.disconnect_simulation()
+        if path == "/api/disable":
+            return self.backend.disable(self.call_service)
         if path == "/api/recenter":
             return self.request_recenter(data.get("session_id"))
         if path == "/api/select":

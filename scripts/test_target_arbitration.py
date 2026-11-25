@@ -19,7 +19,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
 
 from b601_description.project_config import load_project_config
 from b601_demos.target_arbiter import ARBITER
@@ -160,6 +160,9 @@ def test(node, launch_log):
         external.close(TIMEOUT)
         policy.close(TIMEOUT)
 
+    reserve_disable = node.create_client(SetBool, f"{ARBITER}/reserve_disable")
+    assert not external.call(reserve_disable, SetBool.Request(data=True), TIMEOUT).success
+
     recenter = node.create_client(Trigger, "/b601_mit_recenter/recenter")
     assert recenter.wait_for_service(timeout_sec=TIMEOUT)
     result = recenter.call_async(Trigger.Request())
@@ -176,7 +179,14 @@ def test(node, launch_log):
         if joint in node.status["joints"]:
             assert abs(node.feedback[joint] - value) < 0.03, (joint, node.feedback[joint], value)
     assert node.safety in (DiagnosticStatus.OK, DiagnosticStatus.WARN), node.safety
-    print("PASS real MuJoCo recenter through arbitration, contention and release")
+    node.until(lambda: node.status.get("disable_ready"), "successful recenter must unlock disable")
+    assert external.call(reserve_disable, SetBool.Request(data=True), TIMEOUT).success
+    try:
+        assert not external.call(policy.selector, SelectSource.Request(source="policy"), TIMEOUT).accepted
+        assert not external.call(authority, SetAuthority.Request(source="policy"), TIMEOUT).accepted
+    finally:
+        assert external.call(reserve_disable, SetBool.Request(data=False), TIMEOUT).success
+    print("PASS MuJoCo recenter and shutdown gate block competing control sources")
 
     revoke = node.create_client(RevokeSource, f"{ARBITER}/revoke_source")
     abandoned = external.call(external.selector, SelectSource.Request(source="abandoned"), TIMEOUT)
