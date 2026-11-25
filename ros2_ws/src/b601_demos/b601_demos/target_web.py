@@ -18,7 +18,7 @@ from std_msgs.msg import String
 
 from b601_description.project_config import load_project_config
 from b601_target_interfaces.msg import TargetFrame
-from b601_target_interfaces.srv import ReleaseSource, RenewSource, SelectSource, SetTarget
+from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource, SelectSource, SetTarget
 
 from .target_arbiter import ARBITER
 from .web_robot_model import build_model, find_vendor_model
@@ -49,6 +49,7 @@ class TargetWeb(Node):
         self.select = self.create_client(SelectSource, f"{ARBITER}/select_source")
         self.renew = self.create_client(RenewSource, f"{ARBITER}/renew_source")
         self.release = self.create_client(ReleaseSource, f"{ARBITER}/release_source")
+        self.revoke = self.create_client(RevokeSource, f"{ARBITER}/revoke_source")
         self.set_target = self.create_client(SetTarget, f"{ARBITER}/set_target")
 
     def on_status(self, message):
@@ -76,7 +77,10 @@ class TargetWeb(Node):
 
     def request(self, path, data):
         if path == "/api/select":
-            request = SelectSource.Request(source="web", controllers=[data["controller"]])
+            source = data.get("source", "web")
+            if source not in ("web", "web_ik"):
+                raise ValueError("请选择网页关节或网页 TCP")
+            request = SelectSource.Request(source=source, controllers=[data["controller"]])
             client = self.select
         elif path == "/api/heartbeat":
             request = RenewSource.Request(session_id=data["session_id"])
@@ -84,6 +88,9 @@ class TargetWeb(Node):
         elif path == "/api/release":
             request = ReleaseSource.Request(session_id=data["session_id"])
             client = self.release
+        elif path == "/api/revoke":
+            request = RevokeSource.Request(controller=data["controller"], session=data["session"])
+            client = self.revoke
         elif path == "/api/target":
             positions = data["positions"]
             if not isinstance(positions, dict):
@@ -119,6 +126,7 @@ class TargetHandler(BaseHTTPRequestHandler):
         "/app.js": ("app.js", "text/javascript"),
         "/style.css": ("style.css", "text/css"),
         "/robot-view.js": ("robot-view.js", "text/javascript"),
+        "/tcp-ik.js": ("tcp-ik.js", "text/javascript"),
         "/vendor/three.module.min.js": ("vendor/three.module.min.js", "text/javascript"),
         "/vendor/OrbitControls.js": ("vendor/OrbitControls.js", "text/javascript"),
         "/vendor/STLLoader.js": ("vendor/STLLoader.js", "text/javascript"),

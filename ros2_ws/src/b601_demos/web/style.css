@@ -24,7 +24,7 @@ h2 { margin: 0; font-size: 1.05rem; }
 .connection[data-connected="true"]::before { background: #75e0b1; }
 .controls, .robot-view { background: var(--panel); border: 1px solid var(--line); border-radius: .85rem; }
 .authority { display: grid; grid-template-columns: minmax(7rem, 1fr) auto; align-items: end; gap: .55rem .7rem; }
-.selection { min-width: 0; }
+.selection { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .5rem; min-width: 0; }
 .selection label { display: block; margin: 0 0 .25rem; color: var(--subtle); font-size: .78rem; }
 .metrics { grid-column: 1 / -1; margin: 0; padding: .55rem 0; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .5rem; border-bottom: 1px solid var(--line); }
 .metrics dt { color: var(--subtle); font-size: .75rem; margin-bottom: .15rem; }
@@ -46,11 +46,21 @@ select, input[type="number"] { background: #0b1c27; color: var(--text); padding:
 .view-actions input { accent-color: var(--blue); vertical-align: middle; }
 .view-actions .quiet { min-height: 2.15rem; padding: .35rem .65rem; }
 .robot-stage {
-  position: relative; height: clamp(14rem, calc(100dvh - 11.5rem), 48rem); overflow: hidden;
+  position: relative; height: clamp(14rem, calc(100dvh - 13rem), 48rem); overflow: hidden;
   background: #0a1924; border: 1px solid var(--line); border-radius: .65rem;
 }
 .robot-stage canvas { display: block; width: 100%; height: 100%; cursor: grab; }
 .robot-stage canvas:active { cursor: grabbing; }
+.tcp-handle {
+  position: absolute; z-index: 1; transform: translate(-50%, -50%);
+  min-height: 1.6rem; padding: .13rem .4rem; border-color: #87d9ee;
+  background: #102f3e; color: #c1f0ff; font: 700 .74rem ui-monospace, monospace;
+  box-shadow: 0 0 0 2px #071820b0; touch-action: none; user-select: none;
+}
+.tcp-handle[hidden] { display: none; }
+.tcp-handle[aria-pressed="true"] { background: var(--blue); color: #062630; cursor: grab; }
+.tcp-handle[aria-pressed="true"]:active { cursor: grabbing; }
+.tcp-hint { margin: .45rem 0 0; color: var(--subtle); font-size: .76rem; }
 .model-status {
   position: absolute; top: .75rem; left: .75rem; right: .75rem; width: fit-content;
   pointer-events: none; padding: .35rem .55rem; border-radius: .32rem;
@@ -78,12 +88,13 @@ input[type="number"] { color: var(--amber); font-family: ui-monospace, monospace
 .notice { min-height: 1.2rem; margin: .55rem 0 0; color: var(--subtle); font-size: .8rem; }
 .notice[data-error="true"] { color: #ffad9b; }
 @container (max-width: 23.5rem) {
+  .selection { grid-template-columns: minmax(0,1fr); }
   .joint { grid-template-columns: minmax(0, 1fr) minmax(4.25rem, .65fr) auto; gap: .22rem .55rem; }
   .joint .measured { grid-column: 2 / -1; justify-self: end; }
   .joint input[type="range"] { grid-row: 2; }
 }
 @media (max-width: 740px) {
-  html { scroll-padding-top: calc(clamp(7rem, 27dvh, 13rem) + 5.5rem); }
+  html { scroll-padding-top: calc(clamp(7rem, 27dvh, 13rem) + 6.8rem); }
   .workspace { grid-template-columns: minmax(0, 1fr); gap: .55rem; }
   .robot-view { top: 0; padding: .55rem; box-shadow: 0 .3rem .7rem #09141dbf; }
   .robot-stage { height: clamp(7rem, 27dvh, 13rem); }

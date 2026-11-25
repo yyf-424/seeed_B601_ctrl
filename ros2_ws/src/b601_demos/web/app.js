@@ -2,6 +2,8 @@
 
 const element = (id) => document.getElementById(id);
 const group = element("group");
+const inputSource = element("input-source");
+const sourceLabels = new Map([["web", "网页关节"], ["web_ik", "网页 TCP"]]);
 const sessions = new Map();
 const rows = new Map();
 const edited = new Set();
@@ -27,7 +29,22 @@ function refreshRobotView() {
       label = "待发送预览";
     }
   }
-  robotView.update({ feedback: snapshot.feedback, target, label, online: !!snapshot.status });
+  const armJoints = group.value === "b601_mit_arm" ? controllers()[group.value]?.joints : [];
+  robotView.update({
+    feedback: snapshot.feedback, target, label, online: !!snapshot.status,
+    armJoints, limits: snapshot.limits,
+  });
+}
+
+function applyTcpDraft(positions) {
+  for (const [name, value] of Object.entries(positions)) {
+    const row = rows.get(name);
+    if (!row) continue;
+    const { min, max } = snapshot.limits[name];
+    setValue(row, Math.max(min, Math.min(max, Number(value.toFixed(5)))));
+    edited.add(name);
+  }
+  refresh();
 }
 
 function notice(message, error = false) {
@@ -94,14 +111,18 @@ function refresh() {
   const connection = element("connection");
   connection.dataset.connected = String(!!state && snapshot.feedback_age_ms !== null);
   connection.textContent = state ? "仲裁在线" : "等待仲裁节点";
-  element("source").textContent = state?.source || "无";
+  element("source").textContent = sourceLabels.get(state?.source) || state?.source || "无";
   element("age").textContent = snapshot.feedback_age_ms === null || snapshot.feedback_age_ms === undefined
     ? "—" : `${snapshot.feedback_age_ms} ms`;
   const forwarded = state?.last_forwarded;
   element("applied").textContent = state?.holding_after_loss ? "受控持位"
     : !forwarded ? "—" : state.last_applied_id === forwarded.dispatch_id ? "已采纳" : "等待采纳";
   element("acquire").disabled = busy || !state || !!state.source || !!session;
-  element("release").disabled = !allowed;
+  element("release").disabled = busy || !state?.session;
+  const supportsTcp = group.value === "b601_mit_arm";
+  inputSource.options[1].disabled = !supportsTcp;
+  if (!supportsTcp && inputSource.value === "web_ik") inputSource.value = "web";
+  inputSource.disabled = busy || !state || !!state.source || !!session;
   element("sync").disabled = !state || !Object.keys(snapshot.feedback).length;
   element("send-all").disabled = !allowed || !edited.size;
   group.disabled = busy || !state;
@@ -209,14 +230,25 @@ async function sendTargets(names) {
 
 group.addEventListener("change", () => { makeRows(); refresh(); });
 element("acquire").addEventListener("click", () => mutate(async () => {
-  const reply = await api("/api/select", { controller: group.value });
+  const source = inputSource.value;
+  const reply = await api("/api/select", { controller: group.value, source });
   sessions.set(group.value, { id: reply.session_id, publicId: reply.session, sequence: 0 });
-  notice("网页已取得控制权。");
+  notice(`${sourceLabels.get(source)}已取得控制权。`);
 }));
 element("release").addEventListener("click", () => mutate(async () => {
-  await api("/api/release", { session_id: sessions.get(group.value).id });
-  sessions.delete(group.value);
-  notice("已释放网页控制权。");
+  const controller = group.value;
+  const state = controllers()[controller];
+  const session = sessions.get(controller);
+  if (session?.publicId === state.session) {
+    await api("/api/release", { session_id: session.id });
+    sessions.delete(controller);
+  } else {
+    const groups = Object.entries(controllers()).filter(([, route]) => route.session === state.session)
+      .map(([name]) => name === "b601_mit_arm" ? "手臂六轴" : name === "b601_mit_gripper" ? "夹爪" : name);
+    if (!window.confirm(`释放 ${sourceLabels.get(state.source) || state.source} 的 ${groups.join("、")} 控制权？`)) return;
+    await api("/api/revoke", { controller, session: state.session });
+  }
+  notice("已释放控制权。");
 }));
 element("sync").addEventListener("click", () => {
   for (const [name, row] of rows) {
@@ -229,7 +261,7 @@ element("sync").addEventListener("click", () => {
 element("send-all").addEventListener("click", () => mutate(() => sendTargets([...edited])));
 window.addEventListener("pagehide", () => { sessions.clear(); });
 import("/robot-view.js").then(({ createRobotView }) => {
-  robotView = createRobotView(element("robot-view"));
+  robotView = createRobotView(element("robot-view"), applyTcpDraft);
   refreshRobotView();
 }).catch((error) => {
   element("model-status").textContent = `三维渲染不可用：${error.message}`;

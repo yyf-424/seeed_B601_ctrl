@@ -25,7 +25,10 @@
         </div>
         <div id="robot-stage" class="robot-stage">
           <span id="model-status" class="model-status" role="status">正在载入机械臂模型…</span>
+          <button type="button" id="tcp-handle" class="tcp-handle" aria-label="TCP 末端目标"
+                  aria-pressed="false" aria-describedby="tcp-hint" hidden>TCP</button>
         </div>
+        <p id="tcp-hint" class="tcp-hint" role="status">点选 TCP，再按住 Ctrl 拖动</p>
         <div class="pose-summary" aria-label="末端 XYZ，单位米">
           <div><span class="pose-legend actual">实测位置</span><output id="actual-tip">—</output></div>
           <div><span id="model-target-label" class="pose-legend target">关节目标</span><output id="target-tip">—</output></div>
@@ -35,11 +38,20 @@
       <section class="controls" aria-labelledby="joints-title">
         <section class="authority" aria-label="控制权">
           <div class="selection">
-            <label for="group">控制器组</label>
-            <select id="group" disabled><option>等待仲裁节点</option></select>
+            <div>
+              <label for="group">控制器组</label>
+              <select id="group" disabled><option>等待仲裁节点</option></select>
+            </div>
+            <div>
+              <label for="input-source">输入来源</label>
+              <select id="input-source" disabled>
+                <option value="web">网页关节</option>
+                <option value="web_ik">网页 TCP</option>
+              </select>
+            </div>
           </div>
           <div class="authority-actions">
-            <button id="acquire" disabled>网页接管</button>
+            <button id="acquire" disabled>指定控制权</button>
             <button id="release" class="quiet" disabled>释放控制权</button>
           </div>
           <dl class="metrics">

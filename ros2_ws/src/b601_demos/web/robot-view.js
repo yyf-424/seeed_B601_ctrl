@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "/vendor/OrbitControls.js";
 import { STLLoader } from "/vendor/STLLoader.js";
+import { solveTcpPosition } from "/tcp-ik.js";
 
 function place(object, frame) {
   object.position.fromArray(frame.xyz);
@@ -43,7 +44,7 @@ class RobotLayer {
       offset.add(motion);
       motion.add(this.links.get(joint.child));
       const axis = new THREE.Vector3(...joint.axis).normalize();
-      this.joints.push({ ...joint, motion, axis });
+      this.joints.push({ ...joint, offset, motion, axis });
     }
   }
 
@@ -56,15 +57,17 @@ class RobotLayer {
     }
   }
 
-  tipText() {
+  tipPosition() {
     const tip = this.links.get("end_link");
-    if (!tip) return "—";
-    return tip.getWorldPosition(new THREE.Vector3()).toArray()
-      .map((value) => value.toFixed(3)).join("  /  ");
+    return tip?.getWorldPosition(new THREE.Vector3());
+  }
+
+  tipText() {
+    return this.tipPosition()?.toArray().map((value) => value.toFixed(3)).join("  /  ") ?? "—";
   }
 }
 
-export function createRobotView(section) {
+export function createRobotView(section, onTcpDraft) {
   const stage = section.querySelector("#robot-stage");
   const notice = section.querySelector("#model-status");
   const actualTip = section.querySelector("#actual-tip");
@@ -72,8 +75,11 @@ export function createRobotView(section) {
   const targetLabel = section.querySelector("#model-target-label");
   const showTarget = section.querySelector("#show-robot-target");
   const reset = section.querySelector("#reset-view");
+  const tcpHandle = section.querySelector("#tcp-handle");
+  const tcpHint = section.querySelector("#tcp-hint");
   let actualLayer;
   let targetLayer;
+  let ikLayer;
   let latest = { feedback: {}, target: {}, label: "", online: false };
   let loading = false;
   let nextAttempt = 0;
@@ -81,6 +87,14 @@ export function createRobotView(section) {
   let assetText = "";
   let viewportWidth = 0;
   let viewportHeight = 0;
+  let tcpSelected = false;
+  let hasTarget = false;
+  let drag = null;
+  let dragFrame = 0;
+  let ignoreClick = false;
+  let controlHeld = false;
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -124,9 +138,120 @@ export function createRobotView(section) {
       renderer.render(scene, camera);
       if (actualLayer) actualTip.textContent = actualLayer.root.visible ? actualLayer.tipText() : "—";
       if (targetLayer) targetTip.textContent = targetLayer.root.visible ? targetLayer.tipText() : "—";
+      placeTcpHandle();
     });
   }
   new ResizeObserver(draw).observe(stage);
+
+  function tcpPosition() {
+    return (tcpSelected && hasTarget ? targetLayer : actualLayer)?.tipPosition();
+  }
+
+  function setTcpSelected(selected) {
+    tcpSelected = selected;
+    tcpHandle.setAttribute("aria-pressed", String(selected));
+    tcpHint.textContent = selected ? "已选中 TCP，按住 Ctrl 拖动目标" : "点选 TCP，再按住 Ctrl 拖动";
+    draw();
+  }
+
+  function placeTcpHandle() {
+    const point = latest.armJoints?.length && actualLayer?.root.visible ? tcpPosition() : null;
+    if (!point) {
+      tcpHandle.hidden = true;
+      return;
+    }
+    const projected = point.project(camera);
+    const visible = Math.abs(projected.x) < 1 && Math.abs(projected.y) < 1
+      && projected.z > -1 && projected.z < 1;
+    tcpHandle.hidden = !visible && !drag;
+    if (visible) {
+      tcpHandle.style.left = `${(1 + projected.x) * viewportWidth / 2}px`;
+      tcpHandle.style.top = `${(1 - projected.y) * viewportHeight / 2}px`;
+    }
+  }
+
+  function pointerRay(event) {
+    const bounds = renderer.domElement.getBoundingClientRect();
+    pointer.set(2 * (event.clientX - bounds.left) / bounds.width - 1,
+                1 - 2 * (event.clientY - bounds.top) / bounds.height);
+    raycaster.setFromCamera(pointer, camera);
+    return raycaster.ray;
+  }
+
+  function applyDrag() {
+    dragFrame = 0;
+    if (!drag?.point) return;
+    const result = solveTcpPosition(ikLayer, drag.point, drag.seed, latest.armJoints, latest.limits);
+    if (!result) {
+      tcpHint.textContent = "目标点未找到可达解，保留上次预览";
+      return;
+    }
+    Object.assign(drag.seed, result);
+    onTcpDraft(result);
+    tcpHint.textContent = "已解算关节角，确认后手动发送";
+  }
+
+  function finishDrag(event) {
+    if (!drag || event.pointerId !== drag.id) return;
+    if (dragFrame) {
+      window.cancelAnimationFrame(dragFrame);
+      if (event.type === "pointerup") applyDrag();
+      dragFrame = 0;
+    }
+    const id = drag.id;
+    drag = null;
+    if (tcpHandle.hasPointerCapture(id)) tcpHandle.releasePointerCapture(id);
+    draw();
+  }
+
+  tcpHandle.addEventListener("click", () => {
+    if (!ignoreClick) setTcpSelected(!tcpSelected);
+  });
+  tcpHandle.addEventListener("pointerdown", (event) => {
+    ignoreClick = false;
+    if (event.button !== 0 || !(event.ctrlKey || controlHeld) || !tcpSelected || !latest.armJoints?.length) return;
+    const anchor = tcpPosition();
+    if (!anchor) return;
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+      camera.getWorldDirection(new THREE.Vector3()), anchor);
+    const hit = pointerRay(event).intersectPlane(plane, new THREE.Vector3());
+    if (!hit) return;
+    event.preventDefault();
+    ignoreClick = true;
+    drag = { id: event.pointerId, plane, offset: anchor.sub(hit),
+             seed: { ...latest.feedback, ...latest.target } };
+    tcpHandle.setPointerCapture(event.pointerId);
+  });
+  tcpHandle.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.id) return;
+    if (!(event.ctrlKey || controlHeld)) {
+      finishDrag(event);
+      return;
+    }
+    const hit = pointerRay(event).intersectPlane(drag.plane, new THREE.Vector3());
+    if (!hit) return;
+    drag.point = hit.add(drag.offset);
+    if (!dragFrame) dragFrame = window.requestAnimationFrame(applyDrag);
+  });
+  for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    tcpHandle.addEventListener(event, finishDrag);
+  }
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Control") return;
+    controlHeld = true;
+    if (tcpSelected && !drag) tcpHint.textContent = "Ctrl 已按下，拖动 TCP 目标";
+  });
+  window.addEventListener("keyup", (event) => {
+    if (event.key !== "Control") return;
+    controlHeld = false;
+    if (tcpSelected && tcpHint.textContent === "Ctrl 已按下，拖动 TCP 目标") {
+      tcpHint.textContent = "已选中 TCP，按住 Ctrl 拖动目标";
+    }
+  });
+  window.addEventListener("blur", () => {
+    controlHeld = false;
+    if (drag) finishDrag({ pointerId: drag.id });
+  });
 
   function applyPose() {
     if (!actualLayer) return;
@@ -134,9 +259,14 @@ export function createRobotView(section) {
     const hasFeedback = actualLayer.joints.every(({ type, name, mimic }) =>
       type === "fixed" || mimic || Number.isFinite(feedback[name]));
     actualLayer.root.visible = hasFeedback;
-    targetLayer.root.visible = hasFeedback && online && showTarget.checked && Object.keys(target).length > 0;
+    hasTarget = hasFeedback && online && Object.keys(target).length > 0;
+    targetLayer.root.visible = hasTarget && showTarget.checked;
     if (hasFeedback) actualLayer.setPose(feedback);
-    if (targetLayer.root.visible) targetLayer.setPose({ ...feedback, ...target });
+    if (hasTarget) targetLayer.setPose({ ...feedback, ...target });
+    if (!latest.armJoints?.length && tcpSelected) {
+      if (drag) finishDrag({ pointerId: drag.id });
+      setTcpSelected(false);
+    }
     notice.textContent = !hasFeedback ? "等待关节反馈" : online ? assetText : "反馈中断 · 显示最后一帧";
     targetLabel.textContent = targetLayer.root.visible ? label : "关节目标";
     draw();
@@ -165,6 +295,7 @@ export function createRobotView(section) {
       });
       actualLayer = new RobotLayer(model, visualGroups);
       targetLayer = new RobotLayer(model, visualGroups, ghost);
+      ikLayer = new RobotLayer(model, Object.keys(model.links).map((name) => [name, []]));
       scene.add(actualLayer.root, targetLayer.root);
       assetText = model.asset_source === "vendor" ? "B601 官方外观模型" : "B601 简化外观模型";
       reset.disabled = false;

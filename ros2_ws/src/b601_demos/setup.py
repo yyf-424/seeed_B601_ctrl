@@ -10,7 +10,7 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
         ("share/" + package_name + "/web", [
-            "web/index.html", "web/style.css", "web/app.js", "web/robot-view.js",
+            "web/index.html", "web/style.css", "web/app.js", "web/robot-view.js", "web/tcp-ik.js",
         ]),
         ("share/" + package_name + "/web/vendor", [
             "web/vendor/three.module.min.js", "web/vendor/OrbitControls.js",
