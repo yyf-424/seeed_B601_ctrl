@@ -12,7 +12,10 @@
   <main>
     <header class="app-header">
       <div class="app-title"><p class="model">B601 · MIT</p><h1>关节目标控制台</h1></div>
-      <span id="connection" class="connection" data-connected="false" role="status">等待连接</span>
+      <div class="header-status">
+        <span id="stiffness" class="stiffness" role="status">刚度待回读</span>
+        <span id="connection" class="connection" data-connected="false" role="status">等待连接</span>
+      </div>
     </header>
     <div class="workspace">
       <section id="robot-view" class="robot-view" aria-labelledby="robot-title">

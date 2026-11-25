@@ -6,6 +6,7 @@ const backendSelect = element("backend");
 const connectButton = element("connect");
 const disableButton = element("disable");
 const recenterButton = element("recenter");
+const stiffnessLabels = { high: "高刚度", low: "低刚度" };
 const sourceLabels = new Map([
   ["web", "网页"], ["policy", "外部策略"], ["external", "外部接口"], ["recenter", "归中"],
 ]);
@@ -120,9 +121,14 @@ function refreshBackend() {
   connection.textContent = backend?.message || "等待连接";
   const feedback = element("backend-feedback");
   feedback.dataset.error = String(!!backendReply?.error || backend?.phase === "error");
-  feedback.textContent = backend?.log || backendReply?.message
-    || (backend?.phase === "connected" && !backend.can_disable ? "归中到位后可点击 Disable。"
-      : backendSelect.value === "dm" && backend?.can_connect ? "连接实机将使能电机，请先确认现场可运动。" : "");
+  feedback.textContent = backend?.log || backendReply?.message || backend?.disable_reason
+    || (backendSelect.value === "dm" && backend?.can_connect ? "连接实机将使能电机，请先确认现场可运动。" : "");
+  const stiffness = element("stiffness");
+  const mode = (backend?.phase === "connected" && snapshot.stiffness) || "unknown";
+  if (stiffness.dataset.mode !== mode) {
+    stiffness.dataset.mode = mode;
+    stiffness.textContent = stiffnessLabels[mode] || "刚度待回读";
+  }
 }
 
 async function changeBackend(path, payload) {
@@ -180,6 +186,7 @@ async function poll() {
   } catch (error) {
     snapshot.status = null;
     snapshot.backend = null;
+    snapshot.stiffness = null;
     refresh();
     notice(error.message, true);
   } finally {

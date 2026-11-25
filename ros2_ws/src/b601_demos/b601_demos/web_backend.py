@@ -120,13 +120,24 @@ class WebBackend:
                 phase, message = "idle", "整机已失能，可切换后端"
             else:
                 phase, message = "idle", "等待连接"
+            guard_ready = self.reserve.service_is_ready()
+            can_disable = (self.process is not None and parked and not self.disabling
+                           and not self.stopping and guard_ready)
+            disable_reason = None
+            if phase == "connected":
+                if not guard_ready:
+                    disable_reason = "当前后端缺少失能确认接口，需结束本次运行后启动新版后端。"
+                elif self.process is None:
+                    disable_reason = "当前后端由独立进程管理，请使用原停机入口。"
+                elif not parked:
+                    disable_reason = "归中到位后可点击 Disable。"
             return {
                 "name": active_backend,
                 "phase": phase,
                 "message": message,
                 "can_connect": not attached and self.backend is None and self.process is None,
-                "can_disable": (self.process is not None and parked and not self.disabling
-                                and not self.stopping and self.reserve.service_is_ready()),
+                "can_disable": can_disable,
+                "disable_reason": disable_reason,
                 "log": str(self.log_path) if phase == "error" and self.log_path else None,
             }
 

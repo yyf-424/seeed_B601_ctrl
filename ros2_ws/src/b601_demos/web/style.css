@@ -19,6 +19,10 @@ main { max-width: 96rem; margin: 0 auto; padding: .8rem clamp(.65rem, 2vw, 1.6re
 .model { color: var(--blue); font: 600 .78rem ui-monospace, monospace; letter-spacing: .08em; margin: 0; }
 h1 { font-size: clamp(1.2rem, 2.3vw, 1.65rem); margin: 0; line-height: 1.2; letter-spacing: -.025em; }
 h2 { margin: 0; font-size: 1.05rem; }
+.header-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .35rem .7rem; }
+.stiffness { padding: .22rem .55rem; border: 1px solid var(--line); border-radius: .45rem; color: var(--subtle); font-size: .8rem; white-space: nowrap; }
+.stiffness[data-mode="high"] { color: var(--amber); border-color: #655332; }
+.stiffness[data-mode="low"] { color: #75e0b1; border-color: #386555; }
 .connection { flex: 0 1 auto; text-align: right; color: var(--subtle); font-size: .875rem; }
 .connection::before { display: inline-block; content: ""; width: .55rem; height: .55rem; margin-right: .5rem; border-radius: 50%; background: var(--amber); }
 .connection[data-connected="true"]::before { background: #75e0b1; }

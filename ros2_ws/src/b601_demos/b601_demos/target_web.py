@@ -10,6 +10,7 @@ from xml.etree.ElementTree import ParseError
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
+from control_msgs.msg import DynamicJointState
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
@@ -44,6 +45,7 @@ class TargetWeb(Node):
         self.status = None
         self.feedback = {}
         self.feedback_at = None
+        self.stiffness_sample = None
         self.robot_model = None
         self.vendor_model = find_vendor_model()
         self.create_subscription(
@@ -53,6 +55,8 @@ class TargetWeb(Node):
             String, f"{ARBITER}/status", self.on_status,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(JointState, "/joint_states", self.on_feedback, qos_profile_sensor_data)
+        self.create_subscription(
+            DynamicJointState, "/dynamic_joint_states", self.on_stiffness_feedback, qos_profile_sensor_data)
         self.select = self.create_client(SelectSource, f"{ARBITER}/select_source")
         self.authority = self.create_client(SetAuthority, f"{ARBITER}/set_authority")
         self.renew = self.create_client(RenewSource, f"{ARBITER}/renew_source")
@@ -70,6 +74,12 @@ class TargetWeb(Node):
         self.feedback = dict(zip(message.name, message.position))
         self.feedback_at = time.monotonic()
 
+    def on_stiffness_feedback(self, message):
+        joint = next((values for name, values in zip(message.joint_names, message.interface_values)
+                      if name == "joint1"), None)
+        flag = dict(zip(joint.interface_names, joint.values)).get("low_stiffness") if joint else None
+        self.stiffness_sample = (flag, time.monotonic()) if flag in (0.0, 1.0) else None
+
     def on_description(self, message):
         try:
             self.robot_model = build_model(message.data, self.vendor_model)
@@ -78,14 +88,22 @@ class TargetWeb(Node):
 
     def snapshot(self):
         feedback_at = self.feedback_at
-        age = time.monotonic() - feedback_at if feedback_at is not None else None
+        now = time.monotonic()
+        age = now - feedback_at if feedback_at is not None else None
         status = self.status if self.select.service_is_ready() else None
         fresh = age is not None and age <= self.feedback_timeout
+        backend = self.backend.snapshot(
+            fresh and bool(status and status["feedback_ready"]),
+            fresh and bool(status and status.get("disable_ready")))
+        sample = self.stiffness_sample
+        stiffness = None
+        if (backend["phase"] == "connected" and self.backend.active and sample is not None
+                and now - sample[1] <= self.feedback_timeout):
+            stiffness = "low" if sample[0] == 1.0 else "high"
         return {
             "status": status,
-            "backend": self.backend.snapshot(
-                fresh and bool(status and status["feedback_ready"]),
-                fresh and bool(status and status.get("disable_ready"))),
+            "backend": backend,
+            "stiffness": stiffness,
             "recenter_ready": self.recenter.service_is_ready(),
             "feedback": self.feedback,
             "limits": self.limits,
