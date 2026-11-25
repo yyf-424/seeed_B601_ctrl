@@ -63,7 +63,7 @@ b601_mit_arm:
     - 1.6
     - 0.65
     free_enabled: true
-    settle_band_min: 0.0
+    settle_band_min: 0.01
     settle_band_max: 0.05
     gravity_joint_scale:
     - 0.0
