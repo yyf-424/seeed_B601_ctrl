@@ -7,9 +7,27 @@ const rows = new Map();
 const edited = new Set();
 let snapshot = { feedback: {}, limits: {} };
 let busy = false;
+let robotView;
 
 function controllers() {
   return snapshot.status?.controllers || {};
+}
+
+function refreshRobotView() {
+  if (!robotView) return;
+  const target = {};
+  for (const state of Object.values(controllers())) {
+    if (!state.holding_after_loss) Object.assign(target, state.last_forwarded?.position);
+  }
+  let label = "最近下发目标";
+  for (const name of edited) {
+    const input = rows.get(name).number;
+    if (Number.isFinite(input.valueAsNumber) && input.checkValidity()) {
+      target[name] = input.valueAsNumber;
+      label = "待发送预览";
+    }
+  }
+  robotView.update({ feedback: snapshot.feedback, target, label, online: !!snapshot.status });
 }
 
 function notice(message, error = false) {
@@ -97,6 +115,7 @@ function refresh() {
     }
     row.send.disabled = !allowed || !edited.has(name);
   }
+  refreshRobotView();
 }
 
 async function poll() {
@@ -123,7 +142,7 @@ async function poll() {
     refresh();
     notice(error.message, true);
   } finally {
-    window.setTimeout(poll, 250);
+    window.setTimeout(poll, 100);
   }
 }
 
@@ -209,5 +228,11 @@ element("sync").addEventListener("click", () => {
 });
 element("send-all").addEventListener("click", () => mutate(() => sendTargets([...edited])));
 window.addEventListener("pagehide", () => { sessions.clear(); });
+import("/robot-view.js").then(({ createRobotView }) => {
+  robotView = createRobotView(element("robot-view"));
+  refreshRobotView();
+}).catch((error) => {
+  element("model-status").textContent = `三维渲染不可用：${error.message}`;
+});
 poll();
 renewSessions();

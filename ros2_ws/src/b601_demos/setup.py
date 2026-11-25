@@ -9,7 +9,13 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
-        ("share/" + package_name + "/web", ["web/index.html", "web/style.css", "web/app.js"]),
+        ("share/" + package_name + "/web", [
+            "web/index.html", "web/style.css", "web/app.js", "web/robot-view.js",
+        ]),
+        ("share/" + package_name + "/web/vendor", [
+            "web/vendor/three.module.min.js", "web/vendor/OrbitControls.js",
+            "web/vendor/STLLoader.js", "web/vendor/THREE-LICENSE.txt",
+        ]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

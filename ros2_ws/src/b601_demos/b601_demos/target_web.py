@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread
 from urllib.parse import urlsplit
+from xml.etree.ElementTree import ParseError
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
@@ -20,6 +21,7 @@ from b601_target_interfaces.msg import TargetFrame
 from b601_target_interfaces.srv import ReleaseSource, RenewSource, SelectSource, SetTarget
 
 from .target_arbiter import ARBITER
+from .web_robot_model import build_model, find_vendor_model
 
 
 class TargetWeb(Node):
@@ -35,6 +37,11 @@ class TargetWeb(Node):
         self.status = None
         self.feedback = {}
         self.feedback_at = None
+        self.robot_model = None
+        self.vendor_model = find_vendor_model()
+        self.create_subscription(
+            String, "/robot_description", self.on_description,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(
             String, f"{ARBITER}/status", self.on_status,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -50,6 +57,12 @@ class TargetWeb(Node):
     def on_feedback(self, message):
         self.feedback = dict(zip(message.name, message.position))
         self.feedback_at = time.monotonic()
+
+    def on_description(self, message):
+        try:
+            self.robot_model = build_model(message.data, self.vendor_model)
+        except (KeyError, ValueError, ParseError) as error:
+            self.get_logger().warning(f"网页机械臂模型读取失败：{error}")
 
     def snapshot(self):
         feedback_at = self.feedback_at
@@ -101,13 +114,36 @@ class TargetWeb(Node):
 
 
 class TargetHandler(BaseHTTPRequestHandler):
-    asset_files = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
-                   "/style.css": ("style.css", "text/css")}
+    asset_files = {
+        "/": ("index.html", "text/html"),
+        "/app.js": ("app.js", "text/javascript"),
+        "/style.css": ("style.css", "text/css"),
+        "/robot-view.js": ("robot-view.js", "text/javascript"),
+        "/vendor/three.module.min.js": ("vendor/three.module.min.js", "text/javascript"),
+        "/vendor/OrbitControls.js": ("vendor/OrbitControls.js", "text/javascript"),
+        "/vendor/STLLoader.js": ("vendor/STLLoader.js", "text/javascript"),
+        "/vendor/THREE-LICENSE.txt": ("vendor/THREE-LICENSE.txt", "text/plain"),
+    }
 
     def do_GET(self):
         path = urlsplit(self.path).path
         if path == "/api/state":
             self.send_json(HTTPStatus.OK, self.server.bridge.snapshot())
+            return
+        robot = self.server.bridge.robot_model
+        if path == "/api/model":
+            if robot is None:
+                self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"message": "等待机械臂模型"})
+            else:
+                self.send_json(HTTPStatus.OK, robot[0])
+            return
+        if robot is not None and (mesh := robot[1].get(path)) is not None:
+            try:
+                data = mesh.read_bytes()
+            except OSError:
+                self.send_error(HTTPStatus.NOT_FOUND)
+            else:
+                self.send_content(HTTPStatus.OK, "model/stl", data, cache="public, max-age=3600")
             return
         asset = self.asset_files.get(path)
         if asset is None:
@@ -143,11 +179,13 @@ class TargetHandler(BaseHTTPRequestHandler):
     def send_json(self, status, data):
         self.send_content(status, "application/json", json.dumps(data, ensure_ascii=False).encode())
 
-    def send_content(self, status, content_type, data):
+    def send_content(self, status, content_type, data, *, cache="no-store"):
         self.send_response(status)
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+        if content_type.startswith("text/") or content_type == "application/json":
+            content_type += "; charset=utf-8"
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(data)
 

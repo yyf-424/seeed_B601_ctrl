@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>B601 · 关节目标控制台</title>
   <link rel="stylesheet" href="/style.css">
+  <script type="importmap">{"imports":{"three":"/vendor/three.module.min.js"}}</script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -29,7 +30,25 @@
         <button id="release" class="quiet" disabled>释放控制权</button>
       </div>
     </section>
-    <section class="joints" aria-labelledby="joints-title">
+    <div class="workspace">
+      <section id="robot-view" class="robot-view" aria-labelledby="robot-title">
+        <div class="robot-head">
+          <h2 id="robot-title">机械臂视图</h2>
+          <div class="view-actions">
+            <label><input id="show-robot-target" type="checkbox" checked disabled> 显示目标</label>
+            <button id="reset-view" class="quiet" disabled>复位视角</button>
+          </div>
+        </div>
+        <div id="robot-stage" class="robot-stage">
+          <span id="model-status" class="model-status" role="status">正在载入机械臂模型…</span>
+        </div>
+        <div class="pose-summary" aria-label="末端 XYZ，单位米">
+          <div><span class="pose-legend actual">实测位置</span><output id="actual-tip">—</output></div>
+          <div><span id="model-target-label" class="pose-legend target">关节目标</span><output id="target-tip">—</output></div>
+          <small>末端 XYZ / m</small>
+        </div>
+      </section>
+      <section class="joints" aria-labelledby="joints-title">
       <div class="joint-header">
         <div><h2 id="joints-title">实时反馈与关节目标</h2>
           <p class="hint">编辑目标后可逐关节发送，或一次发送全部已修改关节。</p></div>
@@ -39,7 +58,8 @@
         </div>
       </div>
       <div class="table" id="joints"><p class="placeholder">收到关节列表后可编辑目标。</p></div>
-    </section>
+      </section>
+    </div>
     <p class="notice" id="notice" role="status" aria-live="polite"></p>
   </main>
 </body>
