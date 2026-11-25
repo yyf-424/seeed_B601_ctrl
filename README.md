@@ -1,6 +1,6 @@
 # B601-DM v0.3.0 · 关节端 MIT 变刚度
 
-本工作区在主线提交 `1c7c19a` 上接入 [MIT 目标仲裁与网页](#mit-目标仲裁与网页)。下文真机数据来自主线验收，仲裁链路在 MuJoCo 验证。
+机械臂支持标准位置控制和电机侧 MIT 变刚度控制。MIT 上层通过 [目标仲裁与网页](#mit-目标仲裁与网页) 接收整机目标。上层实机覆盖由操作者确认，可复现的自检和 MuJoCo 回归入口见 [上层框架验收](validation/target-web.md)。
 
 主机下发位置、速度、增益和前馈力矩，电机执行 MIT PD 闭环。v0.3.0 的真机验收覆盖六轴高刚度跟踪、两档重力补偿、低刚度短时表现、双向切换和正常停机。MoveIt 2 属于上层规划，单独验收。见 [发布记录](CHANGELOG.md)。
 
@@ -172,13 +172,13 @@ python3 scripts/mit_five_poses.py --score-hardware validation/results.json
 历史位置回路的复测入口见 [pos_vel 流程](validation/pos-vel.md)。
 ## MIT 目标仲裁与网页
 
-上层架构、版本验收范围及复测结果见 [v0.4.0 上层框架验收](validation/target-web.md)。
+上层架构、实机覆盖与复测结果见 [上层框架验收](validation/target-web.md)。
 
 MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 根据实际加载的控制器配置建立内部路由。手动工具、分段归中、仿真与真机五姿态脚本、浏览器
 和外部策略共用整机仲裁入口。同一时刻只授予一个整机会话，默认启动时没有来源持有控制权。
 仲裁向各组发布 `/<控制器>/authorized_target`，转发节点是 `/<控制器>/joint_target`
-的唯一正常发布者。MIT 控制器与主工作区使用同一份实现和配置。转发节点从
+的唯一正常发布者。MIT 控制器沿用 `3d4efa5` 的实现和控制器配置。转发节点从
 `/<控制器>/state` 读取主线控制器的目标序号，在 `/<控制器>/target_applied` 回报采纳编号。
 标准位置模式仍使用自己的 `FollowJointTrajectory` 接口。
 
