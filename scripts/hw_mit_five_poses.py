@@ -92,6 +92,21 @@ def ready(node, process, label):
             raise RuntimeError("安全状态或前馈观测未就绪")
         node.spin_for(PERIOD)
     node.check()
+    if label == "hardware":
+        readiness_timeout = (PLAN["moveit_timeout_sec"] if HARDWARE["recenter_check_collisions"]
+                             else PLAN["joint_state_timeout_sec"])
+        deadline = (time.monotonic() + readiness_timeout + 3 * CONFIG["recenter"]["mit"]["phase_timeout_sec"]
+                    + CONFIG["tools"]["dm_park"]["result_grace_sec"])
+        log_path = OUT / "hardware_bringup.log"
+        while time.monotonic() < deadline:
+            log = log_path.read_text(errors="replace")
+            if "启动归中成功" in log:
+                break
+            if process.poll() is not None or "启动归中失败" in log or "process has died" in log:
+                raise RuntimeError(f"启动归中未完成，见 {log_path}")
+            node.hold(PERIOD)
+        else:
+            raise RuntimeError(f"等待启动归中超时，见 {log_path}")
     node.hold(HARDWARE["observation_pause_sec"])
 
 
@@ -302,12 +317,7 @@ def run(node):
         raise RuntimeError(f"初始夹爪未接近闭合：{initial[6]:.5f} m")
     if any(probe[name]["firmware_mode"] != 1 for name in NAMES):
         raise RuntimeError("探针未确认全轴 MIT 模式")
-    initial = in_range(initial)
-    nudge = initial.copy()
     small_index = ARM.index(HARDWARE["small_step_joint"])
-    nudge[small_index] += HARDWARE["small_step_rad"]
-    paths = [("j1 small motion", initial, nudge), ("return small", nudge, PARK),
-             ("approach", PARK, PLAN["start"])]
     mesh = launch("active_move_group.log", str(COLLISION_LAUNCH))
     process = None
     safe_to_stop = False
@@ -317,15 +327,19 @@ def run(node):
         if not client.wait_for_service(timeout_sec=PLAN["moveit_timeout_sec"]):
             raise RuntimeError("MoveIt 碰撞检查不可用")
         summary["collision_samples"] = check_plan(node, client)
-        for label, a, b in paths:
-            summary["collision_samples"] += precheck(node, client, label, a, b)
+        summary["collision_samples"] += precheck(node, client, "approach", PARK, PLAN["start"])
         print("厂商碰撞网格计划采样通过:", summary["collision_samples"], flush=True)
         check_cancelled()
         process = bringup(True)
         ready(node, process, "hardware")
         q, _ = state(node)
         if not at_recenter(q[:GRIPPER_INDEX], mit=True):
-            raise RuntimeError(f"使能后起点漂移超限：{q}")
+            raise RuntimeError(f"启动归中后实测位形超出容差：{q}")
+        initial = in_range(q)
+        nudge = initial.copy()
+        nudge[small_index] += HARDWARE["small_step_rad"]
+        summary["collision_samples"] += precheck(node, client, "small motion", initial, nudge)
+        summary["collision_samples"] += precheck(node, client, "return small", nudge, PARK)
         print(f'6+1 电机侧 MIT 已使能，执行 {HARDWARE["small_step_joint"]} '
               f'{HARDWARE["small_step_rad"]} rad 预检查。', flush=True)
         with (OUT / "trace.csv").open("w", newline="", buffering=1) as output:

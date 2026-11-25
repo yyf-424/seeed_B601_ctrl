@@ -63,6 +63,7 @@ def load_urdf(path):
             entry["joints"][joint.get("name")] = {
                 "command": [ci.get("name") for ci in joint.findall("command_interface")],
                 "state": [si.get("name") for si in joint.findall("state_interface")],
+                "params": {p.get("name"): p.text for p in joint.findall("param")},
             }
         ros2_control[system.get("name")] = entry
     return {"links": links, "joints": joints, "masses": inertials, "ros2_control": ros2_control}
@@ -122,6 +123,29 @@ def check_controllers(urdf, path, errors, warnings):
         errors.append("缺少 joint_state_broadcaster：/joint_states 不会发布，MoveIt 与 RViz 都会瞎")
 
 
+def check_dm_activation_limits(urdf, path, errors):
+    with open(path, encoding="utf-8") as f:
+        safety = next(iter(yaml.safe_load(f).values()))["ros__parameters"]
+    limits = dict(zip(safety["joint_names"], zip(safety["pos_min"], safety["pos_max"])))
+    drivers = [system for system in urdf["ros2_control"].values()
+               if system["plugin"] == "b601_hardware/DmSystemHardware"]
+    if not drivers:
+        errors.append("找不到达妙真机驱动，无法校验激活位置边界")
+    for system in drivers:
+        motors = {name for name, joint in system["joints"].items() if "motor_id" in joint["params"]}
+        if not motors:
+            errors.append("达妙真机驱动没有配置电机")
+        for name in sorted(motors):
+            params = system["joints"][name]["params"]
+            try:
+                actual = float(params["feedback_min_pos"]), float(params["feedback_max_pos"])
+            except (KeyError, TypeError, ValueError):
+                errors.append(f"{name} 缺少有效的达妙激活位置边界")
+                continue
+            if actual != limits.get(name):
+                errors.append(f"{name} 达妙激活位置边界 {actual} 与急停边界 {limits.get(name)} 不一致")
+
+
 def check_mit_controllers(urdf, path, errors):
     """MIT 力控实例表：每个可控关节必须且只能属于一个实例（裸关节 = 力矩恒 0）。
 
@@ -147,7 +171,8 @@ def check_mit_controllers(urdf, path, errors):
             commands = set(joint.get("command", []))
             if "effort" in commands:
                 effort_joints.add(name)
-                if commands != required_commands:
+                expected = required_commands | ({"low_stiffness"} if name == "joint1" else set())
+                if commands != expected:
                     errors.append(f"{name} MIT 接口不完整：{sorted(commands)}")
     if not effort_joints:
         # 位置模式的 URDF 展开：MIT 实例表不适用，跳过而不是报错
@@ -338,6 +363,7 @@ def main():
     parser.add_argument("--controllers")
     parser.add_argument("--moveit-controllers")
     parser.add_argument("--srdf")
+    parser.add_argument("--safety-params", help="校验达妙激活位置边界与急停位置参数完全一致")
     parser.add_argument("--mit-controllers", help="MIT 力控控制器 yaml（生成物）")
     args = parser.parse_args()
 
@@ -368,6 +394,8 @@ def main():
         check_moveit_controllers(urdf, args.moveit_controllers, ros_controller_names, errors)
     if args.srdf:
         check_srdf(urdf, args.srdf, errors)
+    if args.safety_params:
+        check_dm_activation_limits(urdf, args.safety_params, errors)
     if args.mit_controllers:
         check_mit_controllers(urdf, args.mit_controllers, errors)
 

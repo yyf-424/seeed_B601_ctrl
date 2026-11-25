@@ -44,13 +44,11 @@ def render(cfg):
     arm_joints = cfg["robot"]["arm_joints"]
     profile = profiles[mit["instances"]["b601_mit_arm"]["profile"]]
     gains = {key: [profile["per_joint"][name][key] for name in arm_joints]
-             for key in ("kp_hold", "kd_hold", "kp_move", "kd_move")}
-    joint_defaults = {key: profile["per_joint"][arm_joints[0]][key]
-                      for key in ("settle_band_min", "settle_band_max")}
+             for key in ("kp_move", "kd_move")}
     groups = {
         "dm": {**dm, **dm["temperature"], **cfg["implementation"]["dm"]},
         "mujoco": {**dm["thermal"], **cfg["implementation"]["mujoco"]},
-        "mit": {**profile["group"], **gains, **joint_defaults, **cfg["implementation"]["mit"],
+        "mit": {**profile["group"], **gains, **cfg["implementation"]["mit"],
                 "gravity_m_s2": cfg["model"]["gravity_m_s2"]},
     }
     # Skip nonnumeric ROS arrays. They remain in the controller YAML.

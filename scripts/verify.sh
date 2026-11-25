@@ -107,10 +107,12 @@ fi
 # 关键派生文件必须存在（第一次 clone 后忘记 sync 的典型症状）
 for f in \
     "$DESCRIPTION/config/initial_positions.yaml" \
+    "$DESCRIPTION/config/safety_position_limits.yaml" \
     "$WORKSPACE/src/b601_bringup/config/b601_controllers.yaml" \
     "$WORKSPACE/src/b601_moveit_config/config/joint_limits.yaml" \
     "$WORKSPACE/src/b601_safety/config/safety_params.yaml" \
-    "$WORKSPACE/src/b601_bringup/config/b601_mit_controllers.yaml"; do
+    "$WORKSPACE/src/b601_bringup/config/b601_mit_controllers.yaml" \
+    "$WORKSPACE/src/b601_bringup/config/b601_mit_controllers_gravity.yaml"; do
   if [[ -f "$f" ]]; then
     ok "派生文件存在：${f#"$REPO_ROOT"/}"
   else
@@ -183,17 +185,31 @@ if [[ -f "$TMP/b601_mock.urdf" ]]; then
 else
   warn "跳过（没有展开后的 URDF）"
 fi
+# 真机位置模式与 MIT 模式读取相同的急停位置边界。
+for model in b601_dm b601_mitimpedance; do
+  if [[ -f "$TMP/$model.urdf" ]]; then
+    if python3 "$REPO_ROOT/scripts/check_consistency.py" "$TMP/$model.urdf" \
+        --safety-params "$WORKSPACE/src/b601_safety/config/safety_params.yaml" \
+        2>&1 | sed 's/^/         /'; then
+      ok "达妙激活位置与急停边界一致：$model"
+    else
+      fail "达妙激活位置与急停边界不一致：$model"
+    fi
+  fi
+done
 # MIT 实例覆盖：在 mit_impedance 模型上再查一遍「每关节都有属主」
 if [[ -f "$TMP/b601_mitimpedance.urdf" ]]; then
-  if python3 "$REPO_ROOT/scripts/check_consistency.py" "$TMP/b601_mitimpedance.urdf" \
-      --project-config "$PROJECT_CONFIG" \
-      --repo-root "$REPO_ROOT" \
-      --mit-controllers "$WORKSPACE/src/b601_bringup/config/b601_mit_controllers.yaml" \
-      2>&1 | sed 's/^/         /'; then
-    ok "MIT 实例覆盖检查通过（joint1..6 + finger_left 各有属主）"
-  else
-    fail "MIT 实例覆盖检查未通过（有裸关节 → 力矩恒 0）"
-  fi
+  for mit_yaml in b601_mit_controllers.yaml b601_mit_controllers_gravity.yaml; do
+    if python3 "$REPO_ROOT/scripts/check_consistency.py" "$TMP/b601_mitimpedance.urdf" \
+        --project-config "$PROJECT_CONFIG" \
+        --repo-root "$REPO_ROOT" \
+        --mit-controllers "$WORKSPACE/src/b601_bringup/config/$mit_yaml" \
+        2>&1 | sed 's/^/         /'; then
+      ok "MIT 实例覆盖检查通过：$mit_yaml"
+    else
+      fail "MIT 实例覆盖检查未通过：$mit_yaml"
+    fi
+  done
 fi
 
 # ------------------------------------------- 6. 文档归档（docs/changes/）

@@ -97,6 +97,8 @@ private:
     double torque_limit{0.0};  // MIT 总输出限幅（N·m 或 N）
     double min_pos{0.0};       // 关节位置下限（rad 或 m）
     double max_pos{0.0};       // 关节位置上限
+    double feedback_min_pos{0.0};  // 与急停一致的激活下限，也是反馈合理性守卫的基准
+    double feedback_max_pos{0.0};
     bool has_position_limit{false};
     bool has_command{false};    // 该关节是否有命令接口（finger_right 没有）
     int reject_count{0};        // 被合理性检查拦掉的次数
@@ -113,6 +115,8 @@ private:
     // mit_impedance（Phase 3）：位置环交给驱动器，控制器下发 (pos, vel, kp, kd, τ_ff)
     double cmd_kp{0.0};
     double cmd_kd{0.0};     // 控制器写进来的期望力矩（mit_torque 模式）
+    double cmd_low_stiffness{0.0};
+    double state_low_stiffness{0.0};
     double command_sent{0.0};   // 上一周期真正下发到电机的值（限速基准）
     double state_pos{0.0};
     double state_vel{0.0};

@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import importlib.util
+import math
 import sys
 from pathlib import Path
 
@@ -80,9 +82,9 @@ def main() -> int:
     p = dict(startup); p["joint2"] = startup["joint2"] - SETTINGS["pose_deviation_rad"]
     case("离开启动位形 0.6rad", logic.WARNING, p, note="警告态必须允许继续驱动")
 
-    # 3) 接近 joint2 下限（-3.14）→ 警告
-    p = dict(startup); p["joint2"] = SETTINGS["position_near_lower_rad"]
-    case("接近下限 0.09rad", logic.WARNING, p)
+    # 3) 接近 joint2 急停下限 → 警告
+    p = dict(startup, joint2=limits.pos_min[1] + limits.warn_pos_margin[1] / 2)
+    case("接近 J2 下限", logic.WARNING, p)
 
     # 4) 角速度达到上限的 85% → 警告
     v = dict(still); v["joint1"] = SETTINGS["warning_speed_ratio"] * limits.vel_max[0]
@@ -137,7 +139,34 @@ def main() -> int:
             for reason in result.reasons:
                 print(f"         · {reason}")
 
-    total = len(cases)
+    profile_cases = []
+    if "low_vel_max" in params:
+        low = replace(limits, vel_max=params["low_vel_max"], stop_at_velocity_limit=frozenset(limits.names))
+        finger = limits.names.index("finger_left")
+        speed = (limits.vel_max[finger] + low.vel_max[finger]) / 2
+        profile_cases += [
+            ("低档速度到达 10 rad/s 急停", low, startup, dict(still, joint1=low.vel_max[0]), True),
+            ("低档速度在扩大范围内", low, startup,
+             dict(still, joint1=(low.vel_max[0] + limits.vel_max[0]) / 2), False),
+            ("夹爪常规速度仍判急停", limits, startup, dict(still, finger_left=speed, finger_right=-speed), True),
+            ("夹爪低档允许扩大速度", low, startup, dict(still, finger_left=speed, finger_right=-speed), False),
+            ("夹爪低档速度到达上限急停", low, startup, dict(still, finger_left=low.vel_max[finger]), True),
+        ]
+        for label, profile in [("常规档", limits), ("低档", low)]:
+            for joint, lower, upper in zip(limits.names, limits.pos_min, limits.pos_max):
+                for bound, outside in [(lower, -math.inf), (upper, math.inf)]:
+                    profile_cases += [
+                        (f"{label} {joint} 界内", profile, dict(startup, **{joint: bound}), still, False),
+                        (f"{label} {joint} 越界", profile,
+                         dict(startup, **{joint: math.nextafter(bound, outside)}), still, True),
+                    ]
+    for name, profile, positions, velocities, should_stop in profile_cases:
+        result = logic.evaluate(positions, velocities, profile)
+        ok = (result.state == logic.EMERGENCY_STOP) == should_stop
+        failures += not ok
+        print(f"{'[PASS]' if ok else '[FAIL]'} {name:<22} 实际 {result.state}")
+
+    total = len(cases) + len(profile_cases)
     print(f"\n汇总：{total - failures}/{total} 通过")
     return 0 if failures == 0 else 1
 

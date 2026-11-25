@@ -68,24 +68,16 @@ private:
   // 运行时可调（ros2 param set 立即生效），因此用 atomic 避免与实时线程竞争。
   // 首调安全流程就是靠它：先把 gravity_scale 设 0，确认稳定再逐级升到 1。
   std::atomic<double> gravity_scale_{b601_config::mit::gravity_scale};
-  std::vector<double> gravity_joint_scale_, gravity_bias_;
+  std::vector<double> gravity_joint_scale_, gravity_joint_scale_free_, gravity_bias_;
   std::atomic<double> friction_scale_{b601_config::mit::friction_scale};
   double task_torque_timeout_sec_{b601_config::mit::task_torque_timeout_sec};
   double target_velocity_timeout_sec_{b601_config::mit::target_velocity_timeout_sec};
-  // 逐关节增益（不是标量）：各关节等效惯量差 40 倍，用统一 kd 会让最轻的 joint6
-  // 离散发散（MuJoCo 实测：joint6 的 I=0.0106 kg·m²，5 ms 周期下 kd 上限 4.22）。
-  // 默认值按临界阻尼 kd=2√(kp·I) 给出，见 kDefaultKd*。
-  // kp 也逐关节：真机位置反馈有 ~12 ms 延迟，迟滞弹簧的稳定判据是 ωn·T < ~0.5，
-  // 而 ωn=√(kp/I)：j5/j6 用 kp=60 时 ωn 达 53/75 rad/s，ωn·T≈0.6–0.9 → 一动就自激
-  // （2026-11-21 真机：j5 5.2 rad/s、j6 12 rad/s，连 kd=0 的纯弹簧都会振）。
-  // 所以 j4–j6 用低 kp（≈20/10/8），把带宽压到 ωn·T≈0.3；它们的重力矩本来就小。
-  // 夹爪是 prismatic（单位 m / N），量级完全不同，由它自己的 profile 给。
-  std::vector<double> kp_hold_;        // 兼容保留：未给 kp_free 时作为 free 档的回退值
-  std::vector<double> kd_hold_;
   // ---- 指令层（Phase 1）----
   std::vector<double> kp_free_;        // 等待（无权威）档刚度
   std::vector<double> kd_free_;
   std::vector<bool> free_enabled_;     // 该关节是否参与等待模式（夹爪也参与，决策⑭）
+  bool free_follow_feedback_{b601_config::mit::free_follow_feedback_default};
+  bool low_after_first_target_{false};
   std::vector<double> settle_band_min_;
   std::vector<double> settle_band_max_;
   std::vector<double> settle_band_;    // 每周期按本次指令位移算出来的实际误差带
@@ -98,10 +90,6 @@ private:
   double track_timeout_sec_{b601_config::mit::track_timeout_sec};      // 0 = 关闭（被挡场景前期不做，决策⑩）
   std::vector<double> kp_move_;
   std::vector<double> kd_move_;
-  std::atomic<double> move_threshold_{b601_config::mit::move_threshold};  // 关节单位
-  std::atomic<double> hold_threshold_{b601_config::mit::hold_threshold};  // 关节单位
-  double vel_hold_threshold_{b601_config::mit::vel_hold_threshold};           // 关节单位/s
-  double kp_ramp_sec_{b601_config::mit::kp_ramp_sec};
   double friction_vel_eps_{b601_config::mit::friction_vel_eps};             // 关节单位/s，tanh 平滑速度
   bool use_gravity_{b601_config::mit::use_gravity};
   std::atomic<double> velocity_lpf_hz_{b601_config::mit::velocity_lpf_hz};  // 摩擦补偿使用的速度低通
@@ -120,6 +108,7 @@ private:
   std::vector<int> pos_cmd_idx_;             // N：position 命令接口
   std::vector<int> kp_idx_;                  // N：kp 命令接口
   std::vector<int> kd_idx_;                  // N：kd 命令接口
+  int low_stiffness_idx_{-1};
   std::array<int, chain::kNumJoints> chain_pos_idx_{-1, -1, -1, -1, -1, -1};
   std::vector<int> gravity_row_;             // N：本实例第 i 关节在整链里的行号（-1 = 不参与）
   bool bind_interfaces();

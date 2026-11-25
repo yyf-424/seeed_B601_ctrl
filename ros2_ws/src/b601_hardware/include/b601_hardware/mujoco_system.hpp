@@ -103,6 +103,8 @@ private:
     // mit_impedance（Phase 3）：位置环在"驱动器"里闭环 —— 仿真里就是插件按物理步长
     // 用 cmd_kp/cmd_kd 自己算力矩，从而和真机一样把带宽提到 1 kHz 量级。
     double cmd_kp{0.0};
+    double cmd_low_stiffness{0.0};
+    double state_low_stiffness{0.0};
     double cmd_kd{0.0};
     double state_position{0.0};
     double state_velocity{0.0};

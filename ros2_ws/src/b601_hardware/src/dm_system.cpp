@@ -252,6 +252,16 @@ bool DmSystemHardware::parse_joint_config(
   if (p.find("min_pos") != p.end() && p.find("max_pos") != p.end()) {
     cfg.min_pos = get_double(p, "min_pos", 0.0, where);
     cfg.max_pos = get_double(p, "max_pos", 0.0, where);
+    const double feedback_min_pos = get_double(p, "feedback_min_pos", cfg.min_pos, where);
+    const double feedback_max_pos = get_double(p, "feedback_max_pos", cfg.max_pos, where);
+    if (!std::isfinite(feedback_min_pos) || !std::isfinite(feedback_max_pos) ||
+        feedback_min_pos > cfg.min_pos || feedback_max_pos < cfg.max_pos)
+    {
+      RCLCPP_ERROR(logger(), "%s 的反馈合理性边界必须有限且覆盖指令位置限位", where.c_str());
+      return false;
+    }
+    cfg.feedback_min_pos = feedback_min_pos;
+    cfg.feedback_max_pos = feedback_max_pos;
     // 反馈跳变门限（rad/周期）：0 = 按 vel_limit 自动推算（vel_limit·0.08+0.05）。
     // ⚠ 放宽 vel_limit 会顺带放松这道守卫，所以要"跑得快但守得紧"就显式钉死它。
     cfg.feedback_jump_limit = get_double(p, "feedback_jump_limit", 0.0, where);
@@ -279,6 +289,8 @@ std::vector<hardware_interface::StateInterface> DmSystemHardware::export_state_i
         out.emplace_back(joint.name, iface.name, &joints_[i].state_vel);
       } else if (iface.name == hardware_interface::HW_IF_EFFORT) {
         out.emplace_back(joint.name, iface.name, &joints_[i].state_effort);
+      } else if (iface.name == "low_stiffness") {
+        out.emplace_back(joint.name, iface.name, &joints_[i].state_low_stiffness);
       }
     }
   }
@@ -303,6 +315,8 @@ std::vector<hardware_interface::CommandInterface> DmSystemHardware::export_comma
         out.emplace_back(joint.name, iface.name, &joints_[i].cmd_kp);
       } else if (iface.name == "kd") {
         out.emplace_back(joint.name, iface.name, &joints_[i].cmd_kd);
+      } else if (iface.name == "low_stiffness") {
+        out.emplace_back(joint.name, iface.name, &joints_[i].cmd_low_stiffness);
       } else {
         RCLCPP_WARN(
           logger(), "本插件不实现 %s 的命令接口 %s", joint.name.c_str(), iface.name.c_str());
@@ -505,22 +519,27 @@ hardware_interface::CallbackReturn DmSystemHardware::on_activate(
     joint.cmd = joint.state_pos;
     joint.command_sent = joint.state_pos;
   }
-  // 安全检查：实测位置必须落在软限位内。
-  // 为什么不能靠 write() 里的夹紧兜底 —— 那样会在使能瞬间把目标强行拉到限位，
-  // 相当于电机自己"弹"回限位，是真机上最危险的意外动作之一。
+  // 激活使用急停的位置边界，主动命令继续按 min_pos/max_pos 夹紧。
   bool out_of_range = false;
   for (const auto & joint : joints_) {
     if (!joint.has_position_limit || joint.motor_id == 0) {
       continue;
     }
-    if (joint.state_pos < joint.min_pos || joint.state_pos > joint.max_pos) {
+    const double position = joint.direction * joint.scale * joint.raw_pos_motor + joint.zero_offset;
+    if (!joint.raw_valid || !std::isfinite(position) ||
+        position < joint.feedback_min_pos || position > joint.feedback_max_pos)
+    {
       RCLCPP_ERROR(
         logger(),
-        "%s 当前 %.4f rad 不在软限位 [%.3f, %.3f] 内—— 拒绝使能。"
-        "请先用**手**把手臂移回限位内再重新激活（或用 direction/zero_offset 修正映射，"
-        "或确认后放宽 min_pos/max_pos）。",
-        joint.name.c_str(), joint.state_pos, joint.min_pos, joint.max_pos);
+        "%s 启动位置未通过急停范围检查 [%.6f, %.6f]（实测 %.6f，反馈有效: %s），拒绝激活",
+        joint.name.c_str(), joint.feedback_min_pos, joint.feedback_max_pos, position,
+        joint.raw_valid ? "是" : "否");
       out_of_range = true;
+    } else if (position < joint.min_pos || position > joint.max_pos) {
+      RCLCPP_WARN(
+        logger(),
+        "%s 实测 %.6f 在急停范围内，超出指令限位 [%.6f, %.6f]（关节单位 rad/m）",
+        joint.name.c_str(), position, joint.min_pos, joint.max_pos);
     }
   }
   if (out_of_range) {
@@ -538,6 +557,8 @@ hardware_interface::CallbackReturn DmSystemHardware::on_activate(
       joint.cmd_effort = 0.0;
       joint.cmd_kp = 0.0;
       joint.cmd_kd = 0.0;
+      joint.cmd_low_stiffness = 0.0;
+      joint.state_low_stiffness = 0.0;
     }
   }
 
@@ -577,6 +598,10 @@ hardware_interface::CallbackReturn DmSystemHardware::on_deactivate(
     }
   }
   enabled_ = false;
+  for (auto & joint : joints_) {
+    joint.cmd_low_stiffness = 0.0;
+    joint.state_low_stiffness = 0.0;
+  }
   close_bus();
   close_log_file();
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -634,8 +659,8 @@ void DmSystemHardware::poll_state()
         b601_config::dm::fallback_jump_margin_rad;
       const bool bad_jump = std::abs(new_pos - joint.state_pos) > max_jump;
       const bool bad_range = joint.has_position_limit &&
-        (new_pos < joint.min_pos - b601_config::dm::invalid_feedback_margin ||
-        new_pos > joint.max_pos + b601_config::dm::invalid_feedback_margin);
+        (new_pos < joint.feedback_min_pos - b601_config::dm::invalid_feedback_margin ||
+        new_pos > joint.feedback_max_pos + b601_config::dm::invalid_feedback_margin);
       if (bad_jump || bad_range) {
         joint.reject_count++;
         if (joint.reject_count % b601_config::dm::rejected_feedback_log_every == 1) {
@@ -679,6 +704,9 @@ hardware_interface::return_type DmSystemHardware::read(
     return hardware_interface::return_type::ERROR;
   }
   poll_state();
+  for (auto & joint : joints_) {
+    joint.state_low_stiffness = enabled_ && joint.raw_valid && joint.cmd_low_stiffness == 1.0 ? 1.0 : 0.0;
+  }
 
   // ---- 温度守护（决策③：不做力矩位置保护，堵转靠这里兜底）----
   {

@@ -237,6 +237,8 @@ hardware_interface::CallbackReturn MujocoSystemHardware::on_activate(
     jm.cmd_velocity = 0.0;
     jm.cmd_kp = 0.0;
     jm.cmd_kd = 0.0;
+    jm.cmd_low_stiffness = 0.0;
+    jm.state_low_stiffness = 0.0;
     jm.cmd_effort = 0.0;
   }
   mju_zero(data_->ctrl, model_->nu);
@@ -293,6 +295,9 @@ std::vector<hardware_interface::StateInterface> MujocoSystemHardware::export_sta
     if (with_effort) {
       states.emplace_back(jm.name, hardware_interface::HW_IF_EFFORT, &jm.state_effort);
     }
+    if (command_mode_ == "mit_impedance" && jm.name == "joint1") {
+      states.emplace_back(jm.name, "low_stiffness", &jm.state_low_stiffness);
+    }
   }
   return states;
 }
@@ -310,6 +315,9 @@ std::vector<hardware_interface::CommandInterface> MujocoSystemHardware::export_c
       commands.emplace_back(jm.name, "kp", &jm.cmd_kp);
       commands.emplace_back(jm.name, "kd", &jm.cmd_kd);
       commands.emplace_back(jm.name, hardware_interface::HW_IF_EFFORT, &jm.cmd_effort);
+      if (jm.name == "joint1") {
+        commands.emplace_back(jm.name, "low_stiffness", &jm.cmd_low_stiffness);
+      }
     } else if (command_mode_ == "mit_torque") {
       commands.emplace_back(jm.name, hardware_interface::HW_IF_EFFORT, &jm.cmd_effort);
     } else {
@@ -413,6 +421,7 @@ hardware_interface::return_type MujocoSystemHardware::read(
     jm.state_position = data_->qpos[jm.qpos_adr];
     jm.state_velocity = data_->qvel[jm.dof_adr];
     jm.state_effort = applied_effort(jm);
+    jm.state_low_stiffness = jm.cmd_low_stiffness;
   }
   if (verbose_ && steps_total_ < b601_config::mujoco::startup_log_steps) {
     std::string line;

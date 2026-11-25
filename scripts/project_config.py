@@ -3,6 +3,7 @@
 
 import argparse
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import yaml
@@ -14,6 +15,22 @@ TRUTH = ROOT / "ros2_ws" / "src" / "b601_description" / "config" / "b601_project
 
 def load_project_config():
     return yaml.safe_load(TRUTH.read_text(encoding="utf-8"))
+
+
+def expanded_position_range(measured, fraction):
+    lower, upper = (Decimal(str(value)) for value in measured)
+    margin = (upper - lower) * Decimal(str(fraction))
+    return [float(lower - margin), float(upper + margin)]
+
+
+def safety_position_limits(project):
+    angle = project["safety"]["angle"]
+    limits = {name: expanded_position_range(measured, angle["position_expansion_fraction"])
+              for name, measured in angle["measured_position_ranges"].items()}
+    robot = project["robot"]
+    lower, upper = limits[robot["gripper_joint"]]
+    limits[robot["mimic_joint"]] = [-upper, -lower]
+    return limits
 
 
 def main():

@@ -23,8 +23,14 @@
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
+  <!-- 激活检查与急停共用位置边界。反馈守卫也用它作为合理性判断的基准。 -->
+  <xacro:macro name="b601_dm_feedback_bounds" params="bounds">
+    <param name="feedback_min_pos">${bounds[0]}</param>
+    <param name="feedback_max_pos">${bounds[1]}</param>
+  </xacro:macro>
+
   <!-- 单个手臂关节：接口 + （仅 dm 后端）电机参数 -->
-  <xacro:macro name="b601_arm_joint" params="name initial_position with_effort hardware cfg dm_command_mode">
+  <xacro:macro name="b601_arm_joint" params="name initial_position with_effort hardware cfg dm_command_mode dm_position_limits">
     <xacro:property name="jc" value="${cfg['joints'][name]}"/>
     <xacro:property name="mt" value="${jc['motor']}"/>
     <joint name="${name}">
@@ -39,6 +45,12 @@
         <command_interface name="effort"/>
         <command_interface name="kp"/>
         <command_interface name="kd"/>
+        <xacro:if value="${name == 'joint1'}">
+          <command_interface name="low_stiffness"/>
+          <state_interface name="low_stiffness">
+            <param name="initial_value">0.0</param>
+          </state_interface>
+        </xacro:if>
       </xacro:if>
       <xacro:if value="${dm_command_mode == 'mit_torque'}">
         <command_interface name="effort"/>
@@ -77,6 +89,7 @@
         <param name="target_slew">${cfg['target_slew'][jc['type']]}</param>
         <param name="min_pos">${jc['min_pos']}</param>
         <param name="max_pos">${jc['max_pos']}</param>
+        <xacro:b601_dm_feedback_bounds bounds="${dm_position_limits[name]}"/>
         <param name="torque_limit">${jc['max_effort']}</param>
         <!-- 反馈跳变门限（rad/周期）：显式钉死，避免放宽 vel_limit 时把坏帧守卫也放松 -->
         <param name="feedback_jump_limit">${jc['feedback_jump_limit']}</param>
@@ -99,7 +112,7 @@
   </xacro:macro>
 
   <xacro:macro name="b601_ros2_control"
-               params="name hardware:='mock' initial_positions_file project_config_file
+               params="name hardware:='mock' initial_positions_file project_config_file dm_position_limits
                        dm_device:='' dm_enable_motors:='' dm_command_mode:='' dm_log_csv:=''
                        mujoco_model:=''">
     <xacro:property name="CFG" value="${xacro.load_yaml(project_config_file)}"/>
@@ -154,7 +167,6 @@
           <param name="feedback_wait_ms">${HW['feedback_wait_ms']}</param>
           <param name="request_feedback">${HW['request_feedback']}</param>
           <param name="feedback_divider">${HW['feedback_divider']}</param>
-               激活检查按 [min_pos - tol, max_pos + tol] 判。命令夹紧仍按真实限位。 -->
           <param name="mode_switch_timeout_ms">${HW['mode_switch_timeout_ms']}</param>
           <!-- CSV 记录（速度/MIT 数据留痕）：留空 = 关闭。
                开启后每采样周期写一行，含电机原始 pos/vel/torq 与过滤后的关节状态、命令值。 -->
@@ -200,22 +212,22 @@
            前三个是 4340P（大增益大扭矩），后三个 4310（小增益小扭矩） -->
       <xacro:b601_arm_joint name="joint1" initial_position="${initial_positions['joint1']}"
         with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
-        dm_command_mode="${eff_mode}"/>
+        dm_command_mode="${eff_mode}" dm_position_limits="${dm_position_limits}"/>
       <xacro:b601_arm_joint name="joint2" initial_position="${initial_positions['joint2']}"
         with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
-        dm_command_mode="${eff_mode}"/>
+        dm_command_mode="${eff_mode}" dm_position_limits="${dm_position_limits}"/>
       <xacro:b601_arm_joint name="joint3" initial_position="${initial_positions['joint3']}"
         with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
-        dm_command_mode="${eff_mode}"/>
+        dm_command_mode="${eff_mode}" dm_position_limits="${dm_position_limits}"/>
       <xacro:b601_arm_joint name="joint4" initial_position="${initial_positions['joint4']}"
         with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
-        dm_command_mode="${eff_mode}"/>
+        dm_command_mode="${eff_mode}" dm_position_limits="${dm_position_limits}"/>
       <xacro:b601_arm_joint name="joint5" initial_position="${initial_positions['joint5']}"
         with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
-        dm_command_mode="${eff_mode}"/>
+        dm_command_mode="${eff_mode}" dm_position_limits="${dm_position_limits}"/>
       <xacro:b601_arm_joint name="joint6" initial_position="${initial_positions['joint6']}"
         with_effort="${with_effort}" hardware="${hardware}" cfg="${CFG}"
-        dm_command_mode="${eff_mode}"/>
+        dm_command_mode="${eff_mode}" dm_position_limits="${dm_position_limits}"/>
 
       <!-- ============================================================ 夹爪 -->
       <!-- 夹爪关节是 prismatic（m），电机转的是 rad，单位换算靠 scale：
@@ -258,6 +270,7 @@
           <param name="target_slew">${CFG['target_slew'][FL['type']]}</param>
           <param name="min_pos">${FL['min_pos']}</param>
           <param name="max_pos">${FL['max_pos']}</param>
+          <xacro:b601_dm_feedback_bounds bounds="${dm_position_limits['finger_left']}"/>
           <param name="torque_limit">${FL['max_effort']}</param>
           <param name="feedback_jump_limit">${FL['feedback_jump_limit']}</param>
         </xacro:if>

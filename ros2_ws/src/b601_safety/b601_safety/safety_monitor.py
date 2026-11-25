@@ -35,9 +35,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from math import isfinite
 import time
 
 import rclpy
+from control_msgs.msg import DynamicJointState
 from controller_manager_msgs.srv import (
     ListControllers,
     SetHardwareComponentState,
@@ -48,6 +51,7 @@ from lifecycle_msgs.msg import State as LifecycleState
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
@@ -133,6 +137,16 @@ class SafetyMonitor(Node):
         )
 
         self.feedback_timeout = float(self.get_parameter("feedback_timeout_sec").value)
+        dynamic_feedback = self.declare_parameter("use_dynamic_joint_states", False).value
+        self.low_limits = None
+        if dynamic_feedback and self.has_parameter("low_vel_max"):
+            low_vel_max = _as_float_list(self.get_parameter("low_vel_max").value)
+            if len(low_vel_max) != len(names) or any(
+                    not isfinite(speed) or speed <= 0 for speed in low_vel_max):
+                raise RuntimeError("低刚度速度边界配置无效")
+            # 达妙的速度反馈可饱和在满量程，低档达到上限即触发。
+            self.low_limits = replace(self.limits, vel_max=low_vel_max,
+                                      stop_at_velocity_limit=frozenset(names))
         self.estop_on_timeout = bool(self.get_parameter("estop_on_feedback_timeout").value)
         self.startup_grace = float(self.get_parameter("startup_grace_sec").value)
         self.latch = bool(self.get_parameter("latch").value)
@@ -146,6 +160,8 @@ class SafetyMonitor(Node):
         self._positions: dict[str, float] = {}
         self._velocities: dict[str, float] = {}
         self._last_rx: float | None = None
+        self._low_sample = False
+        self._last_published_low = False
         self._boot_time = time.monotonic()
         self._estop_active = False          # 急停已触发并锁存
         self._estop_reasons: list[str] = []
@@ -164,10 +180,12 @@ class SafetyMonitor(Node):
         status_topic = str(self.get_parameter("status_topic").value)
         self.status_pub = self.create_publisher(DiagnosticStatus, status_topic, status_qos)
 
-        joint_states_topic = str(self.get_parameter("joint_states_topic").value)
+        self.feedback_topic = ("/dynamic_joint_states" if dynamic_feedback
+                               else str(self.get_parameter("joint_states_topic").value))
         self.joint_sub = self.create_subscription(
-            JointState, joint_states_topic, self._on_joint_states,
-            int(self.get_parameter("joint_state_depth").value)
+            DynamicJointState if dynamic_feedback else JointState, self.feedback_topic,
+            self._on_dynamic_joint_states if dynamic_feedback else self._on_joint_states,
+            int(self.get_parameter("joint_state_depth").value),
         )
 
         self.clear_srv = self.create_service(
@@ -204,6 +222,7 @@ class SafetyMonitor(Node):
 
     # ------------------------------------------------------------------ 回调
     def _on_joint_states(self, msg: JointState) -> None:
+        self._low_sample = False
         self._positions = dict(zip(msg.name, msg.position))
         if msg.velocity and len(msg.velocity) == len(msg.name):
             self._velocities = dict(zip(msg.name, msg.velocity))
@@ -213,6 +232,27 @@ class SafetyMonitor(Node):
         # 每来一帧立刻评估，不等定时器：
         # 一个异常的反馈帧（例如编码器跳变）应该马上被判出来，而不是被下一帧 200 Hz 的
         # 正常数据覆盖掉。定时器只负责"断流超时"这类时间相关判定。
+        self._evaluate_now()
+
+    def _on_dynamic_joint_states(self, msg: DynamicJointState) -> None:
+        interfaces = {name: dict(zip(values.interface_names, values.values))
+                      for name, values in zip(msg.joint_names, msg.interface_values)}
+        self._positions = {name: values["position"] for name, values in interfaces.items()
+                           if "position" in values}
+        self._velocities = {name: values["velocity"] for name, values in interfaces.items()
+                            if "velocity" in values}
+        now = self.get_clock().now()
+        stamp = Time.from_msg(msg.header.stamp, clock_type=now.clock_type)
+        age = (now - stamp).nanoseconds * 1e-9
+        self._low_sample = (
+            self.low_limits is not None and 0.0 <= age <= self.feedback_timeout
+            and stamp.nanoseconds > 0
+            and len(interfaces) == len(msg.joint_names) == len(msg.interface_values)
+            and interfaces.get("joint1", {}).get("low_stiffness") == 1.0
+            and all(isfinite(self._positions.get(name, float("nan")))
+                    and isfinite(self._velocities.get(name, float("nan"))) for name in self.limits.names)
+        )
+        self._last_rx = time.monotonic()
         self._evaluate_now()
 
     def _feedback_age(self) -> float | None:
@@ -236,17 +276,19 @@ class SafetyMonitor(Node):
         if age is None:
             in_grace = time.monotonic() - self._boot_time < self.startup_grace
             evaluation = Evaluation(
-                WARNING, ["尚未收到 " + str(self.get_parameter("joint_states_topic").value)
+                WARNING, ["尚未收到 " + self.feedback_topic
                           + ("（启动宽限期内）" if in_grace else "")]
             )
         elif age > self.feedback_timeout:
-            reasons = [f"/joint_states 已 {age:.2f}s 没有更新（阈值 {self.feedback_timeout:.2f}s）"]
+            self._low_sample = False
+            reasons = [f"{self.feedback_topic} 已 {age:.2f}s 没有更新（阈值 {self.feedback_timeout:.2f}s）"]
             if self.estop_on_timeout:
                 evaluation = Evaluation(EMERGENCY_STOP, reasons)
             else:
                 evaluation = Evaluation(WARNING, reasons)
         else:
-            evaluation = evaluate(self._positions, self._velocities, self.limits)
+            limits = self.low_limits if self._low_sample else self.limits
+            evaluation = evaluate(self._positions, self._velocities, limits)
 
         previous_state = self._evaluation.state
         self._evaluation = evaluation
@@ -284,7 +326,8 @@ class SafetyMonitor(Node):
             evaluation = Evaluation(EMERGENCY_STOP, reasons, evaluation.joints)
         if not force and self._last_published is not None:
             if (evaluation.state == self._last_published.state
-                    and evaluation.reasons == self._last_published.reasons):
+                    and evaluation.reasons == self._last_published.reasons
+                    and self._low_sample == self._last_published_low):
                 return  # 状态没变就不刷（话题是 transient_local，订阅者随时能拿到）
 
         msg = DiagnosticStatus()
@@ -294,6 +337,7 @@ class SafetyMonitor(Node):
         msg.message = evaluation.message
         values = [
             KeyValue(key="state", value=evaluation.state),
+            KeyValue(key="limit_profile", value="low_stiffness" if self._low_sample else "normal"),
             KeyValue(key="estop_latched", value="true" if self._estop_active else "false"),
             KeyValue(key="estop_actions_done",
                      value="true" if self._actions_done else "false"),
@@ -312,6 +356,7 @@ class SafetyMonitor(Node):
         msg.values = values
         self.status_pub.publish(msg)
         self._last_published = evaluation
+        self._last_published_low = self._low_sample
 
     # ------------------------------------------------------- 急停动作（异步链）
     def _start_estop_actions(self) -> None:

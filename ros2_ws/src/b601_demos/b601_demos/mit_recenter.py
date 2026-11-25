@@ -5,9 +5,8 @@ from threading import Condition, Event, Lock
 from time import monotonic
 
 from diagnostic_msgs.msg import DiagnosticStatus
-from moveit_msgs.srv import GetStateValidity
 import rclpy
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
@@ -65,13 +64,44 @@ class MitRecenter(Node):
         self.create_subscription(
             DiagnosticStatus, safety["status_topic"], self.on_safety,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
-        self.collision_client = (
-            self.create_client(GetStateValidity, "/check_state_validity")
-            if check_collisions else None
-        )
+        self.collision_client = None
+        if check_collisions:
+            from moveit_msgs.srv import GetStateValidity
+
+            self.collision_client = self.create_client(GetStateValidity, "/check_state_validity")
         self.service_group = ReentrantCallbackGroup()
         self.create_service(
             Trigger, RECENTER_SERVICE, self.recenter, callback_group=self.service_group)
+        self.startup_timer = None
+        if self.declare_parameter("recenter_on_startup", False).value:
+            timeout = plan["moveit_timeout_sec"] if check_collisions else plan["joint_state_timeout_sec"]
+            self.startup_deadline = monotonic() + timeout
+            self.startup_timer = self.create_timer(
+                1.0 / safety["publish_rate_hz"], self.startup_recenter,
+                callback_group=MutuallyExclusiveCallbackGroup())
+
+    def startup_recenter(self):
+        try:
+            self.feedback()
+            if self.collision_client is not None and not self.collision_client.service_is_ready():
+                raise RuntimeError("MoveIt 碰撞检查未就绪")
+        except RuntimeError as error:
+            stopped = self.safety is not None and self.safety.level == DiagnosticStatus.ERROR
+            if not stopped and monotonic() < self.startup_deadline:
+                return
+            self.get_logger().error(f"启动归中失败：{error}")
+            self.startup_timer.cancel()
+            self.startup_timer = None
+            return
+
+        self.startup_timer.cancel()
+        try:
+            self.run_sequence()
+            self.get_logger().info("启动归中成功：六轴已归中")
+        except RuntimeError as error:
+            self.get_logger().error(f"启动归中失败：{error}")
+        finally:
+            self.startup_timer = None
 
     def on_feedback(self, message):
         if len(message.name) != len(message.position) or len(set(message.name)) != len(message.name):
@@ -120,7 +150,7 @@ class MitRecenter(Node):
             travel = extent * sample / (self.collision_samples - 1)
             q = [start + copysign(min(abs(delta), travel), delta)
                  for start, delta in zip(before, deltas)]
-            request = GetStateValidity.Request()
+            request = client.srv_type.Request()
             request.robot_state.joint_state = JointState(
                 name=[*self.joints, self.gripper, self.mimic], position=[*q, gripper, -gripper])
             done = Event()
@@ -217,7 +247,7 @@ class MitRecenter(Node):
         self.move("J4 回落", at_intermediate, lambda q: self.at_home(q, ranges), (self.j4,))
 
     def recenter(self, _request, response):
-        if not self.running.acquire(blocking=False):
+        if self.startup_timer is not None or not self.running.acquire(blocking=False):
             response.message = "已有归中调用正在执行"
             return response
         try:

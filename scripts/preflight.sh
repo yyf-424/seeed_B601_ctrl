@@ -399,6 +399,8 @@ if python3 -c "import mujoco" >/dev/null 2>&1 && [[ -x "$REPO_ROOT/scripts/sim_m
       --tol "${cfg[gripper_tol_m]}" --max-vel "${cfg[gripper_peak_m_s]}"
   mit_run "电机侧 MIT 速度目标与三段前馈" pf_frame \
       --zero-gravity --no-safety --mit-frame-test
+  mit_run "重力补偿高低刚度切换与保持" pf_gravity_switch \
+      --gravity-varstiff-switch-test
   mit_run "过温守护（热模型升温 → 失能）" pf_temp --temp-trip-test --no-safety --tol "${cfg[thermal_nonbinding_tol]}" --max-vel "${cfg[thermal_nonbinding_tol]}"
 else
   info "跳过：缺 mujoco 或 scripts/sim_mit_ros.py"

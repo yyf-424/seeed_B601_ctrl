@@ -119,6 +119,9 @@ B601MitController::command_interface_configuration() const
     cfg.names.push_back(name + "/kp");
     cfg.names.push_back(name + "/kd");
     cfg.names.push_back(name + "/" + hardware_interface::HW_IF_EFFORT);
+    if (name == "joint1") {
+      cfg.names.push_back(name + "/low_stiffness");
+    }
   }
   return cfg;
 }
@@ -205,22 +208,21 @@ bool B601MitController::read_gain_params()
       }
     };
 
-  // 默认值 = 2026-11-21 真机验证过的那一套（只在 6 关节实例下有意义；
-  // 其它关节数的实例必须由 profile 显式给值，否则下面 to_per_joint 会报错）
-  ensure("kp_hold", b601_config::mit::kp_hold);
-  ensure("kd_hold", b601_config::mit::kd_hold);
   ensure("kp_move", b601_config::mit::kp_move);
   ensure("kd_move", b601_config::mit::kd_move);
   ensure("friction", std::vector<double>(n, 0.0));
-  // 等待档：没给就回落到 hold 档（老配置仍能跑）
-  ensure("kp_free", std::vector<double>(kp_hold_.begin(), kp_hold_.end()));
-  ensure("kd_free", std::vector<double>(kd_hold_.begin(), kd_hold_.end()));
+  kp_move_ = to_per_joint("kp_move", node->get_parameter("kp_move"), n);
+  kd_move_ = to_per_joint("kd_move", node->get_parameter("kd_move"), n);
+
+  // 旧自定义文件仍可通过 hold 参数提供等待增益。统一配置显式提供 free 增益。
+  ensure("kp_hold", kp_move_);
+  ensure("kd_hold", kd_move_);
+  ensure("kp_free", to_per_joint("kp_hold", node->get_parameter("kp_hold"), n));
+  ensure("kd_free", to_per_joint("kd_hold", node->get_parameter("kd_hold"), n));
   ensure("free_enabled", std::vector<bool>(n, true));
   ensure("settle_band_min", b601_config::mit::settle_band_min);
   ensure("settle_band_max", b601_config::mit::settle_band_max);
 
-  kp_hold_ = to_per_joint("kp_hold", node->get_parameter("kp_hold"), n);
-  // kp_free/kd_free 可能来自 hold 档的默认值，需要在 kp_hold_ 读完之后再取
   kp_free_ = to_per_joint("kp_free", node->get_parameter("kp_free"), n);
   kd_free_ = to_per_joint("kd_free", node->get_parameter("kd_free"), n);
   settle_band_min_ = to_per_joint("settle_band_min", node->get_parameter("settle_band_min"), n);
@@ -246,11 +248,8 @@ bool B601MitController::read_gain_params()
       for (std::size_t i = 0; i < n; ++i) free_enabled_[i] = raw[0];
     }
   }
-  kd_hold_ = to_per_joint("kd_hold", node->get_parameter("kd_hold"), n);
-  kp_move_ = to_per_joint("kp_move", node->get_parameter("kp_move"), n);
-  kd_move_ = to_per_joint("kd_move", node->get_parameter("kd_move"), n);
   friction_ = to_per_joint("friction", node->get_parameter("friction"), n);
-  if (kp_hold_.size() != n || kd_hold_.size() != n || kp_move_.size() != n ||
+  if (kp_move_.size() != n ||
     kd_move_.size() != n || friction_.size() != n ||
     kp_free_.size() != n || kd_free_.size() != n ||
     settle_band_min_.size() != n || settle_band_max_.size() != n)
@@ -262,11 +261,8 @@ bool B601MitController::read_gain_params()
     kd_free_[i] = std::max(0.0, kd_free_[i]);
     settle_band_min_[i] = std::max(0.0, settle_band_min_[i]);
     settle_band_max_[i] = std::max(settle_band_min_[i], settle_band_max_[i]);
-    settle_band_.assign(n, settle_band_max_[i]);
   }
   for (std::size_t i = 0; i < n; ++i) {
-    kp_hold_[i] = std::max(0.0, kp_hold_[i]);
-    kd_hold_[i] = std::max(0.0, kd_hold_[i]);
     kp_move_[i] = std::max(0.0, kp_move_[i]);
     kd_move_[i] = std::max(0.0, kd_move_[i]);
   }
@@ -320,6 +316,9 @@ controller_interface::CallbackReturn B601MitController::on_init()
     ensure("gravity_joint_scale", b601_config::mit::gravity_joint_scale_default);
     ensure("gravity_bias", b601_config::mit::gravity_bias_default);
     gravity_joint_scale_ = to_per_joint("gravity_joint_scale", node->get_parameter("gravity_joint_scale"), n);
+    ensure("gravity_joint_scale_free", gravity_joint_scale_);
+    gravity_joint_scale_free_ = to_per_joint(
+      "gravity_joint_scale_free", node->get_parameter("gravity_joint_scale_free"), n);
     gravity_bias_ = to_per_joint("gravity_bias", node->get_parameter("gravity_bias"), n);
     const auto valid_values = [n](const std::vector<double> & values, bool signed_values) {
         return values.size() == n &&
@@ -327,24 +326,18 @@ controller_interface::CallbackReturn B601MitController::on_init()
                  return std::isfinite(value) && (signed_values || value >= 0.0);
                });
       };
-    if (!valid_values(gravity_joint_scale_, false) || !valid_values(gravity_bias_, true))
+    if (!valid_values(gravity_joint_scale_, false) ||
+      !valid_values(gravity_joint_scale_free_, false) || !valid_values(gravity_bias_, true))
     {
       RCLCPP_ERROR(node->get_logger(), "逐关节重力补偿参数或变化率无效");
       return controller_interface::CallbackReturn::ERROR;
     }
+    ensure("free_follow_feedback", free_follow_feedback_);
+    free_follow_feedback_ = node->get_parameter("free_follow_feedback").as_bool();
+    ensure("low_after_first_target", low_after_first_target_);
+    low_after_first_target_ = node->get_parameter("low_after_first_target").as_bool();
     ensure("friction_scale", friction_scale_.load());
     friction_scale_ = std::min(b601_config::mit::friction_scale_max, std::max(0.0, node->get_parameter("friction_scale").as_double()));
-    // 旧的"误差阈值调度"参数（move/hold_threshold、vel_hold_threshold、kp_ramp_sec）
-    // 在 Phase 1 已**不再用于决定模式**：模式只由「指令变化 + 整组到位」决定。
-    // 仍然声明，是为了让旧 yaml/工具不报"未声明参数"；改它们不会有任何效果。
-    ensure("move_threshold", move_threshold_.load());
-    move_threshold_ = std::max(0.0, node->get_parameter("move_threshold").as_double());
-    ensure("hold_threshold", hold_threshold_.load());
-    hold_threshold_ = std::max(0.0, node->get_parameter("hold_threshold").as_double());
-    ensure("vel_hold_threshold", vel_hold_threshold_);
-    vel_hold_threshold_ = std::max(0.0, node->get_parameter("vel_hold_threshold").as_double());
-    ensure("kp_ramp_sec", kp_ramp_sec_);
-    kp_ramp_sec_ = std::max(b601_config::mit::ramp_time_sec_min, node->get_parameter("kp_ramp_sec").as_double());
     ensure("friction_vel_eps", friction_vel_eps_);
     friction_vel_eps_ = std::max(b601_config::mit::friction_velocity_epsilon_min, node->get_parameter("friction_vel_eps").as_double());
     ensure("motor_impedance", true);
@@ -385,7 +378,9 @@ controller_interface::CallbackReturn B601MitController::on_init()
     ensure("kp_down_sec", kp_down_sec_);
     kp_down_sec_ = std::max(b601_config::mit::ramp_time_sec_min, node->get_parameter("kp_down_sec").as_double());
     ensure("q_ref_lpf_hz", q_ref_lpf_hz_);
-    q_ref_lpf_hz_ = std::max(b601_config::mit::position_filter_hz_min, node->get_parameter("q_ref_lpf_hz").as_double());
+    const auto q_ref_lpf_hz = node->get_parameter("q_ref_lpf_hz").as_double();
+    q_ref_lpf_hz_ = q_ref_lpf_hz == 0.0 ? 0.0 :
+      std::max(b601_config::mit::position_filter_hz_min, q_ref_lpf_hz);
     ensure("track_timeout_sec", track_timeout_sec_);
     track_timeout_sec_ = std::max(0.0, node->get_parameter("track_timeout_sec").as_double());
     ensure("velocity_lpf_hz", velocity_lpf_hz_.load());
@@ -404,8 +399,8 @@ controller_interface::CallbackReturn B601MitController::on_init()
     char buf[64];
     for (std::size_t i = 0; i < joint_names_.size(); ++i) {
       std::snprintf(
-        buf, sizeof(buf), "%s%s kp=%.1f/%.1f kd=%.2f/%.2f", i ? " |" : "",
-        joint_names_[i].c_str(), kp_hold_[i], kp_move_[i], kd_hold_[i], kd_move_[i]);
+        buf, sizeof(buf), "%s%s 跟踪=%.3f/%.3f 保持=%.3f/%.3f", i ? " |" : "",
+        joint_names_[i].c_str(), kp_move_[i], kd_move_[i], kp_free_[i], kd_free_[i]);
       gains += buf;
     }
     RCLCPP_INFO(get_node()->get_logger(), "逐关节增益：%s", gains.c_str());
@@ -438,8 +433,7 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
       gravity_scale_ = std::clamp(p.as_double(), 0.0, b601_config::mit::gravity_scale_max);
     } else if (name == "friction_scale") {
       friction_scale_ = std::clamp(p.as_double(), 0.0, b601_config::mit::friction_scale_max);
-    } else if (name == "kp_hold" || name == "kd_hold" || name == "kp_move" || name == "kd_move" ||
-      name == "friction")
+    } else if (name == "kp_move" || name == "kd_move" || name == "friction")
     {
       auto v = to_per_joint(name, p, n);
       if (v.size() != n) {
@@ -450,21 +444,13 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
       for (auto & x : v) {
         x = std::max(0.0, x);
       }
-      if (name == "kp_hold") {
-        kp_hold_ = v;
-      } else if (name == "kd_hold") {
-        kd_hold_ = v;
-      } else if (name == "kp_move") {
+      if (name == "kp_move") {
         kp_move_ = v;
       } else if (name == "kd_move") {
         kd_move_ = v;
       } else {
         friction_ = v;
       }
-    } else if (name == "move_threshold") {
-      move_threshold_ = std::max(0.0, p.as_double());
-    } else if (name == "hold_threshold") {
-      hold_threshold_ = std::max(0.0, p.as_double());
     } else if (name == "velocity_lpf_hz") {
       velocity_lpf_hz_ = std::max(b601_config::mit::velocity_filter_hz_min, p.as_double());
     } else {
@@ -494,6 +480,7 @@ bool B601MitController::bind_interfaces()
   vel_cmd_idx_.assign(n, -1);
   kp_idx_.assign(n, -1);
   kd_idx_.assign(n, -1);
+  low_stiffness_idx_ = -1;
   chain_pos_idx_.fill(-1);
 
   for (std::size_t k = 0; k < state_interfaces_.size(); ++k) {
@@ -525,7 +512,9 @@ bool B601MitController::bind_interfaces()
       continue;
     }
     const auto & iface = command_interfaces_[k].get_interface_name();
-    if (iface == hardware_interface::HW_IF_EFFORT && cmd_idx_[j] < 0) {
+    if (iface == "low_stiffness" && command_interfaces_[k].get_prefix_name() == "joint1") {
+      low_stiffness_idx_ = static_cast<int>(k);
+    } else if (iface == hardware_interface::HW_IF_EFFORT && cmd_idx_[j] < 0) {
       cmd_idx_[j] = static_cast<int>(k);
     } else if (iface == hardware_interface::HW_IF_POSITION && pos_cmd_idx_[j] < 0) {
       pos_cmd_idx_[j] = static_cast<int>(k);
@@ -637,7 +626,9 @@ controller_interface::CallbackReturn B601MitController::on_activate(
   kd_cur_.assign(n, 0.0);
   tau_g_.fill(0.0);
 
-  // 从状态接口读当前位姿，作为初始目标 —— 激活瞬间不许有动作
+  // 锚定低刚度档先用跟踪增益稳定当前位形，再按正常到位判据降档。
+  done_ = std::none_of(free_enabled_.begin(), free_enabled_.end(), [](bool enabled) {return enabled;}) ||
+    (free_follow_feedback_ && !low_after_first_target_);
   for (std::size_t i = 0; i < n; ++i) {
     q_[i] = state_interfaces_[pos_idx_[i]].get_value();
     qd_[i] = state_interfaces_[vel_idx_[i]].get_value();
@@ -653,13 +644,16 @@ controller_interface::CallbackReturn B601MitController::on_activate(
     //   free_enabled=false（纯 PD 对标 pos_vel）→ kp_move
     // ⚠ 以前无条件从 kp_free 起步，纯 PD 配置下会有 0.8 s 的"软手爬坡"，
     //   仿真里 joint2 在这 0.8 s 内掉到 6.26 rad/s 直接撞安全急停。
-    kp_cur_[i] = free_enabled_[i] ? kp_free_[i] : kp_move_[i];
-    kd_cur_[i] = free_enabled_[i] ? kd_free_[i] : kd_move_[i];
+    kp_cur_[i] = done_ && free_enabled_[i] ? kp_free_[i] : kp_move_[i];
+    kd_cur_[i] = done_ && free_enabled_[i] ? kd_free_[i] : kd_move_[i];
     command_interfaces_[cmd_idx_[i]].set_value(0.0);
     command_interfaces_[pos_cmd_idx_[i]].set_value(q_[i]);
     command_interfaces_[vel_cmd_idx_[i]].set_value(0.0);
     command_interfaces_[kp_idx_[i]].set_value(0.0);
     command_interfaces_[kd_idx_[i]].set_value(0.0);
+  }
+  if (low_stiffness_idx_ >= 0) {
+    command_interfaces_[low_stiffness_idx_].set_value(0.0);
   }
   for (std::size_t c = 0; c < chain_names_.size(); ++c) {
     chain_q_[c] = state_interfaces_[chain_pos_idx_[c]].get_value();
@@ -667,7 +661,6 @@ controller_interface::CallbackReturn B601MitController::on_activate(
   have_state_ = true;
   have_target_ = true;
   target_received_ = false;          // 话题目标还没来，先以当前位形为 q_cmd
-  done_ = true;                      // 等待模式：没有权威、低刚度、可以手推
   t_in_band_ = 0.0;
   t_track_ = 0.0;
   {
@@ -847,9 +840,18 @@ controller_interface::return_type B601MitController::update(
       // 误差带按"本次指令的位移"算，并夹在 [min,max]：
       //   太小 → 永远到不了（低增益下垂）；太大 → 大幅动作时提前宣布到位。
       for (std::size_t i = 0; i < n; ++i) {
-        const double disp = std::abs(cmd->q[i] - q_cmd_[i]);
-        settle_band_[i] = std::clamp(
-          settle_band_pct_ * disp, settle_band_min_[i], settle_band_max_[i]);
+        if (settle_band_min_[i] > 0.0) {
+          const double disp = std::abs(cmd->q[i] - q_cmd_[i]);
+          settle_band_[i] = std::clamp(
+            settle_band_pct_ * disp, settle_band_min_[i], settle_band_max_[i]);
+        } else if (cmd->q[i] != q_cmd_[i]) {
+          // 无最小误差带时，按新指令相对实测起点的位移计算。
+          const double disp = std::abs(cmd->q[i] - q_[i]);
+          settle_band_[i] = std::min(settle_band_pct_ * disp, settle_band_max_[i]);
+        }
+        if (done_ && free_enabled_[i] && free_follow_feedback_) {
+          q_up_[i] = q_ref_lpf_hz_ == 0.0 ? q_[i] : q_ref_[i];
+        }
         q_cmd_[i] = cmd->q[i];
       }
       done_ = false;          // 整组重新索权
@@ -881,11 +883,11 @@ controller_interface::return_type B601MitController::update(
   }
 
   // ================== ③ 整组到位判定（对着 q_cmd，不用斜坡数据） ==================
-  if (!done_) {
+  if (!done_ && (!low_after_first_target_ || valid_target)) {
     bool in_band = !moving_reference;
     for (std::size_t i = 0; i < n; ++i) {
       // 允许带内小幅震荡：只看"在不在带里"，不判速度
-      if (std::abs(q_cmd_[i] - q_[i]) >= settle_band_[i]) {
+      if (q_up_[i] != q_cmd_[i] || std::abs(q_cmd_[i] - q_[i]) > settle_band_[i]) {
         in_band = false;
         break;
       }
@@ -907,8 +909,10 @@ controller_interface::return_type B601MitController::update(
   const double a_ref = std::min(1.0, dt * 2.0 * M_PI * q_ref_lpf_hz_);
   for (std::size_t i = 0; i < n; ++i) {
     const bool authoritative = !done_ || !free_enabled_[i];
-    if (authoritative) {
+    if (authoritative || !free_follow_feedback_) {
       q_ref_[i] = q_up_[i];                       // 上层有权威：跟斜坡走
+    } else if (q_ref_lpf_hz_ == 0.0) {
+      q_ref_[i] = q_[i];                          // 保持档直接用本周期实测作为目标
     } else {
       q_ref_[i] += a_ref * (q_[i] - q_ref_[i]);   // 无权威：跟着实测（手推到哪停到哪）
     }
@@ -930,9 +934,10 @@ controller_interface::return_type B601MitController::update(
     kp_cur_[i] = move_toward(kp_cur_[i], kp_tgt, kp_step);
     kd_cur_[i] = move_toward(kd_cur_[i], kd_tgt, kd_step);
 
+    const auto & gravity_joint_scale = authoritative ? gravity_joint_scale_ : gravity_joint_scale_free_;
     const double gravity = use_gravity_ && gravity_row_[i] >= 0
       ? gravity_scale * (gravity_bias_[i] -
-        gravity_joint_scale_[i] * tau_g_[static_cast<std::size_t>(gravity_row_[i])])
+        gravity_joint_scale[i] * tau_g_[static_cast<std::size_t>(gravity_row_[i])])
       : 0.0;
     const double friction =
       -friction_scale * friction_[i] * std::tanh(qd_f_[i] / friction_vel_eps_);
@@ -948,6 +953,12 @@ controller_interface::return_type B601MitController::update(
     command_interfaces_[kp_idx_[i]].set_value(kp_cur_[i]);
     command_interfaces_[kd_idx_[i]].set_value(kd_cur_[i]);
     command_interfaces_[cmd_idx_[i]].set_value(tau_cmd_[i]);
+  }
+  if (low_stiffness_idx_ >= 0) {
+    const bool low_stiffness = done_ && free_follow_feedback_ && use_gravity_ && gravity_scale > 0.0 &&
+      joint_names_ == chain_names_ && kp_cur_ == kp_free_ && kd_cur_ == kd_free_ &&
+      std::all_of(free_enabled_.begin(), free_enabled_.end(), [](bool enabled) {return enabled;});
+    command_interfaces_[low_stiffness_idx_].set_value(low_stiffness ? 1.0 : 0.0);
   }
 
   // ---- 低频调试输出（约 10 Hz）----

@@ -49,11 +49,14 @@
   <xacro:b601_links project_config_file="$(arg project_config_file)"/>
 
   <!-- ② ros2_control 硬件接口（把 hardware 参数透传下去） -->
+  <xacro:property name="dm_position_limits"
+    value="${xacro.load_yaml('../config/safety_position_limits.yaml') if '$(arg hardware)' == 'dm' else dict()}"/>
   <xacro:b601_ros2_control
       name="b601"
       hardware="$(arg hardware)"
       initial_positions_file="$(arg initial_positions_file)"
       project_config_file="$(arg project_config_file)"
+      dm_position_limits="${dm_position_limits}"
       dm_device="$(arg dm_device)"
       dm_enable_motors="$(arg dm_enable_motors)"
       dm_command_mode="$(arg dm_command_mode)"

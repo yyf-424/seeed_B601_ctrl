@@ -51,7 +51,7 @@ robot:
 # 限位原则（2026-11-21 更新）：**上下限一律取保守值** = 官方值与 2026-11-20 手推实测值取交集
 #   · joint1: 实测 −2.597/+2.627 → 取 [−2.59, +2.60]（官方 ±2.8 越过停止位）
 #   · joint2/3: 实测下限 −3.436/−3.926 比官方 −3.14 更远 → 保留 −3.14（窄的一侧）
-#   · joint4: 实测 −1.560/+2.226 → 下限收到 −1.56（原来是 −1.87，比实测宽 0.31）
+#   · joint4: 实测 −1.560/+2.275 → 取 [−1.56, +1.57]
 #   · joint5: 实测 −0.730/+1.800 → 下限收到 −0.73（原来是 −1.57，比实测宽 0.84 ≈ 48°）
 #   · joint6/夹爪: 沿用更窄的一侧
 # 角速度（2026-11-21 按需求放宽）：joint1..6 统一 6.0 rad/s；夹爪 0.05 m/s 不变。
@@ -87,6 +87,8 @@ joints:
     type: revolute
     min_pos: -3.14
     max_pos: 0.0
+    # 2026-11-25 电机置零后的指令校准正端。急停测量快照保留在 safety.angle。
+    calibrated_command_max_pos: 0.0
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
@@ -109,7 +111,7 @@ joints:
     label: 小臂肘
     type: revolute
     min_pos: -3.14
-    max_pos: 0.005
+    max_pos: 0.0
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
@@ -322,119 +324,15 @@ controllers:
       allow_nonzero_velocity_at_trajectory_end: true
       allow_partial_joints_goal: true
 
-  # -------------------------------------------------------------------------
-  # MIT 力控（变刚度）实例表 —— 「哪个关节归哪个控制器」的唯一真值
-  #
-  #   生成 → ros2_ws/src/b601_bringup/config/b601_mit_controllers.yaml
-  #   规划 → docs/changes/2026-11-22-01-per-joint-controller-and-variable-stiffness.md
-  #
-  # 为什么用「实例 + 按关节名的 profile」而不是 6 元下标数组：
-  #   ① 一个实例可以只控 1 个关节（把 joint6 换成实验控制器），下标数组会错位；
-  #   ② 历史上出过「批量替换误改 joint2 限位」的事故，按名字给值不可能错位。
-  # 覆盖要求：joint1..joint6 + finger_left 每个都必须且只能属于一个实例（verify.sh 校验）。
-  # -------------------------------------------------------------------------
+  # 电机侧 MIT 使用一套纯 PD 与一套重力控制。重力控制内部按跟踪和保持切换。
   mit:
     update_rate: 200
-
-    # 可选电机侧 MIT 档位。所有未覆盖参数继承下方的标准实例和 profile。
-    presets:
-      j4_gravity_friction_pd:
-        compensation: identified_dm
-        compensation_joints: [joint4]
-        gain_reference: rebot_orin_0002_gravity_pd
-        gain_joints: [joint4]
-        profiles:
-          standard_mit:
-            group: &fixed_gravity_mit {friction_scale: 0.0, free_enabled: false}
-            per_joint: &j4_gravity_mit_joints
-              joint1: {friction: 0.0}
-              joint2: {friction: 0.0}
-              joint3: {friction: 0.0}
-              # 2026-11-25 真机 −0.30 rad 两轮复测通过。Kd 输入 3.501 对齐 Orin 阻尼编码 2867。
-              joint4: &j4_gravity_mit_profile {friction: 0.0, kp_move: 30.0, kd_move: 3.501}
-              joint5: {friction: 0.0}
-              joint6: {friction: 0.0}
-      j2_j4_gravity:
-        compensation: identified_dm
-        compensation_joints: [joint2, joint4]
-        gain_reference: rebot_orin_0002_motor_mit
-        gain_joints: [joint2]
-        profiles:
-          standard_mit:
-            group: *fixed_gravity_mit
-            per_joint: &j2_j4_gravity_mit_joints
-              <<: *j4_gravity_mit_joints
-              # Orin 的 120.0 四舍五入为 MIT 码 983，本机截断用 120.025 对齐。
-              joint2: {friction: 0.0, kp_move: 120.025}
-      j2_j3_j4_gravity:
-        compensation: identified_dm
-        compensation_joints: [joint2, joint3, joint4]
-        gain_reference: rebot_orin_0002_motor_mit
-        gain_joints: [joint2, joint3]
-        profiles:
-          standard_mit:
-            group: *fixed_gravity_mit
-            per_joint: &j2_j3_j4_gravity_mit_joints
-              <<: *j2_j4_gravity_mit_joints
-              # Orin 120.0 的 MIT 码为 983，本机输入按截断编码对齐。
-              joint3: {friction: 0.0, kp_move: 120.025}
-      j2_j3_j4_j5_gravity:
-        compensation: identified_dm
-        compensation_joints: [joint2, joint3, joint4, joint5]
-        gain_reference: rebot_orin_0002_motor_mit
-        gain_joints: [joint2, joint3, joint5]
-        profiles:
-          standard_mit:
-            group: *fixed_gravity_mit
-            per_joint: *j2_j3_j4_gravity_mit_joints
-      j2_j3_j4_j5_gravity_wrist_kd_trial:
-        compensation: identified_dm
-        compensation_joints: [joint2, joint3, joint4, joint5]
-        gain_reference: rebot_orin_0002_motor_mit
-        gain_joints: [joint2, joint3, joint5]
-        profiles:
-          standard_mit:
-            group: *fixed_gravity_mit
-            per_joint:
-              <<: *j2_j3_j4_gravity_mit_joints
-              joint4: {<<: *j4_gravity_mit_profile, kd_move: 2.8}
-              joint5: {friction: 0.0, kd_move: 1.6}
-              joint6: {friction: 0.0, kd_move: 0.65}
-
-    compensations:
-      identified_dm:
-        # 本机双侧静态辨识，gravity_params 见 shared。控制器内部从重力矩取反得到保持力矩。
-        source: b601_gravity_id，50 条双侧静态样本，RMS 0.52 N·m
-        group: {use_gravity: true, gravity_scale: 1.0}
-        per_joint:
-          joint1: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
-          joint2: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
-          joint3: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
-          joint4: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
-          joint5: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
-          joint6: {gravity_joint_scale: 1.0, gravity_bias: 0.0}
-
-    gain_references:
-      rebot_orin_0002_gravity_pd:
-        source: 'rebot-orin 0002，standard_mit_gravity_verified.cfg，kp_nm_per_rad/kd_nm_s_per_rad'
-        per_joint:
-          joint4: {kp_move: 6.0, kd_move: 3.5}
-      rebot_orin_0002_motor_mit:
-        source: 'rebot-orin unit 0002 arm_hardware.cfg，control_mode=mit，mit_kp/mit_kd'
-        per_joint:
-          joint1: {kp_move: 120.0, kd_move: 5.0}
-          joint2: {kp_move: 120.0, kd_move: 5.0}
-          joint3: {kp_move: 120.0, kd_move: 5.0}
-          joint4: {kp_move: 18.0, kd_move: 2.0}
-          joint5: {kp_move: 18.0, kd_move: 2.0}
-          joint6: {kp_move: 18.0, kd_move: 2.0}
-
     instances:
       b601_mit_arm:
         plugin: b601_mit_controller/B601MitController
         joints: [joint1, joint2, joint3, joint4, joint5, joint6]
-        profile: standard_mit
-        # 重力前馈需要整条运动链的位形（只读 position），与"本实例控哪些关节"无关
+        profile: arm_pure_pd
+        gravity_profile: arm_gravity_pd
         chain_joints: [joint1, joint2, joint3, joint4, joint5, joint6]
       b601_mit_gripper:
         plugin: b601_mit_controller/B601MitController
@@ -442,47 +340,27 @@ controllers:
         profile: gripper_mit
         chain_joints: [joint1, joint2, joint3, joint4, joint5, joint6]
 
-    # ---- 参数模板：per_joint 用**关节名**给值，生成时按实例的 joints 顺序展开成数组 ----
     profiles:
-      # 电机侧 MIT 初始配置，基于历史手臂参数并按协议范围约束阻尼。
-      standard_mit:
-        # kp_free/kd_free = **等待档**（上层无权威、可手推）；kd_free 取临界阻尼 2√(kp_free·I)：
-        #   I=[0.111,0.414,0.297,0.047,0.021,0.0106] → ζ=1 时 [0.36,0.70,0.60,0.24,0.16,0.11]
+      arm_pure_pd:
+        # v0.2.1 电机侧纯 PD，真机五姿态通过。
         per_joint:
-          joint1: {kp_hold: 6.0, kd_hold: 1.63, kp_move: 115.0, kd_move: 5.0, kp_free: 0.3, kd_free: 0.36,
-                   friction: 0.0,
-                   settle_band_min: 0.01, settle_band_max: 0.05}
-          joint2: {kp_hold: 6.0, kd_hold: 3.15, kp_move: 265.0, kd_move: 5.0, kp_free: 0.3, kd_free: 0.70,
-                   friction: -0.45533,
-                   settle_band_min: 0.01, settle_band_max: 0.05}
-          joint3: {kp_hold: 6.0, kd_hold: 2.67, kp_move: 190.0, kd_move: 5.0, kp_free: 0.3, kd_free: 0.60,
-                   friction: 0.0,
-                   settle_band_min: 0.01, settle_band_max: 0.05}
-          joint4: {kp_hold: 2.0, kd_hold: 0.37, kp_move: 200.0, kd_move: 3.4, kp_free: 0.3, kd_free: 0.24,
-                   friction: 0.0,
-                   settle_band_min: 0.01, settle_band_max: 0.05}
-          joint5: {kp_hold: 1.0, kd_hold: 0.21, kp_move: 36.0, kd_move: 1.2, kp_free: 0.3, kd_free: 0.16,
-                   friction: 0.0,
-                   settle_band_min: 0.01, settle_band_max: 0.05}
-          joint6: {kp_hold: 0.8, kd_hold: 0.13, kp_move: 28.0, kd_move: 0.82, kp_free: 0.3, kd_free: 0.11,
-                   friction: 0.0,
-                   settle_band_min: 0.01, settle_band_max: 0.05}
-        # 电机 MIT 协议 Kd 范围为 [0, 5]。手臂五姿态真机已运行，夹爪驱动器增益量化见测试报告。
-        group:
-          # ---- 指令层（Phase 1）：决定"怎么走"和"到没到" ----
-          settle_band_pct: 0.05       # 误差带 = 5% × 本次指令位移（再夹到逐关节的 min/max）
-          settle_sec: 3.0             # 全部关节连续在带内这么久 → 整组 done
-          kp_up_sec: 0.8              # free → track 的刚度上升时间（线性速率）
-          kp_down_sec: 2.0            # track → free 的刚度回落时间（回落要慢，避免突然变软塌下去）
-          q_ref_lpf_hz: 30.0          # 等待模式下 q_ref 跟随实测的带宽
-          track_timeout_sec: 0.0      # 0=关闭：目标不可达时**不**兜底（决策⑩）
-          free_enabled: false         # 默认持位，低刚度等待需按模型验收后单独开启
+          joint1: {kp_move: 115.0, kd_move: 5.0}
+          joint2: {kp_move: 265.0, kd_move: 5.0}
+          joint3: {kp_move: 190.0, kd_move: 5.0}
+          joint4: {kp_move: 200.0, kd_move: 3.4}
+          joint5: {kp_move: 36.0, kd_move: 1.2}
+          joint6: {kp_move: 28.0, kd_move: 0.82}
+        group: &arm_mit_group
+          free_enabled: false
+          settle_band_min: 0.01
+          settle_band_max: 0.05
+          settle_band_pct: 0.05
+          settle_sec: 3.0
+          kp_up_sec: 0.8
+          kp_down_sec: 2.0
+          q_ref_lpf_hz: 30.0
+          track_timeout_sec: 0.0
           motor_impedance: true
-          # ---- 以下是 Phase 0 及以前的参数：仍声明但不参与模式判定 ----
-          move_threshold: 0.08
-          hold_threshold: 0.03
-          vel_hold_threshold: 0.30
-          kp_ramp_sec: 0.35
           velocity_lpf_hz: 6.0
           gravity_scale: 0.0
           friction_scale: 0.0
@@ -492,35 +370,40 @@ controllers:
           target_velocity_timeout_sec: 0.25
           state_interfaces: [position, velocity]
 
-      # 夹爪纯 PD 使用关节单位 N/m、N·s/m，由硬件换算为 MIT 帧的电机侧增益。
-      gripper_mit:
-        # 2026-11-24 实机小行程验证通过。电机侧 Kp 6.5、Kd 1.2。
+      arm_gravity_pd:
+        # 跟踪沿用 J2–J5 重力补偿的低 Kd 实测档。保持增益由跟踪增益按比例生成。
+        # 高低档使用同一辨识模型，保留各自实测时的逐轴补偿比例。
+        hold_gain_ratios: {kp: 0.5, kd: 0.2}
         per_joint:
-          finger_left: {kp_hold: 65000.0, kd_hold: 12000.0, kp_move: 65000.0, kd_move: 12000.0,
-                        kp_free: 50.0, kd_free: 2.0,
-                        friction: 0.0,
-                        settle_band_min: 0.0005, settle_band_max: 0.0025}
+          joint1: {kp_move: 115.0, kd_move: 5.0, gravity_joint_scale: 0.0}
+          joint2: {kp_move: 120.025, kd_move: 5.0, gravity_joint_scale: 1.0}
+          joint3: {kp_move: 120.025, kd_move: 5.0, gravity_joint_scale: 1.0}
+          joint4: {kp_move: 30.0, kd_move: 2.8, gravity_joint_scale: 1.0}
+          joint5: {kp_move: 18.0, kd_move: 1.6, gravity_joint_scale: 1.0}
+          joint6: {kp_move: 28.0, kd_move: 0.65, gravity_joint_scale: 0.0}
         group:
-          settle_band_pct: 0.05
+          <<: *arm_mit_group
+          use_gravity: true
+          gravity_scale: 1.0
+          gravity_joint_scale_free: 1.0
+          free_enabled: true
+          free_follow_feedback: true
+          low_after_first_target: true
+          q_ref_lpf_hz: 0.0
+          settle_band_min: 0.0
+
+      # 夹爪使用独立纯 PD。关节单位换算后，电机侧 Kp/Kd 为 6.5/1.2。
+      gripper_mit:
+        per_joint:
+          finger_left: {kp_move: 65000.0, kd_move: 12000.0}
+        group:
+          <<: *arm_mit_group
+          settle_band_min: 0.0005
+          settle_band_max: 0.0025
           settle_sec: 2.0
           kp_up_sec: 0.5
           kp_down_sec: 1.0
-          q_ref_lpf_hz: 30.0
-          track_timeout_sec: 0.0
-          free_enabled: false         # 默认持位
-          motor_impedance: true
-          move_threshold: 0.01
-          hold_threshold: 0.002
-          vel_hold_threshold: 0.01    # m/s
-          kp_ramp_sec: 0.5
-          velocity_lpf_hz: 6.0
-          gravity_scale: 0.0
-          friction_scale: 0.0
           friction_vel_eps: 0.002
-          use_gravity: false
-          task_torque_timeout_sec: 0.0
-          target_velocity_timeout_sec: 0.25
-          state_interfaces: [position, velocity]
 
     # ---- 所有实例共用的东西（重力模型参数 = 整条链，与实例划分无关）----
     shared:
@@ -548,7 +431,7 @@ moveit:
   named_arm_poses:
     zero:
       joint1: 0.0
-      joint2: 0.0
+      joint2: -0.001
       joint3: 0.0
       joint4: 0.0
       joint5: 0.0
@@ -625,7 +508,7 @@ moveit:
 # ---------------------------------------------------------------------------
 # 归中（recenter / 关机停放）参考姿态
 #
-#   六轴参考取 2026-11-25 电机未使能时 /joint_states 的实测中位数。
+#   六轴参考取电机失能时的达妙位置反馈中位数，按关节比例、方向与偏置换算。
 #   位置回路和关节端 MIT 归中共用此目标和逐轴容差。
 recenter:
   position_tolerance_rad: 0.01  # 按六轴逐个判定归中
@@ -639,22 +522,22 @@ recenter:
     correction_wait_sec: 3.0
     check_collisions: false
   calibrated_at: "2026-11-25"
-  note: "只读会话 /joint_states 实测中位数，共 801 帧"
+  note: "2026-11-25 17:02:11 +08:00 电机失能后只读采样，每台 36 次"
   joints:
-    joint1: 0.00705718994140625
-    joint2: -0.01163482666015625
-    joint3: -0.00667572021484375
-    joint4: 0.07381534576416016
-    joint5: -0.15049171447753906
-    joint6: -0.00133514404296875
-  raw_encoders:            # 2026-11-21 直接回读的历史快照
-    joint1: +0.0036
-    joint2: -0.0109
-    joint3: -0.0162
-    joint4: +0.0650
-    joint5: -0.1684
-    joint6: -0.0013
-    finger_left: +0.0003
+    joint1: 0.00171661376953125
+    joint2: -0.00019073486328125
+    joint3: -0.00400543212890625
+    joint4: -0.00324249267578125
+    joint5: 0.00705718994140625
+    joint6: 0.00133514404296875
+  raw_encoders:            # 同次采样，含夹爪，单位为电机侧 rad
+    joint1: 0.00171661376953125
+    joint2: -0.00019073486328125
+    joint3: -0.00400543212890625
+    joint4: -0.00324249267578125
+    joint5: 0.00705718994140625
+    joint6: 0.00133514404296875
+    finger_left: -0.00019073486328125
 
 # ---------------------------------------------------------------------------
 # 安全监控（b601_safety_monitor）
@@ -697,6 +580,15 @@ safety:
 
   angle:
     warn_margin: 0.12            # rad（夹爪按 m 解释，见 joint 单位）
+    position_expansion_fraction: 0.05  # 驱动激活与两档急停共用，每端外扩实测全行程的 5%
+    measured_position_ranges:  # .verify/range.json 原始端点，夹爪用 m，从动指镜像
+      joint1: [-2.596895217895508, 2.627412796020508]
+      joint2: [-3.4357595443725586, -0.00095367431640625]
+      joint3: [-3.926337242126465, 0.00476837158203125]
+      joint4: [-1.5604257583618164, 2.2749290466308594]  # 正端为 2026-11-25 现场确认的只读复测
+      joint5: [-0.7303352355957031, 1.7996110916137695]
+      joint6: [-3.231670379638672, 3.2244224548339844]
+      finger_left: [-5.7220458984375e-06, 0.058409628868103025]
 
   velocity:
     warn_ratio: 0.80
@@ -704,6 +596,9 @@ safety:
   pose:
     warn_on_deviation: true
     warn_deviation: 0.35
+
+  low_stiffness:
+    max_velocity: 10.0  # rad/s，臂轴低档急停值及夹爪速度换算基准
 
   estop:
     # ["*"] = 停掉当前所有 active 控制器；也可以显式列出（只停这些）
@@ -778,6 +673,7 @@ tools:
     max_vel: 2.0
     startup_timeout: 40.0
     joint_friction: 0.0
+    gravity_fixture_finger_opening_m: 0.015
     temp_limit: 27.0
     hold_only: 0.0
     state_machine:
@@ -788,7 +684,8 @@ tools:
       kp_fraction: 0.8
       kp_rise_timeout_sec: 3.0
       settle_timeout_sec: 12.0
-      kp_free_ceiling: 1.5
+      kp_free_tolerance: 0.05
+      small_step_rad: 0.005
       kp_free_timeout_sec: 6.0
       large_step_rad: 2.0
       mixed_steps_rad:
@@ -808,12 +705,25 @@ tools:
       task_timeout_wait_sec: 0.65
       gravity_scale: 0.1
       friction_scale: 0.2
+      friction_test_nm: 0.5
       task_torque_timeout_sec: 0.5
       minimum_gravity_nm: 0.01
       friction_motion_rad: 0.15
       friction_sample_sec: 0.06
       minimum_friction_nm: 0.02
       displacement_threshold_rad: 0.004
+    gravity_varstiff_switch:
+      motion_timeout_sec: 18.0
+      settle_window_sec: 0.5
+      gain_tolerance: 0.05
+      minimum_signal_nm: 0.1
+      masked_torque_tolerance_nm: 0.0001
+      hold_sec: 5.0
+      hold_max_travel_rad: 0.01
+      moves_rad:
+      - [0.24, -0.24, -0.30, 0.24, -0.24, 0.24]
+      - [-0.24, 0.24, 0.30, -0.24, 0.24, -0.24]
+      - [0.10, -0.10, -0.10, 0.10, -0.10, 0.10]
     thermal_fixture:
       warning_offset_c: 1.0
       ambient_offset_c: 2.0
@@ -830,49 +740,7 @@ tools:
     shutdown_timeout_sec: 15
     shutdown_poll_sec: 0.2
   sim_mit_check:
-    kd_hold:
-    - 1.63
-    - 3.15
-    - 2.67
-    - 1.07
-    - 0.71
-    - 0.5
-    kd_move:
-    - 5.17
-    - 9.97
-    - 8.45
-    - 3.38
-    - 2.26
-    - 1.59
-    friction_scale: 0.0
-    kp_hold: 6.0
-    kp_move: 60.0
-    move_threshold_rad: 0.08
-    hold_threshold_rad: 0.03
-    substeps: 10
-    snapshot_divider: 20
-    start_rad:
-    - 0.0
-    - -0.9
-    - -1.1
-    - 0.0
-    - 0.0
-    - 0.0
-    sign_test_kp: 40.0
-    observe_sec: 3.0
-    sign_tol_rad: 0.15
-    push_sec: 0.8
-    push_force_n: 3.0
-    push_rest_sec: 2.0
-    initial_hold_sec: 1.0
-    step_rad:
-    - 0.25
-    - 0.25
-    - 0.25
-    - 0.2
-    - 0.2
-    - 0.2
-    step_tol_rad: 0.02
+    start_rad: [0.0, -0.9, -1.1, 0.0, 0.0, 0.0]
   preflight:
     mock_domain_id: 181
     mit_domain_id: 182
@@ -908,7 +776,6 @@ tools:
     speed_estop_rad_s: 999.0
   test_safety:
     pose_deviation_rad: 0.6
-    position_near_lower_rad: -3.05
     warning_speed_ratio: 0.85
     estop_speed_ratio: 1.05
     arm_position_overrun_rad: 0.1
@@ -997,6 +864,7 @@ implementation:
     gravity_scale_max: 1.5
     gravity_joint_scale_default: 1.0
     gravity_bias_default: 0.0
+    free_follow_feedback_default: true
     friction_scale_max: 2.0
     settle_sec_min: 0.05
     position_filter_hz_min: 0.5
@@ -1780,4 +1648,4 @@ validation:
       observation_pause_sec: 0.5
       readonly_duration_sec: 4.0
       ros_domain_id: 191
-      gripper_parking_target_m: 0.0
+      gripper_parking_target_m: 1.9073486328125e-06

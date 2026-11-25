@@ -62,6 +62,7 @@ class SafetyLimits:
     # 全局总开关 + 偏差阈值
     warn_on_pose_deviation: bool | None = None
     warn_pose_threshold: float | None = None
+    stop_at_velocity_limit: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         missing = [name for name in (
@@ -158,10 +159,11 @@ def evaluate(
         # ---- 急停条件 ②：角速度越限 ----
         vel_threshold = limits.velocity_estop_threshold(i)
         speed = abs(vel)
-        if speed > vel_threshold:
+        if speed > vel_threshold or (name in limits.stop_at_velocity_limit and speed == vel_threshold):
             details[name]["violation"] = "velocity"
+            comparison = "达到上限" if speed == vel_threshold else "超过上限"
             estop_reasons.append(
-                f"{name} 角速度 {speed:.3f} 超过上限 {vel_threshold:.3f}"
+                f"{name} 角速度 {speed:.3f} {comparison} {vel_threshold:.3f}"
             )
 
         if details[name].get("violation"):

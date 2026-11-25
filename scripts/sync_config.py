@@ -18,7 +18,7 @@ xacro、演示节点及命令行工具直接读取真值。MuJoCo 模型由 gen_
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
+from decimal import Decimal
 import difflib
 import math
 import re
@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 
 import yaml
+
+from project_config import expanded_position_range, safety_position_limits
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WS_SRC = REPO_ROOT / "ros2_ws" / "src"
@@ -92,8 +94,40 @@ def validate(cfg: dict) -> list[str]:
     vel = safety.get("velocity", {})
     if not 0.0 <= vel.get("warn_ratio", 0) < 1.0:
         errors.append("safety.velocity.warn_ratio 必须在 [0,1) 内")
-    if safety.get("angle", {}).get("warn_margin", 0) <= 0:
+    angle = safety.get("angle", {})
+    if angle.get("warn_margin", 0) <= 0:
         errors.append("safety.angle.warn_margin 必须 > 0")
+    fraction = angle.get("position_expansion_fraction")
+    fraction_valid = type(fraction) in (int, float) and math.isfinite(fraction) and fraction >= 0
+    if not fraction_valid:
+        errors.append("safety.angle.position_expansion_fraction 必须为有限非负数")
+    measured = angle.get("measured_position_ranges", {})
+    if set(measured) != {*arm, robot.get("gripper_joint")}:
+        errors.append("safety.angle.measured_position_ranges 必须覆盖六轴与主动指")
+    for name, bounds in measured.items():
+        if (not isinstance(bounds, list) or len(bounds) != 2
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in bounds)
+                or bounds[0] >= bounds[1]):
+            errors.append(f"{name} 的实测位置区间无效")
+            continue
+        if name not in joints:
+            continue
+        joint = joints[name]
+        lower, measured_upper = bounds
+        command_upper = joint.get("calibrated_command_max_pos", measured_upper)
+        if (type(command_upper) not in (int, float) or not math.isfinite(command_upper)
+                or command_upper <= lower):
+            errors.append(f"{name} 的指令位置校准上限无效")
+            continue
+        if fraction_valid and command_upper > expanded_position_range(bounds, fraction)[1]:
+            errors.append(f"{name} 的指令位置校准上限超出急停边界")
+        if joint.get("min_pos", lower) < lower or joint.get("max_pos", command_upper) > command_upper:
+            errors.append(f"{name} 的指令位置区间超出实测或校准行程")
+    low = safety.get("low_stiffness")
+    if low is not None:
+        speed = low.get("max_velocity")
+        if type(speed) not in (int, float) or not math.isfinite(speed) or speed <= 0:
+            errors.append("safety.low_stiffness.max_velocity 必须为有限正数")
     estop = safety.get("estop", {})
     hw_name = estop.get("hardware_component")
     if hw_name != robot.get("ros2_control_name"):
@@ -167,29 +201,37 @@ def validate_mit(cfg: dict) -> list[str]:
         if not j.get("control") and jname in owner:
             errors.append(f"mimic 关节 {jname} 出现在 MIT 实例表里（它没有命令接口）")
 
-    # 每个实例的 profile 必须覆盖它的关节
+    # 两条启动路径共用实例表，每种配置都应覆盖相同的关节。
     for iname, inst in instances.items():
-        pname = inst.get("profile")
-        if not pname:
-            errors.append(f"MIT 实例 {iname} 缺 profile")
-            continue
-        prof = profiles.get(pname)
-        if prof is None:
-            errors.append(f"MIT 实例 {iname} 引用了不存在的 profile {pname}")
-            continue
         if not inst.get("plugin"):
             errors.append(f"MIT 实例 {iname} 缺 plugin")
-        per_joint = prof.get("per_joint") or {}
-        for jname in inst.get("joints", []):
-            if jname not in per_joint:
-                errors.append(f"profile {pname} 的 per_joint 缺关节 {jname}（实例 {iname} 要用）")
+        for key in ("profile", "gravity_profile"):
+            pname = inst.get(key)
+            if pname is None and key == "gravity_profile":
+                continue
+            if pname not in profiles:
+                errors.append(f"MIT 实例 {iname} 引用了不存在的 {key} {pname}")
+                continue
+            profile = profiles[pname]
+            if key == "gravity_profile":
+                ratios = profile.get("hold_gain_ratios", {})
+                for kind in ("kp", "kd"):
+                    ratio = ratios.get(kind)
+                    if type(ratio) not in (int, float) or not math.isfinite(ratio) or not 0 <= ratio <= 1:
+                        errors.append(f"MIT 配置 {pname}.hold_gain_ratios.{kind} 缺失或无效")
+            for joint in inst.get("joints", []):
+                gains = profile["per_joint"].get(joint, {})
+                required = ("kp_move", "kd_move")
+                if key == "gravity_profile":
+                    required += ("gravity_joint_scale",)
+                for gain in required:
+                    value = gains.get(gain)
+                    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                        errors.append(f"MIT 配置 {pname}.{joint}.{gain} 缺失或无效")
+    if not instances.get("b601_mit_arm", {}).get("gravity_profile"):
+        errors.append("MIT 手臂缺少重力补偿配置")
     if not mit.get("shared", {}).get("gravity_params"):
-        errors.append("control.mit.shared.gravity_params 为空（重力前馈会全是 0）")
-    for name in mit.get("presets", {}):
-        try:
-            apply_mit_preset(mit, name)
-        except ValueError as error:
-            errors.append(f"MIT 档位 {name}：{error}")
+        errors.append("controllers.mit.shared.gravity_params 为空")
     return errors
 
 
@@ -277,11 +319,15 @@ def render_safety_params(cfg: dict) -> str:
     joints = cfg["joints"]
     names = list(joints.keys())
 
-    default_margin = float(safety["angle"]["warn_margin"])
+    angle = safety["angle"]
+    default_margin = float(angle["warn_margin"])
+    active = cfg["robot"]["gripper_joint"]
+    mimic = cfg["robot"]["mimic_joint"]
+    bounds = safety_position_limits(cfg)
     params: dict = {
         "joint_names": names,
-        "pos_min": [float(joints[n]["min_pos"]) for n in names],
-        "pos_max": [float(joints[n]["max_pos"]) for n in names],
+        "pos_min": [bounds[n][0] for n in names],
+        "pos_max": [bounds[n][1] for n in names],
         "vel_max": [float(joints[n]["max_velocity"]) for n in names],
         "startup_pose": [float(joints[n]["startup"]) for n in names],
         # 逐关节的软警告配置（夹爪关掉"接近限位/离开启动位形"，否则开合会一直挂警告）
@@ -295,8 +341,6 @@ def render_safety_params(cfg: dict) -> str:
         "feedback_timeout_sec": safety["feedback_timeout_sec"],
         "estop_on_feedback_timeout": safety["estop_on_feedback_timeout"],
         "startup_grace_sec": safety["startup_grace_sec"],
-        # 静止零位漂移容差（同 hardware 激活检查用的那个值）
-        # 静止零位漂移容差：逐关节列表（夹爪单位 m，真值里单独覆盖成 0.002）
         "warn_vel_ratio": safety["velocity"]["warn_ratio"],
         "warn_on_pose_deviation": safety["pose"]["warn_on_deviation"],
         "warn_pose_threshold": safety["pose"]["warn_deviation"],
@@ -313,10 +357,14 @@ def render_safety_params(cfg: dict) -> str:
         "service_discovery_timeout_sec": safety["estop"]["service_discovery_timeout_sec"],
         "latch": safety["estop"]["latch"],
     }
+    if low := safety.get("low_stiffness"):
+        arm_speed = float(low["max_velocity"])
+        gripper_speed = arm_speed * abs(float(joints[active]["motor"]["scale"]))
+        params["low_vel_max"] = [gripper_speed if n in (active, mimic) else arm_speed for n in names]
     data = {safety.get("node_name", "b601_safety_monitor"): {"ros__parameters": params}}
     head = (
         GENERATED_NOTE
-        + "# 安全监控节点参数。限位/速度上限来自 joints 段，阈值来自 safety 段。\n"
+        + "# 安全监控节点参数。两档共用实测外扩位置边界，速度上限按档位选择。\n"
         + "# 想永久调整阈值请改 b601_project.yaml，不要手改本文件。\n"
     )
     return head + dump_yaml(data)
@@ -328,70 +376,18 @@ MIT_ARRAY_KEYS = (
     "kp_hold", "kd_hold", "kp_move", "kd_move", "friction",
     "kp_free", "kd_free", "free_enabled",
     "settle_band_min", "settle_band_max",
-    "gravity_joint_scale", "gravity_bias",
+    "gravity_joint_scale", "gravity_joint_scale_free", "gravity_bias",
 )
 # 组级（标量）键透传白名单不需要维护：group 里除 state_interfaces 外都原样透传。
 
 
-def apply_mit_preset(mit: dict, name: str) -> dict:
-    if not re.fullmatch(r"[a-z][a-z0-9_]*", name) or name == "default":
-        raise ValueError("档位名称须为小写标识符且不能使用 default")
-    preset = mit["presets"][name]
-    configured = deepcopy(mit)
-    profiles = configured["profiles"]
-    arm = mit["instances"]["b601_mit_arm"]["profile"]
-    arm_profile = profiles[arm]
-    arm_joints = set(mit["instances"]["b601_mit_arm"]["joints"])
-    compensation_name = preset.get("compensation")
-    if compensation_name is not None:
-        compensation = mit.get("compensations", {}).get(compensation_name)
-        if compensation is None:
-            raise ValueError(f"未知重力补偿 {compensation_name}")
-        selected = set(preset.get("compensation_joints", arm_joints))
-        if not selected or not selected <= arm_joints or not selected <= compensation["per_joint"].keys():
-            raise ValueError("重力补偿必须覆盖所选手臂关节")
-        arm_profile["group"].update(compensation["group"])
-        for joint in arm_joints:
-            values = (
-                compensation["per_joint"][joint] if joint in selected
-                else dict.fromkeys(("gravity_joint_scale", "gravity_bias"), 0.0)
-            )
-            arm_profile["per_joint"][joint].update(values)
-    gain_name = preset.get("gain_reference")
-    if gain_name is not None:
-        gains = mit.get("gain_references", {}).get(gain_name)
-        if gains is None:
-            raise ValueError(f"未知参考增益 {gain_name}")
-        selected = set(preset.get("gain_joints", arm_joints))
-        if not selected or not selected <= arm_joints or not selected <= gains["per_joint"].keys():
-            raise ValueError("参考增益必须覆盖所选手臂关节")
-        for joint in selected:
-            arm_profile["per_joint"][joint].update(gains["per_joint"][joint])
-    for profile_name, overlay in preset.get("profiles", {}).items():
-        if profile_name not in profiles:
-            raise ValueError(f"未知 profile {profile_name}")
-        profile = profiles[profile_name]
-        profile["group"].update(overlay.get("group", {}))
-        for joint, values in overlay.get("per_joint", {}).items():
-            if joint not in profile["per_joint"] or not values.keys() <= set(MIT_ARRAY_KEYS):
-                raise ValueError(f"{profile_name}.{joint} 含未知关节或逐关节参数")
-            profile["per_joint"][joint].update(values)
-    for profile in profiles.values():
-        for joint, values in profile["per_joint"].items():
-            for key in ("gravity_joint_scale", "gravity_bias"):
-                if key not in values:
-                    continue
-                value = values[key]
-                if (not isinstance(value, (float, int)) or not math.isfinite(value)
-                        or (key != "gravity_bias" and value < 0.0)):
-                    raise ValueError(f"{joint}.{key} 非法")
-    return configured
-
-
-def _mit_params(cfg: dict, mit: dict, inst: dict) -> dict:
+def _mit_params(cfg: dict, mit: dict, inst: dict, gravity_compensation: bool) -> dict:
     """把一个实例渲染成 ros__parameters。缺失的逐关节键**不输出**，交给控制器默认值。"""
     profiles = mit["profiles"]
-    prof = profiles[inst["profile"]]
+    profile_name = inst["profile"]
+    if gravity_compensation:
+        profile_name = inst.get("gravity_profile", profile_name)
+    prof = profiles[profile_name]
     per_joint = prof.get("per_joint") or {}
     group = dict(prof.get("group") or {})
     joints = list(inst["joints"])
@@ -422,15 +418,19 @@ def _mit_params(cfg: dict, mit: dict, inst: dict) -> dict:
     for key, val in group.items():
         params[key] = val
 
+    ratios = prof.get("hold_gain_ratios")
+    if ratios:
+        for kind in ("kp", "kd"):
+            factor = Decimal(str(ratios[kind]))
+            params[f"{kind}_free"] = [float(Decimal(str(gain)) * factor)
+                                      for gain in params[f"{kind}_move"]]
     params["gravity_params"] = [float(x) for x in mit["shared"]["gravity_params"]]
     return params
 
 
-def render_mit_controllers(cfg: dict, preset: str | None = None) -> str:
+def render_mit_controllers(cfg: dict, gravity_compensation: bool = False) -> str:
     """MIT 力控控制器 yaml（controller_manager 声明 + 每个实例的参数块）。"""
     mit = cfg["controllers"]["mit"]
-    if preset is not None:
-        mit = apply_mit_preset(mit, preset)
     instances = mit["instances"]
     cm_params: dict = {"update_rate": mit.get("update_rate", 200)}
     cm_params["joint_state_broadcaster"] = {
@@ -438,7 +438,7 @@ def render_mit_controllers(cfg: dict, preset: str | None = None) -> str:
     body: dict = {"joint_state_broadcaster": {"ros__parameters": {"use_local_topics": False}}}
     for name, inst in instances.items():
         cm_params[name] = {"type": inst["plugin"]}
-        body[name] = {"ros__parameters": _mit_params(cfg, mit, inst)}
+        body[name] = {"ros__parameters": _mit_params(cfg, mit, inst, gravity_compensation)}
 
     head = (
         GENERATED_NOTE
@@ -449,8 +449,7 @@ def render_mit_controllers(cfg: dict, preset: str | None = None) -> str:
         + "#       controllers_file:=<本文件> \\\n"
         + "#       controllers:=\"joint_state_broadcaster " + " ".join(instances) + "\"\n"
     )
-    if preset is not None:
-        head += f"# bringup 参数：mit_preset:={preset}\n"
+    head += f"# bringup 参数：mit_gravity_compensation:={str(gravity_compensation).lower()}\n"
     data = {"controller_manager": {"ros__parameters": cm_params}}
     data.update(body)
     return head + dump_yaml(data)
@@ -522,6 +521,8 @@ def render_all(cfg: dict) -> dict[Path, str]:
     outputs = {
         WS_SRC / "b601_description" / "config" / "initial_positions.yaml":
             render_initial_positions(cfg),
+        WS_SRC / "b601_description" / "config" / "safety_position_limits.yaml":
+            GENERATED_NOTE + dump_yaml(safety_position_limits(cfg)),
         WS_SRC / "b601_bringup" / "config" / "b601_controllers.yaml":
             render_controllers(cfg),
         WS_SRC / "b601_moveit_config" / "config" / "joint_limits.yaml":
@@ -530,6 +531,8 @@ def render_all(cfg: dict) -> dict[Path, str]:
             render_safety_params(cfg),
         WS_SRC / "b601_bringup" / "config" / "b601_mit_controllers.yaml":
             render_mit_controllers(cfg),
+        WS_SRC / "b601_bringup" / "config" / "b601_mit_controllers_gravity.yaml":
+            render_mit_controllers(cfg, gravity_compensation=True),
         WS_SRC / "b601_bringup" / "config" / "hardware_dm.yaml":
             render_hardware_dm(cfg),
         srdf: render_srdf(cfg, srdf),
@@ -537,9 +540,6 @@ def render_all(cfg: dict) -> dict[Path, str]:
         moveit / "kinematics.yaml": GENERATED_NOTE + dump_yaml(cfg["moveit"]["kinematics"]),
         moveit / "ompl_planning.yaml": GENERATED_NOTE + dump_yaml(cfg["moveit"]["ompl_planning"]),
     }
-    for preset in cfg["controllers"]["mit"].get("presets", {}):
-        path = WS_SRC / "b601_bringup" / "config" / f"b601_mit_controllers_{preset}.yaml"
-        outputs[path] = render_mit_controllers(cfg, preset)
     return outputs
 
 
@@ -566,6 +566,13 @@ def main() -> int:
 
     rendered = render_all(cfg)
     drifted: list[Path] = []
+    mit_dir = WS_SRC / "b601_bringup" / "config"
+    obsolete = sorted(path for path in mit_dir.glob("b601_mit_controllers*.yaml")
+                      if path not in rendered)
+    if obsolete:
+        for path in obsolete:
+            print(f"❌ 未登记的 MIT 控制器文件：{path.relative_to(REPO_ROOT)}")
+        return 1
 
     for path, content in rendered.items():
         old = path.read_text(encoding="utf-8") if path.is_file() else ""

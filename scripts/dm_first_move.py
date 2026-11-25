@@ -27,6 +27,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from builtin_interfaces.msg import Duration
 
+from b601_demos.trajectory_utils import RECENTER_POSITIONS, RECENTER_TOLERANCE, at_recenter
+
 from project_config import load_project_config
 
 PROJECT = load_project_config()
@@ -68,8 +70,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--joint", default=ARM_JOINTS[0], choices=ARM_JOINTS)
     ap.add_argument("--delta", type=float, default=SETTINGS["delta"], help="增量（rad），带符号")
-    ap.add_argument("--set", default="",
-                    help="多关节绝对目标，如 joint2=-0.3,joint3=-0.6（给定时忽略 --joint/--delta）")
+    target_mode = ap.add_mutually_exclusive_group()
+    target_mode.add_argument("--set", default="",
+                             help="多关节绝对目标，如 joint2=-0.3,joint3=-0.6")
+    target_mode.add_argument("--recenter", action="store_true",
+                             help="去校准停放位，并检查全部手臂关节的到位容差")
     ap.add_argument("--duration", type=float, default=SETTINGS["duration"], help="到位时间（s）")
     ap.add_argument("--controller", default=PROJECT["controllers"]["arm"]["name"])
     args = ap.parse_args()
@@ -84,7 +89,10 @@ def main() -> int:
         start = list(node.current)
         target = list(start)
         moved = []
-        if args.set:
+        if args.recenter:
+            target = list(RECENTER_POSITIONS)
+            moved = list(range(len(ARM_JOINTS)))
+        elif args.set:
             # 多关节绝对目标：只改给定关节，其余保持当前值
             for item in args.set.split(","):
                 name, _, value = item.partition("=")
@@ -162,7 +170,15 @@ def main() -> int:
             for i in moved:
                 print(f"实际位移: {ARM_JOINTS[i]} {final[i] - start[i]:+.4f} rad "
                       f"（命令 {target[i] - start[i]:+.4f}）")
+            if args.recenter:
+                if not at_recenter(final):
+                    print(f"❌ 归中最大误差 {max(err):.9g} rad，要求每轴 ≤ {RECENTER_TOLERANCE:g} rad")
+                    return 1
+                print(f"已归中：六轴误差均 ≤ {RECENTER_TOLERANCE:g} rad")
         else:
+            if args.recenter:
+                print("❌ 没读到最终状态，无法确认归中")
+                return 1
             print("✅ 执行成功（但没读到最终状态）")
         return 0
     except (KeyboardInterrupt, ExternalShutdownException):

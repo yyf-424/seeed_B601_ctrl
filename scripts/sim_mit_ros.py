@@ -47,6 +47,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 
 from project_config import load_project_config
+from sync_config import MIT_ARRAY_KEYS
 
 PROJECT = load_project_config()
 SETTINGS = PROJECT["tools"]["sim_mit_ros"]
@@ -68,6 +69,7 @@ class Harness(Node):
         self.samples: list[tuple[float, list[float], list[float]]] = []
         self.status_level = -1
         self.status_text = ""
+        self.limit_profile = None
         self.create_subscription(JointState, "/joint_states", self._on_state, 50)
         from std_msgs.msg import Float64MultiArray
         self.last_debug: list[float] = []
@@ -134,6 +136,7 @@ class Harness(Node):
             level = level[0] if level else 0
         self.status_level = int(level)
         self.status_text = msg.message
+        self.limit_profile = next((v.value for v in msg.values if v.key == "limit_profile"), None)
 
     # ------------------------------------------------------------------ 工具
     def spin_for(self, seconds: float) -> None:
@@ -226,7 +229,7 @@ def state_machine_test(node, joints, args) -> int:
         print("❌ 读不到控制器的 settle_band_min 参数服务")
         return 1
     future = client.call_async(GetParameters.Request(
-        names=["settle_band_min", "kp_move", "settle_band_max"]))
+        names=["kp_move", "kp_free", "settle_band_max"]))
     rclpy.spin_until_future_complete(node, future, timeout_sec=fixture["parameter_timeout_sec"])
     response = future.result() if future.done() else None
     if response is None or not response.values:
@@ -240,14 +243,11 @@ def state_machine_test(node, joints, args) -> int:
         raise ValueError("预期逐关节浮点参数")
 
     try:
-        min_band, kp_move, max_band = map(first_joint, response.values)
+        kp_move, kp_free, max_band = map(first_joint, response.values)
     except ValueError as error:
         print(f"❌ {error}")
         return 1
     kp_threshold = kp_move * fixture["kp_fraction"]
-    if min_band <= 0.0:
-        print("❌ 该测试要求 settle_band_min 为正")
-        return 1
 
     n = len(joints)
     def snapshot():
@@ -276,18 +276,19 @@ def state_machine_test(node, joints, args) -> int:
     ok = True
     node.spin_for(fixture["warmup_sec"])
     s = snapshot()
-    if s is None:
-        print("❌ 收不到 ~/state（控制器没在发？）")
+    if s is None or s["done"] or abs(s["kp"][0] - kp_move) > fixture["kp_free_tolerance"]:
+        print("❌ 未收到首个目标时应继续使用高刚度")
         return 1
-    print(f"  A 初始：done={s['done']} kp={json.dumps([round(k, 2) for k in s['kp']])}")
+    print(f"  A 首个目标前保持高刚度，joint1 kp={s['kp'][0]:g}")
 
     base = node.q()
     target = list(base)
     target[0] += fixture["step_rad"]
     print(f"  B 发目标 joint1+{fixture['step_rad']:g} rad …")
     t0 = time.monotonic()
+    seq = s["seq"]
     node.send(target)
-    s = wait_state(lambda s: (not s["done"]), fixture["claim_timeout_sec"], "done→0（重新索权）")
+    s = wait_state(lambda s: s["seq"] > seq and not s["done"], fixture["claim_timeout_sec"], "进入跟踪")
     if s is None:
         ok = False
     else:
@@ -302,14 +303,14 @@ def state_machine_test(node, joints, args) -> int:
         ok = False
     else:
         print(f"     整组 done 用时 {time.monotonic() - t0:.2f}s；此时 err={json.dumps([round(e, 4) for e in s['err_cmd']])}")
-    s = wait_state(lambda s: s["kp"][0] < fixture["kp_free_ceiling"], fixture["kp_free_timeout_sec"], "kp 落回 kp_free")
+    s = wait_state(lambda s: abs(s["kp"][0] - kp_free) <= fixture["kp_free_tolerance"], fixture["kp_free_timeout_sec"], "kp 落回 kp_free")
     if s is None:
         ok = False
     else:
         print(f"     kp 回落到 {s['kp'][0]:.2f} 用时 {time.monotonic() - t0:.2f}s（含 3 s 到位判定）")
 
     # B2：误差带上限（大位移时 5% 会被 cap 到 settle_band_max=0.05）
-    big = list(node.q())
+    big = target.copy()
     big[0] += fixture["large_step_rad"]                       # joint1 走 2 rad（限位 ±2.6）：5% = 0.1 > cap 0.05
     node.send(big)
     s = wait_state(lambda s: (not s["done"]), fixture["claim_timeout_sec"], "B2 索权")
@@ -323,8 +324,7 @@ def state_machine_test(node, joints, args) -> int:
         ok = False
 
     # B3：整组 done 由**最慢**关节决定（joint1 只动 0.05、joint3 动 0.6）
-    base3 = node.q()
-    mix = list(base3)
+    mix = big.copy()
     for joint, step in fixture["mixed_steps_rad"].items():
         mix[joints.index(joint)] += step
     t3 = time.monotonic()
@@ -352,10 +352,10 @@ def state_machine_test(node, joints, args) -> int:
     print(f"  相同目标重发，{'保持到位' if unchanged else '重新跟踪或超时'}")
     ok = ok and unchanged
     tiny = mix.copy()
-    tiny[0] += min_band / 2
+    tiny[0] += fixture["small_step_rad"]
     node.send(tiny)
     changed = wait_state(lambda state: not state["done"], fixture["claim_timeout_sec"], "微小目标进入跟踪")
-    print(f"  微小目标 {min_band / 2:g} rad，{'已接受' if changed else '未接受'}")
+    print(f"  微小目标 {fixture['small_step_rad']:g} rad，{'已接受' if changed else '未接受'}")
     ok = ok and changed is not None
     return 0 if ok else 1
 
@@ -414,7 +414,7 @@ def mit_frame_test(node: Harness) -> int:
     gravity = node.ff[n:2 * n]
     gravity_nonzero = any(abs(x) > fixture["minimum_gravity_nm"] for x in gravity)
 
-    # joint2 的已辨识系数只在实际运动时产生摩擦前馈。
+    # joint2 的测试用摩擦系数在实际运动时产生前馈。
     position[1] -= fixture["friction_motion_rad"]
     node.send(position)
     friction_peak = 0.0
@@ -439,12 +439,180 @@ def mit_frame_test(node: Harness) -> int:
     return 0 if passed else 1
 
 
+def fixture_gravity_params(model_path: Path) -> list[float]:
+    """用测试 MJCF 的质量和质心生成夹具前馈，真机辨识参数仍来自统一配置。"""
+    import mujoco
+
+    model = mujoco.MjModel.from_xml_path(str(model_path))
+    links = [name for name in PROJECT["model"]["links"] if name not in ("base_link", "link1")]
+    params = []
+    for name in links:
+        body = model.body(name)
+        mass = float(body.mass[0])
+        params.extend([mass, *(float(mass * component) for component in body.ipos)])
+    return params
+
+
+def gravity_varstiff_switch_test(node: Harness, csv_path: Path) -> int:
+    """用真实控制器验证升档、到位、降档以及逐周期实测保持。"""
+    fixture = SETTINGS["gravity_varstiff_switch"]
+    mit = PROJECT["controllers"]["mit"]
+    arm = mit["instances"]["b601_mit_arm"]
+    profile = mit["profiles"][arm["gravity_profile"]]
+    count = len(arm["joints"])
+    gains = [profile["per_joint"][joint] for joint in arm["joints"]]
+    move_gains = {kind: [gain[f"{kind}_move"] for gain in gains] for kind in ("kp", "kd")}
+    hold_gains = {
+        kind: [gain * profile["hold_gain_ratios"][kind] for gain in values]
+        for kind, values in move_gains.items()
+    }
+    stages = []
+
+    def ready():
+        return node.status_level in (0, 1) and len(node.state) == 8 * count + 4
+
+    def wait_for(condition):
+        end = time.monotonic() + fixture["motion_timeout_sec"]
+        while time.monotonic() < end and node.status_level < 2:
+            node.spin_for(SETTINGS["executor_poll_sec"])
+            if ready() and condition(node.state):
+                return True
+        return False
+
+    def at_gains(state, stage):
+        expected = hold_gains if stage == "free" else move_gains
+        return all(
+            abs(actual - gain) <= fixture["gain_tolerance"]
+            for kind, offset in (("kp", 2), ("kd", 3))
+            for actual, gain in zip(state[offset * count:(offset + 1) * count], expected[kind])
+        )
+
+    def gravity_present(frames):
+        # 此档摩擦和任务项为零，因此 effort 目标就是实际重力前馈。
+        for _, state in frames:
+            scales = ([profile["group"]["gravity_joint_scale_free"]] * count
+                      if state[8 * count] else [gain["gravity_joint_scale"] for gain in gains])
+            if max(abs(value) for value in state[:count]) < fixture["minimum_signal_nm"]:
+                return False
+            if any(abs(torque + scale * raw) > fixture["masked_torque_tolerance_nm"]
+                   for torque, raw, scale in zip(state[:count], state[count:2 * count], scales)):
+                return False
+        return bool(frames)
+
+    def angular_travel(samples):
+        return [max(values) - min(values) for values in
+                zip(*(position for _, position, _ in samples))]
+
+    def check_hold(label):
+        handoff_sample_index = len(node.samples)
+        handoff_state_index = len(node.state_log) - 1
+        if not wait_for(lambda state: bool(state[8 * count]) and at_gains(state, "free")
+                        and node.limit_profile == "low_stiffness"):
+            stages.append({"stage": label, "reason": "低刚度未就绪", "pass": False})
+            return False
+        sample_index = len(node.samples)
+        state_index = len(node.state_log) - 1
+        deadline = time.monotonic() + fixture["motion_timeout_sec"]
+        duration = 0.0
+        while duration < fixture["hold_sec"] and time.monotonic() < deadline and ready():
+            node.spin_for(SETTINGS["executor_poll_sec"])
+            if len(node.samples) > sample_index:
+                duration = node.samples[-1][0] - node.samples[sample_index][0]
+        samples = node.samples[sample_index:]
+        states = node.state_log[state_index:]
+        travel = angular_travel(samples)
+        handoff_travel = []
+        if samples:
+            start = node.samples[handoff_sample_index][0]
+            handoff_samples = [sample for sample in node.samples[handoff_sample_index:]
+                               if sample[0] - start <= fixture["hold_sec"]]
+            handoff_travel = angular_travel(handoff_samples)
+        reference_states = node.state_log[handoff_state_index:]
+        reference_error = max((abs(value) for _, state in reference_states
+                               for value in state[5 * count:6 * count]), default=None)
+        passed = (ready() and node.limit_profile == "low_stiffness"
+                  and duration >= fixture["hold_sec"] and len(travel) == count
+                  and max(travel + handoff_travel) <= fixture["hold_max_travel_rad"]
+                  and reference_error == 0.0
+                  and all(bool(state[8 * count]) and at_gains(state, "free") for _, state in states)
+                  and gravity_present(reference_states))
+        stages.append({"stage": label, "sample_span_sec": duration, "samples": len(samples),
+                       "travel_rad": travel, "handoff_travel_rad": handoff_travel,
+                       "reference_error_rad": reference_error,
+                       "gravity_present": gravity_present(reference_states),
+                       "limit_profile": node.limit_profile, "pass": passed})
+        return passed
+
+    start = wait_for(lambda state: not state[8 * count] and at_gains(state, "move")
+                     and node.limit_profile == "normal")
+    before_start = len(node.state_log) - 1
+    if start:
+        node.spin_for(profile["group"]["settle_sec"] + profile["group"]["kp_down_sec"])
+    startup = node.state_log[max(0, before_start):]
+    startup_pass = (start and ready() and gravity_present(startup) and
+                    all(not state[8 * count] and at_gains(state, "move") for _, state in startup))
+    stages.append({"stage": "startup_high", "pass": startup_pass})
+    for index, delta in enumerate(fixture["moves_rad"], start=1):
+        if not startup_pass or not ready():
+            break
+        target = [q + step for q, step in zip(node.q(), delta)]
+        sequence = node.state[8 * count + 1]
+        state_index = len(node.state_log)
+        node.send(target)
+        high = wait_for(lambda state: state[8 * count + 1] > sequence
+                        and not state[8 * count] and at_gains(state, "move")
+                        and node.limit_profile == "normal")
+        done = high and wait_for(lambda state: bool(state[8 * count]))
+        high_frames = [(stamp, state) for stamp, state in node.state_log[state_index:]
+                       if state[8 * count + 1] > sequence and not state[8 * count]
+                       and at_gains(state, "move")]
+        settled = [(stamp, state) for stamp, state in high_frames
+                   if 0.0 < state[8 * count + 2]]
+        if settled:
+            end = settled[-1][0]
+            window = fixture["settle_window_sec"]
+            settled = [(stamp, state) for stamp, state in settled if end - stamp <= window]
+        errors = [max(abs(state[4 * count + i]) for _, state in settled)
+                  for i in range(count)] if settled else []
+        band = [abs(step) * profile["group"]["settle_band_pct"] for step in delta]
+        passed = (done and len(errors) == count and gravity_present(high_frames)
+                  and all(error <= limit for error, limit in zip(errors, band)))
+        stages.append({"stage": f"move_{index}", "target_rad": target, "band_rad": band,
+                       "error_rad": errors, "gravity_present": gravity_present(high_frames),
+                       "high_gains_reached": high, "done": done, "pass": passed})
+        if not done:
+            break
+        check_hold(f"hold_{index}")
+
+    expected = 1 + 2 * len(fixture["moves_rad"])
+    passed = len(stages) == expected and all(stage["pass"] for stage in stages)
+    result = {"mode": "gravity_compensation", "fixture_gravity": "mujoco_model_inertias",
+              "joints": arm["joints"], "stages": stages,
+              "safety_level": node.status_level, "safety_status": node.status_text,
+              "pass": passed}
+    csv_path.with_suffix(".json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+                                            encoding="utf-8")
+    with csv_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["t_rel", *[f"{j}_pos" for j in arm["joints"]],
+                         *[f"{j}_vel" for j in arm["joints"]]])
+        if node.samples:
+            start = node.samples[0][0]
+            writer.writerows((stamp - start, *q, *vel) for stamp, q, vel in node.samples)
+    for stage in stages:
+        print("  RESULT " + json.dumps(stage, ensure_ascii=False))
+    print(f"  安全状态 {node.status_level} {node.status_text}，记录 {csv_path.with_suffix('.json')}")
+    return 0 if passed else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--controller", default="b601_mit_arm",
                     help="要驱动的 MIT 控制器名（决定 __/joint_target 的话题前缀）")
     ap.add_argument("--controllers-file", default="",
                     help="控制器 yaml（默认用 b601_bringup 里的 MIT 那份）")
+    ap.add_argument("--gravity-varstiff-switch-test", action="store_true",
+                    help="使用正式高低增益与 MuJoCo 标称重力验证自动切换")
     ap.add_argument("--joints", default=",".join(PROJECT["robot"]["arm_joints"]))
     ap.add_argument("--slew", type=float, default=SETTINGS["slew"], help="目标斜坡速度（关节单位/s）")
     ap.add_argument("--hold", type=float, default=SETTINGS["hold"], help="每个姿态到位后保持多久再采样")
@@ -482,8 +650,8 @@ def main() -> int:
                     help="纯 PD 配置（对标原 pos_vel 回路）：关重力前馈、关摩擦前馈、"
                          "并令 free_enabled=false —— 这样参考恒为上层目标、刚度恒为 kp_move，"
                          "不会进入『参考跟随实测』的等待模式（那个模式纯 PD 下等于自由下落）")
-    ap.add_argument("--kp", default="", help="覆盖 kp_move，例 '60,60,60,20,10,8' 或单值")
-    ap.add_argument("--kd", default="", help="覆盖 kd_move，例 '5.17,9.97,8.45,1.17,0.55,0.35' 或单值")
+    ap.add_argument("--kp", default="", help="覆盖仿真跟踪 Kp，使用逗号分隔的逐轴值或单值")
+    ap.add_argument("--kd", default="", help="覆盖仿真跟踪 Kd，使用逗号分隔的逐轴值或单值")
     ap.add_argument("--motor-impedance", action="store_true",
                     help="兼容参数，MIT 现已默认运行电机侧阻抗")
     ap.add_argument("--temp-trip-test", action="store_true",
@@ -504,6 +672,21 @@ def main() -> int:
     ap.add_argument("--gravity-scale", type=float, default=None,
                     help="启动后用 ros2 param set 设重力前馈系数（0 = 纯 PD，与真机 11-21 的测试口径一致）")
     args = ap.parse_args()
+    if args.gravity_varstiff_switch_test and (
+        args.mode != "mit" or args.no_launch or args.controllers_file or args.controllers or
+        args.split or args.zero_gravity or args.pure_pd or args.kp or args.kd or args.no_safety or
+        args.gravity_scale is not None or args.state_machine_test or args.mit_frame_test or
+        args.temp_trip_test or args.controller != "b601_mit_arm" or
+        args.joints.split(",") != PROJECT["robot"]["arm_joints"]
+    ):
+        ap.error("--gravity-varstiff-switch-test 使用现行六轴双刚度参数及安全节点")
+    if args.state_machine_test and (
+        args.mode != "mit" or not args.zero_gravity or args.no_launch or args.controllers_file or
+        args.controllers or args.split or args.pure_pd or args.kp or args.kd or
+        args.gravity_scale is not None or args.controller != "b601_mit_arm" or
+        args.joints.split(",") != PROJECT["robot"]["arm_joints"]
+    ):
+        ap.error("--state-machine-test 使用现行六轴双刚度参数及零重力夹具")
     if args.mit_frame_test and (
         args.mode != "mit" or not args.zero_gravity or args.no_launch or args.split
     ):
@@ -518,7 +701,12 @@ def main() -> int:
             ["ros2", "pkg", "prefix", "b601_bringup"],
             capture_output=True, text=True, check=False,
         ).stdout.strip()
-        args.controllers_file = f"{prefix}/share/b601_bringup/config/b601_mit_controllers.yaml"
+        filename = (
+            "b601_mit_controllers_gravity.yaml"
+            if args.gravity_varstiff_switch_test or args.state_machine_test
+            else "b601_mit_controllers.yaml"
+        )
+        args.controllers_file = f"{prefix}/share/b601_bringup/config/{filename}"
     csv_path = Path(args.csv) if args.csv else project / ".verify" / f"sim_mit_ros_{args.tag}.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -537,7 +725,10 @@ def main() -> int:
             "dm_command_mode:=mit_impedance",
             f"controllers:=joint_state_broadcaster {args.controller}",
         ]
-        if args.controllers:
+        if args.gravity_varstiff_switch_test:
+            cmds = [c for c in cmds if not c.startswith("controllers:=")]
+            extra_controllers = ["b601_mit_gripper"]
+        elif args.controllers:
             cmds = [c for c in cmds if not c.startswith("controllers:=")]
             cmds.append(f"controllers:=joint_state_broadcaster {args.controllers}")
 
@@ -565,9 +756,7 @@ def main() -> int:
             cm = cfg["controller_manager"]["ros__parameters"]
             cm.pop(base_name, None)
             cfg.pop(base_name, None)
-            per_joint_keys = ("kp_hold", "kd_hold", "kp_move", "kd_move", "friction",
-                              "torque_limit", "kp_free", "kd_free", "free_enabled",
-                              "settle_band_min", "settle_band_min", "settle_band_max")
+            per_joint_keys = MIT_ARRAY_KEYS
             new_names = []
             offset = 0
             for idx, count in enumerate(parts):
@@ -645,7 +834,7 @@ def main() -> int:
             patched.write_text(_yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
                                encoding="utf-8")
             cmds.append(f"project_config_file:={patched}")
-        if args.joint_friction > 0.0 or args.zero_gravity:
+        if args.joint_friction > 0.0 or args.zero_gravity or args.gravity_varstiff_switch_test:
             from ament_index_python.packages import get_package_share_directory
 
             source = Path(get_package_share_directory("b601_mujoco")) / "models" / "b601_arm.xml"
@@ -665,12 +854,26 @@ def main() -> int:
                 option.set("gravity", "0 0 0")
                 if args.gravity_scale is None:
                     args.gravity_scale = 0.0
+            if args.gravity_varstiff_switch_test:
+                # 保持试验中两指机械联动，使 MuJoCo 在积分时计算从动指的反力。
+                # 后端步末的运动学镜像只保证外观，无法给自由滑动的从动指提供反力。
+                equality = model.find("equality")
+                if equality is None:
+                    equality = ET.SubElement(model.getroot(), "equality")
+                robot = PROJECT["robot"]
+                # 2 ms 时间常数对应模型的两个物理步长，近刚性的联动需要接近 1 的阻抗。
+                ET.SubElement(equality, "joint", joint1=robot["mimic_joint"],
+                              joint2=robot["gripper_joint"], polycoef="0 -1 0 0 0",
+                              solref="0.002 1", solimp="0.999 0.9999 0.0001")
             fixture = project / ".verify" / f"b601_fixture_{args.tag}.xml"
             model.write(fixture, encoding="unicode")
             cmds.append(f"mujoco_model:={fixture}")
         if args.initial_poses:
             import yaml as _yaml
             vals = [float(v) for v in args.initial_poses.split(",") if v]
+            if args.gravity_varstiff_switch_test and len(vals) == len(joints):
+                opening = SETTINGS["gravity_fixture_finger_opening_m"]
+                vals.extend((opening, -opening))
             names = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6",
                      "finger_left", "finger_right"]
             ip = {n: (vals[i] if i < len(vals) else 0.0) for i, n in enumerate(names)}
@@ -693,17 +896,21 @@ def main() -> int:
                 + _yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
                 encoding="utf-8")
             args.controllers_file = str(patched_yaml)
-        if args.mit_frame_test or args.state_machine_test:
+        if args.mit_frame_test or args.state_machine_test or args.gravity_varstiff_switch_test:
             import yaml as _yaml
             config = _yaml.safe_load(Path(args.controllers_file).read_text(encoding="utf-8"))
             params = config[args.controller]["ros__parameters"]
-            params["free_enabled"] = [args.state_machine_test] * len(params["joints"])
-
+            if args.state_machine_test:
+                params["use_gravity"] = False
+            if args.gravity_varstiff_switch_test:
+                params["gravity_params"] = fixture_gravity_params(source)
             if args.mit_frame_test:
                 fixture = SETTINGS["mit_frame"]
                 params.update(gravity_scale=fixture["gravity_scale"], use_gravity=True,
                               friction_scale=fixture["friction_scale"],
                               task_torque_timeout_sec=fixture["task_torque_timeout_sec"])
+                params["friction"] = [0.0] * len(params["joints"])
+                params["friction"][params["joints"].index("joint2")] = fixture["friction_test_nm"]
                 args.gravity_scale = None
             test_config = project / ".verify" / f"mit_test_{args.tag}.yaml"
             test_config.write_text(_yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
@@ -742,7 +949,7 @@ def main() -> int:
     rclpy.init()
     node = Harness(args.controller, joints)
     arm_client = node.arm_action_client("b601_arm_controller") if args.mode == "pos_vel" else None
-    for name in extra_controllers:
+    for name in ([] if args.gravity_varstiff_switch_test else extra_controllers):
         node.extra_pubs.append(
             node.create_publisher(JointState, f"/{name}/joint_target", 10))
     rc = 0
@@ -784,6 +991,8 @@ def main() -> int:
 
         if args.mit_frame_test:
             return mit_frame_test(node)
+        if args.gravity_varstiff_switch_test:
+            return gravity_varstiff_switch_test(node, csv_path)
         if args.temp_trip_test:
             print(f"过温测试：失能线 {args.temp_limit:.0f} ℃，热模型满载 6 ℃/s（需真实重力负载）")
             node.spin_for(1.0)

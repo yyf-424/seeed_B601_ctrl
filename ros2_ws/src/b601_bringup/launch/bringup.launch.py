@@ -39,8 +39,9 @@ import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -74,7 +75,7 @@ def generate_launch_description():
     use_safety = LaunchConfiguration("use_safety")
     use_sim_time = LaunchConfiguration("use_sim_time")
     controllers_file = LaunchConfiguration("controllers_file")
-    mit_preset = LaunchConfiguration("mit_preset")
+    mit_gravity_compensation = LaunchConfiguration("mit_gravity_compensation")
     mit_recenter_check_collisions = LaunchConfiguration("mit_recenter_check_collisions")
     safety_params_file = PathJoinSubstitution([safety_share, "config", "safety_params.yaml"])
     initial_positions_file = LaunchConfiguration("initial_positions_file")
@@ -119,16 +120,20 @@ def generate_launch_description():
     # 它按 URDF 里的 <ros2_control> 加载硬件插件，按 controllers yaml 加载控制器。
     def launch_manager(context):
         is_mit = dm_command_mode.perform(context) == "mit_impedance"
-        preset = mit_preset.perform(context)
+        if "mit_preset" in context.launch_configurations:
+            raise RuntimeError("实验预选已删除，请使用 mit_gravity_compensation:=true 选择重力补偿")
+        gravity = IfCondition(mit_gravity_compensation).evaluate(context)
         config_override = controllers_file.perform(context)
-        if preset != "default":
-            if not is_mit or hardware.perform(context) not in ("dm", "mujoco"):
-                raise RuntimeError("mit_preset 需要 dm 或 mujoco 后端及 dm_command_mode:=mit_impedance")
-            if config_override:
-                raise RuntimeError("mit_preset 与 controllers_file 只能指定其中一个")
-            default_file = f"b601_mit_controllers_{preset}.yaml"
+        if gravity and (not is_mit or hardware.perform(context) not in ("dm", "mujoco")):
+            raise RuntimeError("MIT 重力补偿需要 dm 或 mujoco 后端及 dm_command_mode:=mit_impedance")
+        if gravity and config_override:
+            raise RuntimeError("mit_gravity_compensation 与 controllers_file 只能选择一个")
+        if not is_mit:
+            default_file = "b601_controllers.yaml"
+        elif gravity:
+            default_file = "b601_mit_controllers_gravity.yaml"
         else:
-            default_file = "b601_mit_controllers.yaml" if is_mit else "b601_controllers.yaml"
+            default_file = "b601_mit_controllers.yaml"
         config_file = config_override or PathJoinSubstitution(
             [bringup_share, "config", default_file]
         ).perform(context)
@@ -143,50 +148,64 @@ def generate_launch_description():
         )]
 
     # 安全监控：独立节点，只读 /joint_states；急停时停控制器并把硬件置 INACTIVE。
-    safety_monitor = Node(
-        package="b601_safety",
-        executable="safety_monitor",
-        name=safety_cfg.get("node_name", "b601_safety_monitor"),
-        output="screen",
-        parameters=[safety_params_file, {"use_sim_time": use_sim_time}],
-        condition=IfCondition(use_safety),
-    )
+    def launch_safety(context):
+        dynamic = (hardware.perform(context) in ("dm", "mujoco")
+                   and dm_command_mode.perform(context) == "mit_impedance")
+        return [Node(
+            package="b601_safety",
+            executable="safety_monitor",
+            name=safety_cfg.get("node_name", "b601_safety_monitor"),
+            output="screen",
+            parameters=[safety_params_file, {"use_sim_time": use_sim_time,
+                                            "use_dynamic_joint_states": dynamic}],
+            condition=IfCondition(use_safety),
+        )]
 
     # 控制器清单做成参数：位置模式用 JTC，MIT 模式换成 b601_mit_controller。
-    # 一个 spawner 进程可以按顺序加载多个控制器，比 OnProcessExit 串链简单得多。
+    # 一个 spawner 进程按顺序加载所有控制器。
     controllers_arg = LaunchConfiguration("controllers")
 
-    def launch_spawners(context, *args, **kwargs):
+    def launch_spawners(context):
+        is_mit = dm_command_mode.perform(context) == "mit_impedance"
+        is_dm = hardware.perform(context) == "dm"
         names = controllers_arg.perform(context).split()
         if not names:
-            if dm_command_mode.perform(context) == "mit_impedance":
+            if is_mit:
                 names = ["joint_state_broadcaster", *ctrls["mit"]["instances"]]
             else:
                 names = ["joint_state_broadcaster", ctrls["arm"]["name"], ctrls["gripper"]["name"]]
-        return [
-            Node(
-                package="controller_manager",
-                executable="spawner",
-                arguments=[*names, "--controller-manager", "/controller_manager"],
-                output="screen",
-            )
-        ]
+        spawner = Node(
+            package="controller_manager",
+            executable="spawner",
+            arguments=[*names, "--controller-manager", "/controller_manager"],
+            output="screen",
+        )
+        if not is_mit or (is_dm and not IfCondition(dm_enable_motors).evaluate(context)):
+            return [spawner]
 
-    def launch_mit_recenter(context):
-        if dm_command_mode.perform(context) != "mit_impedance":
-            return []
-        if hardware.perform(context) == "dm" and not IfCondition(dm_enable_motors).evaluate(context):
-            return []
-        parameters = {"project_config_file": project_config_file}
+        recenter_on_startup = is_dm and {"joint_state_broadcaster", "b601_mit_arm"}.issubset(names)
+        parameters = {"project_config_file": project_config_file,
+                      "recenter_on_startup": recenter_on_startup}
         collision_override = mit_recenter_check_collisions.perform(context)
         if collision_override:
-            parameters["check_collisions"] = ParameterValue(collision_override, value_type=bool)
-        return [Node(
+            parameters["check_collisions"] = ParameterValue(
+                mit_recenter_check_collisions, value_type=bool)
+        recenter = Node(
             package="b601_demos",
             executable="mit_recenter",
             output="screen",
             parameters=[parameters],
-        )]
+        )
+        if not recenter_on_startup:
+            return [spawner, recenter]
+
+        def after_spawner(event, launch_context):
+            if event.returncode == 0 and not launch_context.is_shutdown:
+                return [recenter]
+            return []
+
+        return [RegisterEventHandler(OnProcessExit(target_action=spawner, on_exit=after_spawner)),
+                spawner]
 
     rviz = Node(
         package="rviz2",
@@ -243,9 +262,8 @@ def generate_launch_description():
                 description="控制器配置文件，留空按 dm_command_mode 自动选择",
             ),
             DeclareLaunchArgument(
-                "mit_preset", default_value="default",
-                choices=["default", *ctrls["mit"].get("presets", {})],
-                description="电机侧 MIT 档位，参数来自 b601_project.yaml",
+                "mit_gravity_compensation", default_value="false", choices=["false", "true"],
+                description="电机侧 MIT 重力补偿，开启后自动切换跟踪与保持增益",
             ),
             DeclareLaunchArgument(
                 "mit_recenter_check_collisions", default_value="",
@@ -270,10 +288,9 @@ def generate_launch_description():
 
             robot_state_publisher,
             OpaqueFunction(function=launch_manager),
-            safety_monitor,
+            OpaqueFunction(function=launch_safety),
             rviz,
 
             OpaqueFunction(function=launch_spawners),
-            OpaqueFunction(function=launch_mit_recenter),
         ]
     )

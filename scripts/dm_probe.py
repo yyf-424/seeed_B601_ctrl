@@ -22,13 +22,14 @@ import argparse
 import sys
 import time
 
-from project_config import load_project_config
+from project_config import load_project_config, safety_position_limits
 
 PROJECT = load_project_config()
 SETTINGS = PROJECT["tools"]["dm_probe"]
 DM = PROJECT["hardware"]["dm"]
 ROBOT = PROJECT["robot"]
 JOINTS = [*ROBOT["arm_joints"], ROBOT["gripper_joint"]]
+ACTIVATION_LIMITS = safety_position_limits(PROJECT)
 
 
 def main() -> int:
@@ -101,7 +102,7 @@ def main() -> int:
             joint = PROJECT["joints"][name]
             motor = joint["motor"]
             mid, fid = motor["id"], motor["feedback_id"]
-            lo, hi = joint["min_pos"], joint["max_pos"]
+            lo, hi = ACTIVATION_LIMITS[name]
             state = latest.get(name)
             if state is None:
                 print(f"{name:<9}{mid:>6}{fid:>8}{'—— 无反馈 ——':>28}")
@@ -110,9 +111,11 @@ def main() -> int:
             factor = motor["direction"] * motor["scale"]
             pos = float(state.pos) * factor + motor["zero_offset"]
             velocity = float(state.vel) * factor
-            in_range = lo <= pos <= hi
-            ok = ok and in_range
-            flag = "OK" if in_range else f"⚠ 超出 [{lo:+.2f},{hi:+.2f}]"
+            if lo <= pos <= hi:
+                flag = "OK"
+            else:
+                flag = f"⚠ 超出启动和急停位置范围 [{lo:+.4f},{hi:+.4f}]"
+                ok = False
             print(f"{name:<9}{mid:>6}{fid:>8}{pos:>12.4f}{velocity:>10.3f}"
                   f"{float(state.torq):>9.3f}{float(state.t_mos):>9.1f}  {flag}")
 
@@ -140,7 +143,7 @@ def main() -> int:
         print("        必须 ≤ TMAX，否则超出部分会被电机静默削掉（软件限幅形同虚设）。")
 
         if not ok:
-            print("\n⚠ 有电机没反馈或角度超出 URDF 限位。")
+            print("\n⚠ 有电机没反馈或位置超出启动允许范围。")
             print("  若只是角度超限：可能是零位没标定，或关节方向定义与真机相反 ——")
             print("  先别使能，用 b601_hardware 的 direction / zero_offset 参数对齐，不要改 URDF。")
 

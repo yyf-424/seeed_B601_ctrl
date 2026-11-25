@@ -9,7 +9,7 @@
 #       dm_command_mode:=mit_impedance \
 #       controllers_file:=<本文件> \
 #       controllers:="joint_state_broadcaster b601_mit_arm b601_mit_gripper"
-# bringup 参数：mit_preset:=j2_j4_gravity
+# bringup 参数：mit_gravity_compensation:=true
 controller_manager:
   ros__parameters:
     update_rate: 200
@@ -48,95 +48,38 @@ b601_mit_arm:
     state_interfaces:
     - position
     - velocity
-    kp_hold:
-    - 6.0
-    - 6.0
-    - 6.0
-    - 2.0
-    - 1.0
-    - 0.8
-    kd_hold:
-    - 1.63
-    - 3.15
-    - 2.67
-    - 0.37
-    - 0.21
-    - 0.13
     kp_move:
     - 115.0
     - 120.025
-    - 190.0
+    - 120.025
     - 30.0
-    - 36.0
+    - 18.0
     - 28.0
     kd_move:
     - 5.0
     - 5.0
     - 5.0
-    - 3.501
-    - 1.2
-    - 0.82
-    friction:
-    - 0.0
-    - 0.0
-    - 0.0
-    - 0.0
-    - 0.0
-    - 0.0
-    kp_free:
-    - 0.3
-    - 0.3
-    - 0.3
-    - 0.3
-    - 0.3
-    - 0.3
-    kd_free:
-    - 0.36
-    - 0.7
-    - 0.6
-    - 0.24
-    - 0.16
-    - 0.11
-    free_enabled: false
-    settle_band_min:
-    - 0.01
-    - 0.01
-    - 0.01
-    - 0.01
-    - 0.01
-    - 0.01
-    settle_band_max:
-    - 0.05
-    - 0.05
-    - 0.05
-    - 0.05
-    - 0.05
-    - 0.05
+    - 2.8
+    - 1.6
+    - 0.65
+    free_enabled: true
+    settle_band_min: 0.0
+    settle_band_max: 0.05
     gravity_joint_scale:
     - 0.0
     - 1.0
-    - 0.0
+    - 1.0
+    - 1.0
     - 1.0
     - 0.0
-    - 0.0
-    gravity_bias:
-    - 0.0
-    - 0.0
-    - 0.0
-    - 0.0
-    - 0.0
-    - 0.0
+    gravity_joint_scale_free: 1.0
     settle_band_pct: 0.05
     settle_sec: 3.0
     kp_up_sec: 0.8
     kp_down_sec: 2.0
-    q_ref_lpf_hz: 30.0
+    q_ref_lpf_hz: 0.0
     track_timeout_sec: 0.0
     motor_impedance: true
-    move_threshold: 0.08
-    hold_threshold: 0.03
-    vel_hold_threshold: 0.3
-    kp_ramp_sec: 0.35
     velocity_lpf_hz: 6.0
     gravity_scale: 1.0
     friction_scale: 0.0
@@ -144,6 +87,22 @@ b601_mit_arm:
     use_gravity: true
     task_torque_timeout_sec: 0.0
     target_velocity_timeout_sec: 0.25
+    free_follow_feedback: true
+    low_after_first_target: true
+    kp_free:
+    - 57.5
+    - 60.0125
+    - 60.0125
+    - 15.0
+    - 9.0
+    - 14.0
+    kd_free:
+    - 1.0
+    - 1.0
+    - 1.0
+    - 0.56
+    - 0.32
+    - 0.13
     gravity_params:
     - 1.3266
     - -0.124435
@@ -193,25 +152,13 @@ b601_mit_gripper:
     state_interfaces:
     - position
     - velocity
-    kp_hold:
-    - 65000.0
-    kd_hold:
-    - 12000.0
     kp_move:
     - 65000.0
     kd_move:
     - 12000.0
-    friction:
-    - 0.0
-    kp_free:
-    - 50.0
-    kd_free:
-    - 2.0
     free_enabled: false
-    settle_band_min:
-    - 0.0005
-    settle_band_max:
-    - 0.0025
+    settle_band_min: 0.0005
+    settle_band_max: 0.0025
     settle_band_pct: 0.05
     settle_sec: 2.0
     kp_up_sec: 0.5
@@ -219,10 +166,6 @@ b601_mit_gripper:
     q_ref_lpf_hz: 30.0
     track_timeout_sec: 0.0
     motor_impedance: true
-    move_threshold: 0.01
-    hold_threshold: 0.002
-    vel_hold_threshold: 0.01
-    kp_ramp_sec: 0.5
     velocity_lpf_hz: 6.0
     gravity_scale: 0.0
     friction_scale: 0.0
