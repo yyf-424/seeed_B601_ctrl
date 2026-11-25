@@ -8,7 +8,8 @@
     整个示例项目的“唯一真值来源”：RViz、MoveIt、MuJoCo、真机驱动都从这里取模型。
   </description>
   <maintainer email="dave@example.com">dave</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
+  <license file="assets/b601_dm/LICENSE">Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>

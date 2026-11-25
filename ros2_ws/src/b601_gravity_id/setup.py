@@ -16,5 +16,5 @@ setup(
     maintainer="dave",
     maintainer_email="dave@example.com",
     description="B601 重力/摩擦辨识与 MIT 力控",
-    license="Apache-2.0",
+    license="MIT",
 )

@@ -8,7 +8,7 @@
     由 b601_hardware/MujocoSystemHardware 在 hardware:=mujoco 时加载。
   </description>
   <maintainer email="dave@example.com">dave</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>b601_hardware</exec_depend>

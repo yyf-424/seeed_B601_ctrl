@@ -23,7 +23,7 @@ setup(
     maintainer="dave",
     maintainer_email="dave@example.com",
     description="B601 教学演示节点",
-    license="Apache-2.0",
+    license="MIT",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [

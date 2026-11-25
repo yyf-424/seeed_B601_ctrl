@@ -7,7 +7,7 @@
     B601 的 MIT 力控控制器：重力 + 摩擦前馈（tff）+ 增益调度（静止小 Kp / 收到目标大 Kp）。
   </description>
   <maintainer email="dave@example.com">dave</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>b601_description</depend>

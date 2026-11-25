@@ -8,7 +8,7 @@
     静态采样 → 最小二乘辨识每连杆 (m, m·c) → 生成 τ_ff 前馈参数 → MIT 控制器使用。
   </description>
   <maintainer email="dave@example.com">dave</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>

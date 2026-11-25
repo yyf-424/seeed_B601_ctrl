@@ -8,7 +8,7 @@
     每个节点只做一件事，方便对着代码手动复现。
   </description>
   <maintainer email="dave@example.com">dave</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>b601_target_interfaces</exec_depend>

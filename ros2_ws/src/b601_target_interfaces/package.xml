@@ -4,7 +4,7 @@
   <version>1.0.0</version>
   <description>ROS 接口用于 B601 MIT 目标会话与控制器回执</description>
   <maintainer email="dave@example.com">dave</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <build_depend>rosidl_default_generators</build_depend>
   <depend>sensor_msgs</depend>

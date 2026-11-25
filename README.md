@@ -17,25 +17,84 @@ MoveIt 2 提供标准位置轨迹规划，MuJoCo 提供动力学仿真。
 | 控制真机 | 现场确认后，在网页连接「实机」或在终端运行 [MIT 重力补偿脚本](#快速启动重力补偿)，按所选入口归中并失能 |
 | 接入程序或策略 | 用 [TargetClient 或原生 ROS 2](#ros-2-接口) 申请整机控制权并发送六轴与夹爪目标 |
 
-## 环境和离线回归
+## 安装与运行前置条件
 
-在当前检出目录执行。依赖 Ubuntu 22.04、ROS 2 Humble、ros2_control、MoveIt 2 和 Python
-`motorbridge`。MuJoCo 仿真还需要 Python `mujoco`。运行 `./scripts/install_deps.sh core control moveit` 查看 ROS 软件包。
-脚本优先使用 `B601_ROS_SETUP` 指定的 Humble 环境，其次使用已加载的 Humble 环境，或从系统 ROS 软件包查找
-`setup.bash`。项目文件由脚本位置和当前工作区的 ROS 包索引定位，每个检出目录单独构建。
+本版在 Ubuntu 22.04（x86_64）、ROS 2 Humble 和系统 Python 3.10 上验证。先配置 Humble 的 apt 软件源。见 [ROS 2 Humble 官方安装说明](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)。
+
+| 用途 | 所需组件 |
+|---|---|
+| 从源码完整构建 | ROS 2 Humble、C++17 编译器、CMake、colcon、Python 3.10、PyYAML、xacro、ros2_control、MoveIt 2、`motorbridge` 提供的 `libmotor_abi.so` |
+| 网页与官方模型预览 | 当前工作区已构建，浏览器支持 WebGL。在本机可用 HTTP 端口上运行，默认 `127.0.0.1:8765` |
+| Mock / MoveIt 2 | ros2_control、轨迹控制器和 MoveIt 2。使用 RViz 时需要图形会话 |
+| MuJoCo 后端及仿真回归 | 构建前安装 Python `mujoco`，由 CMake 查找其 C++ 头文件和动态库 |
+| B601-DM 实机 | B601-DM、24 V 供电、达妙 USB-CAN 串口桥、对串口有读写权限的用户。探针和 C++ 驱动都使用 `motorbridge` |
+
+在已配置 ROS 软件源的 Ubuntu 22.04 上安装构建和常用运行依赖：
+
+```bash
+sudo apt update
+sudo apt install \
+  ros-humble-desktop ros-humble-xacro \
+  ros-humble-ros2-control ros-humble-ros2-controllers \
+  ros-humble-ros2controlcli ros-humble-control-msgs \
+  ros-humble-moveit ros-humble-moveit-configs-utils \
+  ros-humble-joint-state-publisher ros-humble-joint-state-publisher-gui \
+  build-essential cmake python3-colcon-common-extensions \
+  python3-pip python3-yaml python3-numpy liburdfdom-tools psmisc util-linux
+
+python3 -m pip install --user 'motorbridge==0.4.9'
+```
+
+上面给出本版实测的 motorbridge 版本。做 MuJoCo 仿真时，在首次构建前用同一 Python 解释器安装本版验证过的版本。见 [motorbridge](https://pypi.org/project/motorbridge/0.4.9/) 和 [MuJoCo](https://pypi.org/project/mujoco/3.17.0/)。
+
+```bash
+python3 -m pip install --user 'mujoco==3.17.0'
+```
+
+使用重力辨识与绘图工具时，再安装 `python3-scipy` 和 `python3-matplotlib`。
+`./scripts/install_deps.sh core control moveit` 可检查各组 ROS 软件包。
+
+### 构建和首次运行
+
+在检出目录执行：
 
 ```bash
 ./scripts/build.sh
-source scripts/ros_env.sh && b601_source_workspace
 ./scripts/verify.sh
+./scripts/start_target_web.sh
+```
+
+打开本地控制台即可看模型。需要 ROS CLI、Python SDK 或离线回归时，在同一检出目录的新终端加载环境。见 [本地控制台](http://127.0.0.1:8765/)。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
 ./scripts/preflight.sh
 ```
 
-需要 ROS CLI 或 Python SDK 时，在每个新终端从同一检出目录执行环境加载命令。自定义 ROS 安装可先加载其环境，
-也可将 `B601_ROS_SETUP` 设置为对应的 `setup.bash` 路径。相对路径从检出目录解析。移动检出后，在新位置重新构建。
+脚本优先查找 `B601_ROS_SETUP`，其次使用已加载的 Humble 环境，或从系统 ROS 软件包找到 `setup.bash`。相对路径从检出目录解析。移动检出后，在新位置重新构建。
 
-真机测试前固定机械臂，清空扫掠范围和夹爪，确认有人可以立即急停或断电。
-在归中位置开始。使能前完成探针回读、只读和方向核对。同一串口只运行一个控制程序。
+### 实机串口和波特率
+
+在工程配置的 `hardware.dm` 下修改 `device` 和 `baudrate`。默认设置如下。见 [统一配置](ros2_ws/src/b601_description/config/b601_project.yaml#L250)。
+
+```yaml
+hardware:
+  dm:
+    device: /dev/ttyACM0
+    baudrate: 921600
+```
+
+用 `ls -l /dev/serial/by-id/` 查看当前 USB-CAN 设备。有对应条目时，可把 `device` 设置为完整的 `/dev/serial/by-id/...` 路径，以免换 USB 接口后 `ttyACM*` 编号变动。`baudrate` 是电脑到 USB-CAN 桥的串口波特率，需与桥接器设置一致。确认当前用户可读写设备。若设备归属 `dialout` 且当前账号不在该组，可运行 `sudo usermod -aG dialout "$USER"` 后重新登录。
+
+```bash
+./scripts/sync_config.py
+./scripts/build.sh
+./scripts/dm_probe.py
+```
+
+探针默认只读。核对反馈后再启动网页实机连接或 MIT 快速启动。两种入口统一读取这个配置，归中停机工具也用该串口。直接调用 `bringup.launch.py` 时，`dm_device:=...` 只覆盖本次的串口设备；波特率仍从配置读取。网页的 `port:=8766` 用于更改 HTTP 监听端口。
+
+真机测试前固定机械臂，清空扫掠范围和夹爪，确认现场可立即急停。在归中位置开始。使能前完成探针回读、只读检查和方向核对。同一串口只运行一个控制程序。
 真机夹爪启动位置允许在行程边界外 1 mm 内。边界处理期间 ROS 位置反馈显示相应的端点，进入行程后继续报告实测位置。
 常规收工先核对归中再失能。触发急停时由安全节点立即停止。
 
@@ -108,7 +167,7 @@ ros2 service call /b601_mit_recenter/recenter std_srvs/srv/Trigger '{}'
 
 ### 快速启动重力补偿
 
-在 [启动脚本](scripts/start_mit_gravity.sh) 顶部修改启动参数，保存后运行。默认使用真机电机侧 MIT、重力补偿和 `ROS_DOMAIN_ID=211`。默认会使能电机并自动归中，现场确认后再执行。只读检查时，将 `DM_ENABLE_MOTORS` 改为 `false`。
+先核对 [实机串口和波特率](#实机串口和波特率)。ROS 域和控制选项在 [MIT 启动脚本](scripts/start_mit_gravity.sh) 顶部配置。默认使用真机电机侧 MIT、重力补偿和 `ROS_DOMAIN_ID=211`。默认会使能电机并自动归中，现场确认后再执行。只读检查时，将 `DM_ENABLE_MOTORS` 改为 `false`。
 
 ```bash
 ./scripts/start_mit_gravity.sh
@@ -339,3 +398,10 @@ python3 scripts/test_target_arbitration.py
 
 仓库保留本使用说明、发布记录与可复测的验收入口。设计、试验日志和历史原始回读在本地维护。
 构建和网页日志默认位于 `ros2_ws/log/`，回归输出位于 `.verify/`。旧版原始验收文件可由相应 Git 标签读取。
+
+## 许可证
+
+框架原创代码及文档以 MIT 许可证发布。见 [MIT 许可证](LICENSE)。
+
+- 随包提供的 Seeed B601-DM 官方 URDF 和 STL 使用上游声明的 Apache-2.0。见 [模型来源与许可](ros2_ws/src/b601_description/assets/b601_dm/README.md)。
+- 网页使用的 three.js 及其控件和加载器按 MIT 许可分发。见 [three.js 原版权声明与许可证](ros2_ws/src/b601_demos/web/vendor/THREE-LICENSE.txt)。

@@ -8,7 +8,7 @@
     通过厂商 motor_abi 动态库驱动达妙 J4340P/J4310 电机（USB-CAN 串口桥）。
   </description>
   <maintainer email="dave@example.com">dave</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

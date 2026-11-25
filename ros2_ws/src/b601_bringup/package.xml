@@ -8,7 +8,7 @@
     所有“后端差异”（mock / 真机 / MuJoCo）都收敛到一个 hardware 参数里。
   </description>
   <maintainer email="dave@example.com">dave</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
