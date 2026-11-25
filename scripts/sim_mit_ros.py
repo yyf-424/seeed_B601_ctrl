@@ -457,6 +457,7 @@ def gravity_varstiff_switch_test(node: Harness, csv_path: Path) -> int:
     mit = PROJECT["controllers"]["mit"]
     arm = mit["instances"]["b601_mit_arm"]
     profile = mit["profiles"][arm["gravity_profile"]]
+    pure_pd = mit["profiles"][arm["profile"]]["group"]
     count = len(arm["joints"])
     gains = [profile["per_joint"][joint] for joint in arm["joints"]]
     move_gains = {kind: [gain[f"{kind}_move"] for gain in gains] for kind in ("kp", "kd")}
@@ -572,10 +573,17 @@ def gravity_varstiff_switch_test(node: Harness, csv_path: Path) -> int:
             settled = [(stamp, state) for stamp, state in settled if end - stamp <= window]
         errors = [max(abs(state[4 * count + i]) for _, state in settled)
                   for i in range(count)] if settled else []
-        band = [abs(step) * profile["group"]["settle_band_pct"] for step in delta]
-        passed = (done and len(errors) == count and gravity_present(high_frames)
+        band_min = pure_pd["settle_band_min"]
+        band_max = pure_pd["settle_band_max"]
+        band = [min(band_max, max(band_min, abs(step) * pure_pd["settle_band_pct"]))
+                for step in delta]
+        controller_band = high_frames[-1][1][6 * count:7 * count] if high_frames else []
+        passed = (done and len(errors) == count and len(controller_band) == count
+                  and gravity_present(high_frames)
+                  and all(band_min <= limit <= band_max for limit in controller_band)
                   and all(error <= limit for error, limit in zip(errors, band)))
         stages.append({"stage": f"move_{index}", "target_rad": target, "band_rad": band,
+                       "controller_band_rad": controller_band,
                        "error_rad": errors, "gravity_present": gravity_present(high_frames),
                        "high_gains_reached": high, "done": done, "pass": passed})
         if not done:

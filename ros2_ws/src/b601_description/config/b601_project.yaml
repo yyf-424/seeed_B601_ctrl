@@ -390,7 +390,6 @@ controllers:
           free_follow_feedback: true
           low_after_first_target: true
           q_ref_lpf_hz: 0.0
-          settle_band_min: 0.0
 
       # 夹爪使用独立纯 PD。关节单位换算后，电机侧 Kp/Kd 为 6.5/1.2。
       gripper_mit:
