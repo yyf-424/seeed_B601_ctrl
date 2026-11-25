@@ -1,5 +1,9 @@
 # 发布记录
 
+## 未发布
+
+- 新增 [重力补偿快速启动脚本](scripts/start_mit_gravity.sh)，在脚本顶部集中调整 ROS 域、后端、控制模式、重力补偿、使能、安全节点和 RViz。README 补齐从启动、发送目标到低档确认和归中失能的手动流程。
+
 ## v0.3.0 · 关节端 MIT 变刚度
 
 - 默认使用纯 PD。开启 `mit_gravity_compensation` 后，高刚度跟踪到位自动降档，新目标触发升档。高低档使用同一实机辨识重力模型和各自的逐轴前馈比例。旧实验档参数保留在 [MIT 历史试验参数](validation/mit-parameter-history.md)。

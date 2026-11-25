@@ -87,6 +87,30 @@ ros2 service call /b601_mit_recenter/recenter std_srvs/srv/Trigger '{}'
 
 `mit_gravity_compensation` 默认关闭，使用纯 PD。开启后从高刚度起步，首个目标完成且六轴连续到位 3 秒后降档，收到新目标再升档。低档逐周期采用实测位置作为位置参考。两档共用实机辨识重力模型，高档沿用 J2–J5 的前馈比例，低档保留全轴重力比例。生成器按高档的 50% Kp 和 20% Kd 计算每轴低档增益。
 
+### 快速启动重力补偿
+
+在 [启动脚本](scripts/start_mit_gravity.sh) 顶部修改启动参数，保存后运行。默认使用真机电机侧 MIT、重力补偿和 `ROS_DOMAIN_ID=211`。默认会使能电机并自动归中，现场确认后再执行。只读检查时，将 `DM_ENABLE_MOTORS` 改为 `false`。
+
+```bash
+./scripts/start_mit_gravity.sh
+```
+
+保持启动终端运行。看到 `启动归中成功` 后，在第二个终端进入同一检出目录，加载工作区环境，按脚本顶部的值设置 ROS 域。下面向手臂发送一次已实测姿态，`position` 按 J1–J6 顺序填写绝对角度，单位为 rad。
+
+```bash
+source /opt/ros/humble/setup.bash
+source ros2_ws/install/setup.bash
+export ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=211
+
+ros2 topic pub --once -w 1 /b601_mit_arm/joint_target sensor_msgs/msg/JointState \
+  '{name: [joint1, joint2, joint3, joint4, joint5, joint6], position: [0.36171661, -0.36209808, -0.37163483, -0.38040863, 0.37049042, 0.36133514]}'
+ros2 topic echo /b601_safety/status --qos-durability transient_local
+```
+
+`limit_profile` 变为 `low_stiffness` 时开始计时。收工时先退出状态查看，再从第二个终端运行 `./scripts/dm_park.sh --mit`，完成实测归中、失能和回读。停放脚本成功后，在启动终端结束剩余节点。
+
+### 安全档位与只读检查
+
 驱动激活和两档急停共用 `safety.angle` 的位置边界，各端从实测端点向外扩展全行程的 5%。夹爪从动指的边界由主动指镜像。六轴低档增益到位并跟随实测位置时，急停速度为臂轴 `10 rad/s`、夹爪 `0.10 m/s`，其余时间采用常规档速度。`/b601_safety/status` 的 `limit_profile` 显示当前速度档。主动指令按 `joints` 中的保守位置限位执行。
 
 以下命令只读取真机反馈。使能和运动需要现场确认。
