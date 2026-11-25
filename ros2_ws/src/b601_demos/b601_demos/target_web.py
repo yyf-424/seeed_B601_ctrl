@@ -24,6 +24,7 @@ from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource,
 from .mit_recenter import RECENTER_SERVICE
 from .mit_recenter_client import recenter_result_timeout
 from .target_arbiter import ARBITER
+from .web_backend import WebBackend
 from .web_robot_model import build_model, find_vendor_model
 
 
@@ -33,6 +34,9 @@ class TargetWeb(Node):
         self.port = self.declare_parameter("port", 8765).value
         config_path = self.declare_parameter("project_config_file", "").value
         config = load_project_config(config_path or None)
+        attached = self.declare_parameter("attached_backend", "").value
+        self.backend = WebBackend(self, config, config_path, attached)
+        self.feedback_timeout = config["safety"]["feedback_timeout_sec"]
         self.heartbeat_period_ms = round(
             config["tools"]["target_arbitration"]["authority_timeout_sec"] * 200)
         self.limits = {joint: {"min": bounds["min_pos"], "max": bounds["max_pos"]}
@@ -74,16 +78,24 @@ class TargetWeb(Node):
 
     def snapshot(self):
         feedback_at = self.feedback_at
+        age = time.monotonic() - feedback_at if feedback_at is not None else None
+        status = self.status if self.select.service_is_ready() else None
+        fresh = age is not None and age <= self.feedback_timeout
         return {
-            "status": self.status if self.select.service_is_ready() else None,
+            "status": status,
+            "backend": self.backend.snapshot(fresh and bool(status and status["feedback_ready"])),
             "recenter_ready": self.recenter.service_is_ready(),
             "feedback": self.feedback,
             "limits": self.limits,
             "heartbeat_period_ms": self.heartbeat_period_ms,
-            "feedback_age_ms": round((time.monotonic() - feedback_at) * 1000) if feedback_at else None,
+            "feedback_age_ms": round(age * 1000) if age is not None else None,
         }
 
     def request(self, path, data):
+        if path == "/api/connect":
+            return self.backend.connect(data["backend"])
+        if path == "/api/disconnect_simulation":
+            return self.backend.disconnect_simulation()
         if path == "/api/recenter":
             return self.request_recenter(data.get("session_id"))
         if path == "/api/select":

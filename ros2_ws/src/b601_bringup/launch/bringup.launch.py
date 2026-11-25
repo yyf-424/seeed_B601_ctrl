@@ -81,6 +81,7 @@ def generate_launch_description():
     controllers_file = LaunchConfiguration("controllers_file")
     mit_gravity_compensation = LaunchConfiguration("mit_gravity_compensation")
     mit_recenter_check_collisions = LaunchConfiguration("mit_recenter_check_collisions")
+    mit_recenter_on_startup = LaunchConfiguration("mit_recenter_on_startup")
     safety_params_file = PathJoinSubstitution([safety_share, "config", "safety_params.yaml"])
     initial_positions_file = LaunchConfiguration("initial_positions_file")
     project_config_file = LaunchConfiguration("project_config_file")
@@ -216,6 +217,7 @@ def generate_launch_description():
                 parameters=[{
                     "project_config_file": project_config_file,
                     "port": ParameterValue(target_web_port, value_type=int),
+                    "attached_backend": ParameterValue(hardware, value_type=str),
                 }],
             ),
         ]
@@ -233,7 +235,10 @@ def generate_launch_description():
         if not is_mit or (is_dm and not IfCondition(dm_enable_motors).evaluate(context)):
             return [spawner]
 
-        recenter_on_startup = is_dm and {"joint_state_broadcaster", "b601_mit_arm"}.issubset(names)
+        recenter_on_startup = (
+            is_dm and IfCondition(mit_recenter_on_startup).evaluate(context)
+            and {"joint_state_broadcaster", "b601_mit_arm"}.issubset(names)
+        )
         parameters = {"project_config_file": project_config_file,
                       "recenter_on_startup": recenter_on_startup}
         collision_override = mit_recenter_check_collisions.perform(context)
@@ -321,6 +326,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "mit_gravity_compensation", default_value="false", choices=["false", "true"],
                 description="电机侧 MIT 重力补偿，开启后自动切换跟踪与保持增益",
+            ),
+            DeclareLaunchArgument(
+                "mit_recenter_on_startup", default_value="true", choices=["false", "true"],
+                description="已使能的真机 MIT 控制器启动后自动归中",
             ),
             DeclareLaunchArgument(
                 "mit_recenter_check_collisions", default_value="",

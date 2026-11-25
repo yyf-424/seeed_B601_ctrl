@@ -2,11 +2,16 @@
 
 const element = (id) => document.getElementById(id);
 const inputSource = element("input-source");
+const backendSelect = element("backend");
+const connectButton = element("connect");
+const disconnectSimulation = element("disconnect-simulation");
 const recenterButton = element("recenter");
 const sourceLabels = new Map([
   ["web", "网页"], ["policy", "外部策略"], ["external", "外部接口"], ["recenter", "归中"],
 ]);
 let session;
+let shownBackend;
+let backendReply;
 const rows = new Map();
 const edited = new Set();
 let snapshot = { feedback: {}, limits: {} };
@@ -103,12 +108,38 @@ function makeRows(names) {
   }
 }
 
+function refreshBackend() {
+  const backend = snapshot.backend;
+  if (backend?.name && backend.name !== shownBackend) backendSelect.value = backend.name;
+  shownBackend = backend?.name;
+  backendSelect.disabled = busy || !backend || (!backend.can_connect && !backend.can_disconnect);
+  connectButton.disabled = busy || !backend || (!backend.can_connect && backendSelect.value !== "mock");
+  disconnectSimulation.hidden = !backend?.can_disconnect;
+  disconnectSimulation.disabled = busy;
+  const connection = element("connection");
+  connection.dataset.connected = String(backend?.phase === "connected");
+  connection.textContent = backend?.message || "等待连接";
+  const feedback = element("backend-feedback");
+  feedback.dataset.error = String(!!backendReply?.error || backend?.phase === "error");
+  feedback.textContent = backend?.log || backendReply?.message
+    || (backendSelect.value === "dm" && backend?.can_connect ? "连接实机将使能电机，请先确认现场可运动。" : "");
+}
+
+async function changeBackend(path, payload) {
+  backendReply = undefined;
+  try {
+    const result = await api(path, payload);
+    if (payload.backend === "mock") backendReply = { message: result.message };
+  } catch (error) {
+    backendReply = { message: error.message, error: true };
+  }
+}
+
 function refresh() {
   const state = snapshot.status;
-  const allowed = !busy && !!session && state?.session === session.publicId;
-  const connection = element("connection");
-  connection.dataset.connected = String(!!state && snapshot.feedback_age_ms !== null);
-  connection.textContent = state ? "仲裁在线" : "等待仲裁节点";
+  const ready = snapshot.backend?.phase === "connected";
+  const allowed = !busy && ready && !!session && state?.session === session.publicId;
+  refreshBackend();
   element("authority").textContent = sourceLabel(state?.authority);
   element("source").textContent = sourceLabel(state?.source);
   element("age").textContent = snapshot.feedback_age_ms === null || snapshot.feedback_age_ms === undefined
@@ -116,10 +147,10 @@ function refresh() {
   const forwarded = state?.last_forwarded;
   element("applied").textContent = state?.holding_after_loss ? "受控持位"
     : !forwarded ? "—" : state.last_applied_id === forwarded.dispatch_id ? "已采纳" : "等待采纳";
-  element("acquire").disabled = busy || !state || !inputSource.value.trim();
+  element("acquire").disabled = busy || !ready || !state || !inputSource.value.trim();
   element("release").disabled = busy || (!state?.authority && !state?.session);
-  inputSource.disabled = busy || !state;
-  recenterButton.disabled = busy || !snapshot.recenter_ready;
+  inputSource.disabled = busy || !ready || !state;
+  recenterButton.disabled = busy || !ready || !snapshot.recenter_ready;
   element("sync").disabled = !state?.feedback_ready;
   element("send-all").disabled = !allowed || !edited.size;
   for (const [name, row] of rows) {
@@ -148,6 +179,7 @@ async function poll() {
     refresh();
   } catch (error) {
     snapshot.status = null;
+    snapshot.backend = null;
     refresh();
     notice(error.message, true);
   } finally {
@@ -215,6 +247,14 @@ async function sendTargets() {
   }
   notice(`七关节目标已转发，编号 ${reply.dispatch_id}。`);
 }
+
+backendSelect.addEventListener("change", () => {
+  backendReply = undefined;
+  refreshBackend();
+});
+connectButton.addEventListener("click", () => mutate(() =>
+  changeBackend("/api/connect", { backend: backendSelect.value })));
+disconnectSimulation.addEventListener("click", () => mutate(() => changeBackend("/api/disconnect_simulation", {})));
 
 inputSource.addEventListener("input", refresh);
 element("acquire").addEventListener("click", () => mutate(async () => {

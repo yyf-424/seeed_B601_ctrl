@@ -12,7 +12,7 @@
   <main>
     <header class="app-header">
       <div class="app-title"><p class="model">B601 · MIT</p><h1>关节目标控制台</h1></div>
-      <span id="connection" class="connection" data-connected="false">等待 ROS 反馈</span>
+      <span id="connection" class="connection" data-connected="false" role="status">等待连接</span>
     </header>
     <div class="workspace">
       <section id="robot-view" class="robot-view" aria-labelledby="robot-title">
@@ -36,6 +36,21 @@
         </div>
       </section>
       <section class="controls" aria-labelledby="joints-title">
+        <section class="backend-controls" aria-label="后端连接">
+          <div class="selection">
+            <label for="backend">运行后端</label>
+            <select id="backend" disabled>
+              <option value="mock">Mock</option>
+              <option value="mujoco">MuJoCo</option>
+              <option value="dm">实机</option>
+            </select>
+          </div>
+          <div class="authority-actions">
+            <button id="connect" disabled>连接</button>
+            <button id="disconnect-simulation" class="quiet" hidden>断开仿真</button>
+          </div>
+          <p id="backend-feedback" class="backend-feedback" role="status"></p>
+        </section>
         <section class="authority" aria-label="控制权">
           <div class="selection">
             <label for="input-source">权威输入来源</label>

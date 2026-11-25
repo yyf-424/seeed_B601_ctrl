@@ -178,10 +178,29 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 `/<控制器>/state` 读取主线控制器的目标序号，在 `/<控制器>/target_applied` 回报采纳编号。
 标准位置模式仍使用自己的 `FollowJointTrajectory` 接口。
 
-### 在 MuJoCo 中使用网页
+### 在网页选择运行后端
 
 ```bash
 ./scripts/build.sh
+source ros2_ws/install/setup.bash
+ros2 run b601_demos target_web
+```
+
+打开 [本地目标控制台](http://127.0.0.1:8765/)，在「运行后端」选择模式，再点击「连接」。
+
+- **Mock** 是网页的空操作，页面保持空闲。
+- **MuJoCo** 启动标准 MuJoCo 模型和 MIT 控制器。切换前可点击「断开仿真」。
+- **实机** 使用项目串口与 MIT 重力补偿变刚度。点击连接会使能电机，请按项目规程先确认现场。
+  连接只启动底层控制并以进入时的实测位置作为初始参考。上层目标和自动归中需要独立操作。
+  真机退出时，在同一 ROS 域运行 `./scripts/dm_park.sh --mit` 完成归中和失能，再退出网页服务日志中
+  标明 PID 的 bringup 进程。关闭浏览器不会停止 bringup。
+
+连接就绪后，可手动指定权威来源及发送目标。也可通过 `use_target_web:=true`
+随既有 MIT bringup 启动同一页面，此时页面显示该后端。
+
+### MuJoCo 网页回归夹具
+
+```bash
 source ros2_ws/install/setup.bash
 python3 scripts/test_target_arbitration.py --web
 ```
