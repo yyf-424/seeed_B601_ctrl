@@ -875,6 +875,7 @@ implementation:
     update_period_min_sec: 0.0001
     update_period_max_sec: 0.05
     diagnostic_divider: 20
+    target_authority_timeout_sec: 0.5
     topic_depth: 10
     target_warning_throttle_ms: 2000
 model:

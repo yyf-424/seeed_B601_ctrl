@@ -9,6 +9,7 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
+        ("share/" + package_name + "/web", ["web/index.html", "web/style.css", "web/app.js"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -26,6 +27,8 @@ setup(
             "demo_trajectory = b601_demos.demo_trajectory:main",
             "gripper = b601_demos.gripper_control:main",
             "moveit_pose_goal = b601_demos.moveit_pose_goal:main",
+            "target_web = b601_demos.target_web:main",
+            "target_arbiter = b601_demos.target_arbiter:main",
             "mit_recenter = b601_demos.mit_recenter:main",
             "mit_recenter_call = b601_demos.mit_recenter_client:main",
         ],

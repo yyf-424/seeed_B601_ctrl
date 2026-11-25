@@ -29,9 +29,8 @@ CRITERIA = PLAN["criteria"]
 
 
 class FivePoseHarness(Harness):
-    def __init__(self):
-        super().__init__("b601_mit_arm", OBSERVED)
-        self.gripper = self.create_publisher(JointState, "/b601_mit_gripper/joint_target", 10)
+    def __init__(self, source="sim_five_poses"):
+        super().__init__("b601_mit_arm", OBSERVED, source)
         self.gripper_ff = []
         self.create_subscription(
             Float64MultiArray, "/b601_mit_gripper/ff", self.on_gripper_ff, 10)
@@ -40,8 +39,7 @@ class FivePoseHarness(Harness):
         self.gripper_ff = list(message.data)
 
     def command(self, values):
-        self.pub.publish(JointState(name=NAMES[:6], position=values[:6]))
-        self.gripper.publish(JointState(name=[NAMES[6]], position=values[6:7]))
+        self.targets.publish(JointState(name=NAMES, position=values))
 
     def check(self):
         if self.status_level not in (0, 1):
@@ -273,6 +271,7 @@ def main():
         node.hold(PLAN["forward_observation_sec"])
         if len(node.ff) != 18 or len(node.gripper_ff) != 3:
             raise RuntimeError("6+1 前馈观测未就绪")
+        node.targets.select(controllers[1:], PLAN["controller_timeout_sec"])
         print(f"MoveIt 计划路径采样通过 {count}/{count}，MuJoCo 开始运动验证。", flush=True)
         with (output / "trace.csv").open("w", newline="") as stream:
             writer = csv.writer(stream)
@@ -282,6 +281,7 @@ def main():
         (output / "results.json").write_text(json.dumps(summary, indent=2) + "\n")
         print(f'通过 {len(results)}/{len(PLAN["poses"])}。', flush=True)
     finally:
+        node.targets.close(PLAN["controller_timeout_sec"])
         node.destroy_node()
         rclpy.try_shutdown()
         for process in processes:

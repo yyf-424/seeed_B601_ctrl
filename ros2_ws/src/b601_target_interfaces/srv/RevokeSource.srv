@@ -1,0 +1,6 @@
+# Operator revocation of the exact session shown in status.
+string controller
+string session
+---
+bool accepted
+string message

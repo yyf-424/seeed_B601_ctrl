@@ -14,6 +14,7 @@ from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
 from b601_description.project_config import load_project_config
+from b601_demos.target_client import TargetClient
 from b601_demos.trajectory_utils import mit_recenter_tolerances, recenter_position_bounds
 
 
@@ -52,13 +53,14 @@ class MitRecenter(Node):
         self.settle = mit_park["settle_window_sec"]
         self.correction_delay = mit_park["correction_wait_sec"]
         self.state_check_timeout = plan["state_check_timeout_sec"]
+        self.startup_feedback_timeout = plan["joint_state_timeout_sec"]
         self.collision_samples = plan["hardware_retest"]["collision_samples_per_transit"]
 
         self.changed = Condition()
         self.running = Lock()
         self.latest = None
         self.safety = None
-        self.pub = self.create_publisher(JointState, "/b601_mit_arm/joint_target", 10)
+        self.target_client = TargetClient(self, "recenter", callback_group=ReentrantCallbackGroup())
         self.create_subscription(
             JointState, safety["joint_states_topic"], self.on_feedback, qos_profile_sensor_data)
         self.create_subscription(
@@ -96,10 +98,11 @@ class MitRecenter(Node):
 
         self.startup_timer.cancel()
         try:
-            self.run_sequence()
-            self.get_logger().info("启动归中成功：六轴已归中")
-        except RuntimeError as error:
-            self.get_logger().error(f"启动归中失败：{error}")
+            result = self.recenter_with_authority(Trigger.Response())
+            if result.success:
+                self.get_logger().info("启动归中成功：六轴已归中")
+            else:
+                self.get_logger().error(f"启动归中失败：{result.message}")
         finally:
             self.startup_timer = None
 
@@ -119,6 +122,16 @@ class MitRecenter(Node):
             self.safety = message
             self.changed.notify_all()
 
+    def wait_for_start_feedback(self):
+        requested = monotonic()
+        with self.changed:
+            self.changed.wait_for(
+                lambda: self.safety is not None and self.latest is not None
+                and self.latest[0] >= requested,
+                timeout=self.startup_feedback_timeout,
+            )
+            self.feedback()
+
     def feedback(self):
         with self.changed:
             if not rclpy.ok():
@@ -128,7 +141,7 @@ class MitRecenter(Node):
                 raise RuntimeError(f"安全状态不允许继续归中：{status}")
             if self.latest is None or monotonic() - self.latest[0] >= self.feedback_timeout:
                 raise RuntimeError("未收到新鲜的六轴位置反馈")
-            if not self.pub.get_subscription_count():
+            if not self.count_subscribers("/b601_mit_arm/authorized_target"):
                 raise RuntimeError("MIT 位置目标话题没有控制器订阅")
             return self.latest
 
@@ -175,7 +188,8 @@ class MitRecenter(Node):
             stamp = monotonic()
             if stamp >= deadline:
                 raise RuntimeError("归中阶段已超时")
-            self.pub.publish(JointState(name=self.joints, position=list(target)))
+        self.target_client.set_joints(
+            dict(zip(self.joints, target)), min(self.state_check_timeout, deadline - stamp), spinning=True)
         ramp_time = max(abs(end - start) for start, end in zip(before, target)) / self.slew
         return stamp, ramp_time
 
@@ -247,10 +261,18 @@ class MitRecenter(Node):
         self.move("J4 回落", at_intermediate, lambda q: self.at_home(q, ranges), (self.j4,))
 
     def recenter(self, _request, response):
-        if self.startup_timer is not None or not self.running.acquire(blocking=False):
+        if self.startup_timer is not None:
+            response.message = "已有归中调用正在执行"
+            return response
+        return self.recenter_with_authority(response)
+
+    def recenter_with_authority(self, response):
+        if not self.running.acquire(blocking=False):
             response.message = "已有归中调用正在执行"
             return response
         try:
+            self.wait_for_start_feedback()
+            self.target_client.select(["b601_mit_arm"], self.state_check_timeout, spinning=True)
             self.run_sequence()
             response.success = True
             response.message = "六轴已归中"
@@ -258,7 +280,13 @@ class MitRecenter(Node):
             response.message = str(error)
             self.get_logger().warning(response.message)
         finally:
-            self.running.release()
+            try:
+                self.target_client.release(self.state_check_timeout, spinning=True)
+            except RuntimeError as error:
+                response.success = False
+                response.message = str(error)
+            finally:
+                self.running.release()
         return response
 
 
@@ -271,6 +299,9 @@ def main(args=None):
         executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except RuntimeError:
+        if rclpy.ok():
+            raise
     finally:
         executor.shutdown()
         node.destroy_node()

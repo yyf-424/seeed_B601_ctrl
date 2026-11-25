@@ -296,13 +296,14 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     check_cancelled()
     rclpy.init()
-    node = FivePoseHarness()
+    node = FivePoseHarness("hardware_five_poses")
     try:
         if args.readonly:
             readonly(node, HARDWARE["readonly_duration_sec"])
         else:
             return run(node)
     finally:
+        node.targets.close(PLAN["controller_timeout_sec"])
         node.destroy_node()
         rclpy.try_shutdown()
 
@@ -332,6 +333,7 @@ def run(node):
         check_cancelled()
         process = bringup(True)
         ready(node, process, "hardware")
+        node.targets.select(CONFIG["controllers"]["mit"]["instances"], PLAN["controller_timeout_sec"])
         q, _ = state(node)
         if not at_recenter(q[:GRIPPER_INDEX], mit=True):
             raise RuntimeError(f"启动归中后实测位形超出容差：{q}")
@@ -371,11 +373,13 @@ def run(node):
                     motion.monitor(HARDWARE["observation_pause_sec"])
                     index = len(node.samples)
                     try:
+                        node.targets.release(PLAN["controller_timeout_sec"])
                         request_recenter(node, CONFIG)
                         current, _ = state(node)
                         grip_target = [*current[:GRIPPER_INDEX], PARK[GRIPPER_INDEX]]
                         precheck(node, client, "park gripper", current, grip_target)
-                        node.gripper.publish(JointState(name=[GRIPPER], position=grip_target[-1:]))
+                        node.targets.select(["b601_mit_gripper"], PLAN["controller_timeout_sec"])
+                        node.targets.set_joint(GRIPPER, grip_target[-1], PLAN["controller_timeout_sec"])
                         motion.monitor(HARDWARE["park_settle_sec"])
                         after, final_rows = state(node, PLAN["settle_window_sec"])
                     finally:

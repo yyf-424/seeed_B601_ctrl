@@ -11,8 +11,10 @@
 #include <controller_interface/controller_interface.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <realtime_tools/realtime_buffer.h>
-#include <sensor_msgs/msg/joint_state.hpp>
+#include <b601_target_interfaces/msg/authorized_target.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/u_int64.hpp>
 
 #include "b601_mit_controller/b601_chain.hpp"
 
@@ -48,7 +50,7 @@ private:
     const std::array<double, chain::kNumJoints> & q,
     std::array<double, chain::kNumJoints> & tau) const;
 
-  void target_callback(const sensor_msgs::msg::JointState::SharedPtr msg);
+  void target_callback(const b601_target_interfaces::msg::AuthorizedTarget::SharedPtr frame);
   void task_torque_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
   rcl_interfaces::msg::SetParametersResult parameter_callback(
     const std::vector<rclcpp::Parameter> & params);
@@ -120,6 +122,15 @@ private:
   std::vector<double> q_ref_;      // 本周期实际参考
   double t_in_band_{0.0};          // 整组连续在带内的累计时间
   bool done_{true};                // 整组执行标记（激活时先按"已到位"处理：不许有动作）
+  uint64_t dispatch_seen_{0};
+  uint64_t hold_seen_{0};
+  bool arbiter_timed_out_{false};
+  bool holding_after_loss_{false};
+  std::atomic<uint64_t> arbiter_id_{0};
+  std::atomic<uint64_t> blocked_arbiter_id_{0};
+  std::atomic<uint64_t> hold_revision_{0};
+  std::atomic<int64_t> arbiter_heartbeat_ns_{0};
+  std::atomic<uint64_t> hold_generation_{0};
   uint64_t seq_seen_{0};           // 已处理到的指令序号
   double t_track_{0.0};            // 本段 TRACK 已持续的时间（给 track_timeout 用）
   std::vector<double> q_, qd_, qd_f_;
@@ -143,6 +154,8 @@ private:
     std::vector<double> velocity;
     int64_t stamp_ns{0};
     uint64_t seq{0};
+    uint64_t dispatch_id{0};
+    uint64_t hold_generation{0};
   };
   struct TaskTorqueCommand
   {
@@ -154,7 +167,10 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr task_sub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr ff_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr state_pub_;
-  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr target_sub_;
+  rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr target_applied_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr target_holding_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr target_epoch_request_pub_;
+  rclcpp::Subscription<b601_target_interfaces::msg::AuthorizedTarget>::SharedPtr target_sub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr debug_pub_;
   std::size_t debug_counter_{0};
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;

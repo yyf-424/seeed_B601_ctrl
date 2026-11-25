@@ -1,5 +1,7 @@
 # B601-DM v0.3.0 · 关节端 MIT 变刚度
 
+本工作区在主线提交 `1c7c19a` 上接入 [MIT 目标仲裁与网页](#mit-目标仲裁与网页)。下文真机数据来自主线验收，仲裁链路在 MuJoCo 验证。
+
 主机下发位置、速度、增益和前馈力矩，电机执行 MIT PD 闭环。v0.3.0 的真机验收覆盖六轴高刚度跟踪、两档重力补偿、低刚度短时表现、双向切换和正常停机。MoveIt 2 属于上层规划，单独验收。见 [发布记录](CHANGELOG.md)。
 
 ## 环境和离线回归
@@ -102,8 +104,8 @@ source /opt/ros/humble/setup.bash
 source ros2_ws/install/setup.bash
 export ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=211
 
-ros2 topic pub --once -w 1 /b601_mit_arm/joint_target sensor_msgs/msg/JointState \
-  '{name: [joint1, joint2, joint3, joint4, joint5, joint6], position: [0.36171661, -0.36209808, -0.37163483, -0.38040863, 0.37049042, 0.36133514]}'
+python3 scripts/dm_mit_move.py --set \
+  'joint1=0.36171661,joint2=-0.36209808,joint3=-0.37163483,joint4=-0.38040863,joint5=0.37049042,joint6=0.36133514'
 ros2 topic echo /b601_safety/status --qos-durability transient_local
 ```
 
@@ -166,3 +168,98 @@ python3 scripts/mit_five_poses.py --score-hardware validation/results.json
 ```
 
 历史位置回路的复测入口见 [pos_vel 流程](validation/pos-vel.md)。
+## MIT 目标仲裁与网页
+
+MIT bringup 启动 `b601_target_arbiter`，
+根据实际加载的控制器配置识别关节组。手动工具、分段归中、仿真与真机五姿态脚本、浏览器
+和外部策略共用仲裁入口。每组同一时刻只授予一个会话，默认启动时没有来源持有控制权。
+仲裁是各 `/<控制器>/authorized_target` 的唯一正常发布者，控制器通过
+`/<控制器>/target_applied` 回报采纳的编号。旧的位置目标话题 `/<控制器>/joint_target`
+在此工作树已迁移到仲裁接口。标准位置模式仍使用自己的 `FollowJointTrajectory` 接口。
+
+### 在 MuJoCo 中使用网页
+
+```bash
+./scripts/build.sh
+source ros2_ws/install/setup.bash
+python3 scripts/test_target_arbitration.py --web
+```
+
+浏览器打开 [本地目标控制台](http://127.0.0.1:8765/)。选手臂或夹爪，点击「网页接管」，
+用滑块或数值框修改目标，按关节发送或批量发送。页面显示实时反馈、当前来源和控制器回执。
+退出前释放控制权。这个入口启动本地零重力 MuJoCo 夹具，夹爪使用仿真测试增益，整机安全节点仍启用。
+服务只在本机回环地址监听。常规 MIT bringup 可通过 `use_target_web:=true` 启动同一页面。
+
+### ROS 2 接口
+
+| 端点（前缀 `/b601_target_arbiter`） | 类型 | 用途 |
+|---|---|---|
+| `/select_source` | `b601_target_interfaces/srv/SelectSource` | 显式指定来源和关节组。任一组忙时整次申请失败，成功返回私有 `session_id` 和公开 `session` |
+| `/release_source` | `b601_target_interfaces/srv/ReleaseSource` | 持有者释放本次申请中的各组 |
+| `/revoke_source` | `b601_target_interfaces/srv/RevokeSource` | 操作者以控制器组和状态上的公开会话编号撤销会话，包括会话持有的其他组 |
+| `/renew_source` | `b601_target_interfaces/srv/RenewSource` | 维持现有会话，接受新目标也会续期 |
+| `/set_target` | `b601_target_interfaces/srv/SetTarget` | 单关节或多关节请求，返回仲裁结果和转发编号 |
+| `/source_heartbeat` | `std_msgs/msg/String` | 低开销续期，`data` 为私有 `session_id` |
+| `/target` | `b601_target_interfaces/msg/TargetFrame` | 策略流式目标，按会话内序号递增发布 |
+| `/status` | `std_msgs/msg/String` | JSON，包含当前来源、公开会话号、最近转发信息及控制器采纳编号、断流持位状态 |
+
+一次申请可以覆盖手臂和夹爪，单次目标可以包含这两组中的关节。位置用绝对关节坐标，手臂是
+rad，`finger_left` 是 m。关节与数值按名称配对。首次发送部分关节时用新的实测反馈补全，
+同一会话中后续请求保留未改的目标。策略可传可选速度数组。会话令牌用于命令和释放，
+状态话题仅公布独立的公开编号。ROS 域内的应用应部署为可信节点，若需隔离未经授权的参与者，
+由部署端设置 DDS/SROS2 发布与服务权限。
+
+下面的调用可在上述 MuJoCo 预览的第二个终端运行。默认预览使用 `ROS_DOMAIN_ID=227`。
+会话在约 0.5 秒内需要持续收到心跳或新目标，建议心跳间隔 0.1 秒。CLI 调用若分开手动输入，
+间隔可能超时，下面示例从程序取得令牌并用 SDK 定时续期。相同服务也可用任意 ROS 2 客户端调用。
+
+```bash
+source ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=227 ROS_LOCALHOST_ONLY=1
+
+python3 - <<'PYTHON'
+import rclpy
+from b601_demos.target_client import TargetClient
+
+rclpy.init()
+node = rclpy.create_node("external_target_example")
+client = TargetClient(node, "external")
+try:
+    client.select(["b601_mit_arm"], timeout=3.0)
+    print("single:", client.set_joint("joint1", 0.04, timeout=3.0))
+    print("multi:", client.set_joints({"joint1": 0.02, "joint4": 0.03}, timeout=3.0))
+    for _ in range(60):
+        rclpy.spin_once(node, timeout_sec=0.02)
+finally:
+    client.close(timeout=3.0)
+    node.destroy_node()
+    rclpy.try_shutdown()
+PYTHON
+
+ros2 topic echo /b601_target_arbiter/status --qos-durability transient_local --once
+```
+
+流式策略用 `TargetClient(node, "policy")` 申请控制权，按策略频率调用
+`client.publish(JointState(name=[...], position=[...]))`，并保持节点的 ROS executor
+运行以发送定时心跳。ROS 2 原生客户端可订阅状态，调用 `select_source`，
+发布带私有会话号和递增序号的 `TargetFrame`，也可用 `set_target` 取得转发编号。
+`select_source` 的状态公开编号可与 `revoke_source` 一起使用。
+
+按整机配置 `implementation.mit.target_authority_timeout_sec=0.5`，当前来源失联或仲裁链路
+断流时，控制器取当时的实测位置进入受控持位，继续使用 MIT PD、限位与设备安全机制。
+恢复发送前需重新申请，先前会话的目标即使迟到也会被拒绝。
+完成任务后主动释放时，控制器继续执行已接受的目标。关闭还持有控制权的网页会触发断流持位。
+运动状态可通过各控制器的
+`target_holding` 和 `target_applied` 读取。
+
+### 复测
+
+```bash
+source ros2_ws/install/setup.bash
+python3 scripts/test_target_arbitration.py
+```
+
+这个脚本会自动启动和关闭隔离 MuJoCo，验证唯一输出、并发争用、手臂与夹爪独立授权、
+单关节和多关节下发、实际采纳回执、旧会话拒绝、策略流、归中交接、撤销、来源失联持位以及仲裁进程断流后的重新接管。
+日志存于 `.verify/target-arbitration-227/`。完成网页预览后再运行自动验收，
+或用 `B601_TEST_ROS_DOMAIN_ID` 选另一空闲 ROS 域。

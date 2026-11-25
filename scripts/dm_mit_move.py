@@ -17,7 +17,7 @@
       ③ 全程盯 /b601_safety/status：检测到急停就停止发目标并退出
 
 接口：
-    发布  /b601_mit_arm/joint_target          sensor_msgs/JointState（MIT 控制器实例 b601_mit_arm 的目标话题）
+    发布  /b601_target_arbiter/target        b601_target_interfaces/TargetFrame
     订阅  /joint_states                       取当前位形
     订阅  /b601_safety/status                 安全状态（非 NORMAL 即中止）
 """
@@ -37,6 +37,7 @@ from std_msgs.msg import Float64MultiArray
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from project_config import load_project_config
+from b601_demos.target_client import TargetClient
 
 PROJECT = load_project_config()
 SETTINGS = PROJECT["tools"]["dm_mit_move"]
@@ -61,11 +62,11 @@ def load_limits():
 
 
 class MitMover(Node):
-    def __init__(self, topic: str, rate_hz: float,
+    def __init__(self, rate_hz: float,
                  tolerance: float, debug_topic: str,
                  settle: float = SETTINGS["settle"]):
         super().__init__("b601_mit_move")
-        self.pub = self.create_publisher(JointState, topic, 10)
+        self.targets = TargetClient(self, "manual")
         self.current: dict[str, float] = {}
         self.current_vel: dict[str, float] = {}
         self.safety = "UNKNOWN"
@@ -148,7 +149,7 @@ class MitMover(Node):
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name = ARM
             msg.position = [want[n] for n in ARM]
-            self.pub.publish(msg)
+            self.targets.publish(msg)
 
             elapsed = time.monotonic() - t0
             if elapsed - last_log > SETTINGS["log_interval_sec"]:
@@ -224,8 +225,8 @@ def parse_pose(spec: str) -> dict[str, float]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="MIT 力控模式的限速摆动工具")
-    ap.add_argument("--topic", default="/b601_mit_arm/joint_target",
-                    help="MIT 控制器实例 ~/joint_target；实例名变了这里要跟着改")
+    ap.add_argument("--controller", default="b601_mit_arm",
+                    help="向仲裁节点申请的 MIT 控制器组")
     ap.add_argument("--debug-topic", default="/b601_mit_arm/debug",
                     help="MIT 控制器心跳（激活后 ~10 Hz 发布），用于确认控制器真在跑")
     ap.add_argument("--set", default="", help="目标姿态，例：joint2=-0.35,joint5=0.2")
@@ -243,7 +244,7 @@ def main() -> int:
         return 2
 
     rclpy.init()
-    node = MitMover(args.topic, args.rate,
+    node = MitMover(args.rate,
                     args.tolerance, args.debug_topic, args.settle)
     try:
         if not node.wait_ready():
@@ -253,6 +254,7 @@ def main() -> int:
             "起始位形：" + ", ".join(f"{n}={node.current[n]:+.3f}" for n in ARM)
             + f"；安全状态 {node.safety}；斜坡 {node.slew:.2f} rad/s")
 
+        node.targets.select([args.controller], SETTINGS["ready_timeout_sec"])
         specs = [p for p in args.poses.split(";") if p.strip()] if args.poses else [args.set]
         for i, spec in enumerate(specs, 1):
             target = parse_pose(spec)
@@ -261,9 +263,13 @@ def main() -> int:
                 return 1
         node.get_logger().info("全部姿态完成")
         return 0
+    except RuntimeError as error:
+        node.get_logger().error(str(error))
+        return 1
     except KeyboardInterrupt:
         return 130
     finally:
+        node.targets.close(SETTINGS["ready_timeout_sec"])
         node.destroy_node()
         rclpy.try_shutdown()
 

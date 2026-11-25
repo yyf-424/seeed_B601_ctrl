@@ -38,6 +38,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import rclpy
+from b601_demos.target_client import TargetClient
 from builtin_interfaces.msg import Duration as MsgDuration
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
@@ -60,7 +61,7 @@ DEFAULT_POSES = SETTINGS["default_poses"]
 
 
 class Harness(Node):
-    def __init__(self, controller: str, arm_joints: list[str]):
+    def __init__(self, controller: str, arm_joints: list[str], source="sim_regression"):
         super().__init__("sim_mit_ros_harness")
         self.arm_joints = arm_joints
         self.latest: dict[str, float] = {}
@@ -81,11 +82,10 @@ class Harness(Node):
             Float64MultiArray, f"/{controller}/debug", self._on_debug, 10)
         self.create_subscription(
             Float64MultiArray, f"/{controller}/state", self._on_state_msg, 10)
-        self.pub = self.create_publisher(JointState, f"/{controller}/joint_target", 10)
+        self.targets = TargetClient(self, source)
         self.task_pub = self.create_publisher(Float64MultiArray, f"/{controller}/task_torque", 10)
         self.ff: list[float] = []
         self.create_subscription(Float64MultiArray, f"/{controller}/ff", self._on_ff, 10)
-        self.extra_pubs = []      # 拆分实例时，其余实例的目标话题
         qos = QoSProfile(
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -162,9 +162,7 @@ class Harness(Node):
         msg.position = list(target)
         if velocity is not None:
             msg.velocity = velocity
-        self.pub.publish(msg)
-        for extra in self.extra_pubs:
-            extra.publish(msg)
+        self.targets.publish(msg)
 
     def send_ramp_trajectory(self, target: list[float], slew: float, action_client,
                              result_timeout: float = SETTINGS["action_result_timeout_sec"]) -> bool:
@@ -608,7 +606,7 @@ def gravity_varstiff_switch_test(node: Harness, csv_path: Path) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--controller", default="b601_mit_arm",
-                    help="要驱动的 MIT 控制器名（决定 __/joint_target 的话题前缀）")
+                    help="要驱动的 MIT 控制器名（决定仲裁控制器组和诊断话题前缀）")
     ap.add_argument("--controllers-file", default="",
                     help="控制器 yaml（默认用 b601_bringup 里的 MIT 那份）")
     ap.add_argument("--gravity-varstiff-switch-test", action="store_true",
@@ -949,9 +947,6 @@ def main() -> int:
     rclpy.init()
     node = Harness(args.controller, joints)
     arm_client = node.arm_action_client("b601_arm_controller") if args.mode == "pos_vel" else None
-    for name in ([] if args.gravity_varstiff_switch_test else extra_controllers):
-        node.extra_pubs.append(
-            node.create_publisher(JointState, f"/{name}/joint_target", 10))
     rc = 0
     try:
         if proc is not None:
@@ -989,6 +984,19 @@ def main() -> int:
                   f"此处再 set 一次做确认：{out.stdout.strip() or out.stderr.strip()}）")
             node.spin_for(0.5)
 
+        if args.dump_interfaces:
+            for cmd in (["ros2", "control", "list_controllers"],
+                        ["ros2", "control", "list_hardware_interfaces"]):
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=SETTINGS["interfaces_process_timeout_sec"], check=False).stdout
+                print(f"--- {' '.join(cmd[2:])} ---")
+                for line in out.splitlines():
+                    if "effort" in line or "controller" in line.lower() or "active" in line:
+                        print("   " + line.strip())
+        if args.mode == "mit":
+            target_controllers = [args.controller]
+            if not args.gravity_varstiff_switch_test:
+                target_controllers.extend(extra_controllers)
+            node.targets.select(target_controllers, args.startup_timeout)
         if args.mit_frame_test:
             return mit_frame_test(node)
         if args.gravity_varstiff_switch_test:
@@ -1019,14 +1027,6 @@ def main() -> int:
             rc = state_machine_test(node, joints, args)
             print(f"  RESULT " + json.dumps({"mode": "state_machine", "pass": rc == 0}))
             return rc
-        if args.dump_interfaces:
-            for cmd in (["ros2", "control", "list_controllers"],
-                        ["ros2", "control", "list_hardware_interfaces"]):
-                out = subprocess.run(cmd, capture_output=True, text=True, timeout=SETTINGS["interfaces_process_timeout_sec"], check=False).stdout
-                print(f"--- {' '.join(cmd[2:])} ---")
-                for line in out.splitlines():
-                    if "effort" in line or "controller" in line.lower() or "active" in line:
-                        print("   " + line.strip())
         if args.hold_only > 0.0:
             q_start = node.q()
             node.samples.clear()
@@ -1131,6 +1131,7 @@ def main() -> int:
                                      *[round(v, 6) for v in vel]])
         print(f"  CSV: {csv_path}")
     finally:
+        node.targets.close(SETTINGS["state_ready_timeout_sec"])
         node.destroy_node()
         try:
             rclpy.shutdown()

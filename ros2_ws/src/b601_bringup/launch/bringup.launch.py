@@ -35,6 +35,8 @@
 launch 参数只是“临时覆盖”，要永久修改请改配置再跑 scripts/sync_config.py。
 """
 
+import json
+
 import yaml
 
 from ament_index_python.packages import get_package_share_directory
@@ -71,6 +73,8 @@ def generate_launch_description():
     dm_command_mode = LaunchConfiguration("dm_command_mode")
     dm_log_csv = LaunchConfiguration("dm_log_csv")
     mujoco_model = LaunchConfiguration("mujoco_model")
+    use_target_web = LaunchConfiguration("use_target_web")
+    target_web_port = LaunchConfiguration("target_web_port")
     use_rviz = LaunchConfiguration("use_rviz")
     use_safety = LaunchConfiguration("use_safety")
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -118,7 +122,7 @@ def generate_launch_description():
 
     # controller_manager：唯一“知道硬件存在”的节点。
     # 它按 URDF 里的 <ros2_control> 加载硬件插件，按 controllers yaml 加载控制器。
-    def launch_manager(context):
+    def controller_file(context):
         is_mit = dm_command_mode.perform(context) == "mit_impedance"
         if "mit_preset" in context.launch_configurations:
             raise RuntimeError("实验预选已删除，请使用 mit_gravity_compensation:=true 选择重力补偿")
@@ -134,16 +138,18 @@ def generate_launch_description():
             default_file = "b601_mit_controllers_gravity.yaml"
         else:
             default_file = "b601_mit_controllers.yaml"
-        config_file = config_override or PathJoinSubstitution(
+        return config_override or PathJoinSubstitution(
             [bringup_share, "config", default_file]
         ).perform(context)
+
+    def launch_manager(context):
         return [Node(
             package="controller_manager",
             executable="ros2_control_node",
             output="screen",
             parameters=[
                 {"robot_description": robot_description, "use_sim_time": use_sim_time},
-                config_file,
+                controller_file(context),
             ],
         )]
 
@@ -165,15 +171,52 @@ def generate_launch_description():
     # 一个 spawner 进程按顺序加载所有控制器。
     controllers_arg = LaunchConfiguration("controllers")
 
-    def launch_spawners(context):
+    def controller_names(context):
         is_mit = dm_command_mode.perform(context) == "mit_impedance"
-        is_dm = hardware.perform(context) == "dm"
         names = controllers_arg.perform(context).split()
         if not names:
             if is_mit:
                 names = ["joint_state_broadcaster", *ctrls["mit"]["instances"]]
             else:
                 names = ["joint_state_broadcaster", ctrls["arm"]["name"], ctrls["gripper"]["name"]]
+        return names
+
+    def launch_target_arbiter(context):
+        if dm_command_mode.perform(context) != "mit_impedance":
+            return []
+        with open(controller_file(context), encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+        types = config["controller_manager"]["ros__parameters"]
+        routes = {
+            name: config[name]["ros__parameters"]["joints"]
+            for name in controller_names(context)
+            if types.get(name, {}).get("type") == "b601_mit_controller/B601MitController"
+        }
+        if not routes:
+            return []
+        return [
+            Node(
+                package="b601_demos",
+                executable="target_arbiter",
+                output="screen",
+                parameters=[{"project_config_file": project_config_file, "routes": json.dumps(routes)}],
+            ),
+            Node(
+                package="b601_demos",
+                executable="target_web",
+                output="screen",
+                condition=IfCondition(use_target_web),
+                parameters=[{
+                    "project_config_file": project_config_file,
+                    "port": ParameterValue(target_web_port, value_type=int),
+                }],
+            ),
+        ]
+
+    def launch_spawners(context):
+        is_mit = dm_command_mode.perform(context) == "mit_impedance"
+        is_dm = hardware.perform(context) == "dm"
+        names = controller_names(context)
         spawner = Node(
             package="controller_manager",
             executable="spawner",
@@ -188,8 +231,7 @@ def generate_launch_description():
                       "recenter_on_startup": recenter_on_startup}
         collision_override = mit_recenter_check_collisions.perform(context)
         if collision_override:
-            parameters["check_collisions"] = ParameterValue(
-                mit_recenter_check_collisions, value_type=bool)
+            parameters["check_collisions"] = IfCondition(mit_recenter_check_collisions).evaluate(context)
         recenter = Node(
             package="b601_demos",
             executable="mit_recenter",
@@ -218,6 +260,14 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "use_target_web", default_value="false",
+                description="启动仅监听 127.0.0.1 的 MIT 浏览器目标入口",
+            ),
+            DeclareLaunchArgument(
+                "target_web_port", default_value="8765",
+                description="浏览器目标入口的本地 HTTP 端口",
+            ),
             DeclareLaunchArgument(
                 "hardware", default_value=str(cfg["hardware"].get("default_backend", "mock")),
                 description="硬件后端：mock（默认，无实物）| dm（真机）| mujoco（动力学仿真）",
@@ -291,6 +341,7 @@ def generate_launch_description():
             OpaqueFunction(function=launch_safety),
             rviz,
 
+            OpaqueFunction(function=launch_target_arbiter),
             OpaqueFunction(function=launch_spawners),
         ]
     )

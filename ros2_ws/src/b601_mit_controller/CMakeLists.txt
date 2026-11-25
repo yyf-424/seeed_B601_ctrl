@@ -11,6 +11,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(b601_description REQUIRED)
+find_package(b601_target_interfaces REQUIRED)
 find_package(controller_interface REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
@@ -30,6 +31,7 @@ target_link_libraries(b601_mit_controller PUBLIC
   pluginlib::pluginlib
   rclcpp::rclcpp
   realtime_tools::realtime_tools
+  ${b601_target_interfaces_TARGETS}
   ${sensor_msgs_TARGETS}
   ${std_msgs_TARGETS})
 
@@ -44,7 +46,7 @@ install(FILES b601_mit_controller_plugins.xml DESTINATION share/${PROJECT_NAME})
 pluginlib_export_plugin_description_file(controller_interface b601_mit_controller_plugins.xml)
 
 ament_export_include_directories(include)
-ament_export_dependencies(b601_description)
+ament_export_dependencies(b601_description b601_target_interfaces)
 ament_export_libraries(b601_mit_controller)
 ament_export_targets(export_b601_mit_controller)
 ament_package()

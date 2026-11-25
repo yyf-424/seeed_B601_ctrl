@@ -1,0 +1,9 @@
+string source
+string[] controllers
+---
+bool accepted
+# Private capability for target submission and holder release.
+string session_id
+# Public identifier shown in the status topic.
+string session
+string message

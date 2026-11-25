@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>B601 · 关节目标控制台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="model">B601 · MIT</p><h1>关节目标控制台</h1></div>
+      <span id="connection" class="connection" data-connected="false">等待 ROS 反馈</span>
+    </header>
+    <section class="authority" aria-labelledby="authority-title">
+      <div class="selection">
+        <h2 id="authority-title">控制权</h2>
+        <label for="group">控制器组</label>
+        <select id="group" disabled><option>等待仲裁节点</option></select>
+      </div>
+      <dl class="metrics">
+        <div><dt>活动来源</dt><dd id="source">—</dd></div>
+        <div><dt>反馈延迟</dt><dd id="age">—</dd></div>
+        <div><dt>最近目标回执</dt><dd id="applied">—</dd></div>
+      </dl>
+      <div class="authority-actions">
+        <button id="acquire" disabled>网页接管</button>
+        <button id="release" class="quiet" disabled>释放控制权</button>
+      </div>
+    </section>
+    <section class="joints" aria-labelledby="joints-title">
+      <div class="joint-header">
+        <div><h2 id="joints-title">实时反馈与关节目标</h2>
+          <p class="hint">编辑目标后可逐关节发送，或一次发送全部已修改关节。</p></div>
+        <div class="joint-actions">
+          <button id="sync" class="quiet" disabled>读入实测</button>
+          <button id="send-all" disabled>发送已修改目标</button>
+        </div>
+      </div>
+      <div class="table" id="joints"><p class="placeholder">收到关节列表后可编辑目标。</p></div>
+    </section>
+    <p class="notice" id="notice" role="status" aria-live="polite"></p>
+  </main>
+</body>
+</html>
