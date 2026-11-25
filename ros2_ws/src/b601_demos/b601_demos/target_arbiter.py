@@ -84,6 +84,7 @@ class TargetArbiter(Node):
         self.create_service(SelectSource, "~/select_source", self.select_source)
         self.create_service(SetAuthority, "~/set_authority", self.set_authority)
         self.create_service(ReleaseSource, "~/release_source", self.release_source)
+        self.create_service(ReleaseSource, "~/release_web_for_recenter", self.release_web_for_recenter)
         self.create_service(RevokeSource, "~/revoke_source", self.revoke_source)
         self.create_service(RenewSource, "~/renew_source", self.renew_source)
         self.create_timer(
@@ -180,6 +181,20 @@ class TargetArbiter(Node):
             response.accepted = True
         response.message = "released" if response.accepted else "unknown or released session"
         self.event("release", session.source if response.accepted else "", response.message)
+        return response
+
+    def release_web_for_recenter(self, request, response):
+        self.expire_sessions(monotonic_ns())
+        session = self.session
+        if session and session.source == "web" and session.id == request.session_id:
+            self.session = None
+            if self.authority == session.source:
+                self.authority = None
+            response.accepted = True
+            response.message = "网页已交还控制权"
+            self.event("release", session.source, response.message)
+        else:
+            response.message = "网页会话已变化，请检查当前控制权"
         return response
 
     def revoke_source(self, request, response):

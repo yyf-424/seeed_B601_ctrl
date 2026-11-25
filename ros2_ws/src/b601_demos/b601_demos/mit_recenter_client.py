@@ -8,10 +8,14 @@ from b601_description.project_config import load_project_config
 from b601_demos.mit_recenter import RECENTER_SERVICE
 
 
+def recenter_result_timeout(project):
+    return (3 * project["recenter"]["mit"]["phase_timeout_sec"]
+            + project["tools"]["dm_park"]["result_grace_sec"])
+
+
 def request_recenter(node, project):
-    park = project["tools"]["dm_park"]
     discovery = project["validation"]["mit_five_poses"]["joint_state_timeout_sec"]
-    timeout = 3 * project["recenter"]["mit"]["phase_timeout_sec"] + park["result_grace_sec"]
+    timeout = recenter_result_timeout(project)
     client = node.create_client(Trigger, RECENTER_SERVICE)
     try:
         if not client.wait_for_service(timeout_sec=discovery):

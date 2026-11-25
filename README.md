@@ -197,6 +197,9 @@ python3 scripts/test_target_arbitration.py --web
 在三维视图点选 TCP，按住 Ctrl 沿当前视角平面拖动。页面按 URDF 逆解末端位置并填入同一列表，
 保留第七个关节的目标值。青色模型显示待发送预览，点击同一个「发送七关节目标」按钮执行。
 指定外部来源后由相应客户端申请和发送目标。点击「释放控制权」清除指定来源及现有会话。
+点击「一键归中」会调用现有 ROS 归中服务并显示执行结果。当前网页持有控制权时，它会先交还会话。
+若当前由外部来源持有或指定给外部来源，先在控制台释放该来源，再点击归中。
+归中沿用现有的 J4 上抬、其余轴归中和 J4 回落流程。列表中的第七关节显示为 `gripper`。
 退出前释放控制权。这个入口启动本地零重力 MuJoCo 夹具，夹爪使用仿真测试增益，整机安全节点仍启用。
 服务只在本机回环地址监听。常规 MIT bringup 可通过 `use_target_web:=true` 启动同一页面。
 
@@ -207,6 +210,7 @@ python3 scripts/test_target_arbitration.py --web
 | `/set_authority` | `b601_target_interfaces/srv/SetAuthority` | 指定整机权威的来源名。切换时撤销旧会话，传空字符串清除指定并释放当前会话 |
 | `/select_source` | `b601_target_interfaces/srv/SelectSource` | 以来源名申请整机会话，成功返回私有 `session_id` 和公开 `session` |
 | `/release_source` | `b601_target_interfaces/srv/ReleaseSource` | 持有者释放整机会话，已指定的来源可以再次申请 |
+| `/release_web_for_recenter` | `b601_target_interfaces/srv/ReleaseSource` | 网页凭当前私有会话令牌交还自身会话和网页来源指定 |
 | `/revoke_source` | `b601_target_interfaces/srv/RevokeSource` | 操作者按公开会话编号撤销指定会话 |
 | `/renew_source` | `b601_target_interfaces/srv/RenewSource` | 维持现有会话，接受新目标也会续期 |
 | `/set_target` | `b601_target_interfaces/srv/SetTarget` | 接收完整七关节目标，返回仲裁结果和转发编号 |

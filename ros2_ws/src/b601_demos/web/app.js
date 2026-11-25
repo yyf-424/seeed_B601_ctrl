@@ -2,7 +2,10 @@
 
 const element = (id) => document.getElementById(id);
 const inputSource = element("input-source");
-const sourceLabels = new Map([["web", "网页"], ["policy", "外部策略"], ["external", "外部接口"]]);
+const recenterButton = element("recenter");
+const sourceLabels = new Map([
+  ["web", "网页"], ["policy", "外部策略"], ["external", "外部接口"], ["recenter", "归中"],
+]);
 let session;
 const rows = new Map();
 const edited = new Set();
@@ -44,7 +47,7 @@ function applyTcpDraft(positions) {
 }
 
 function notice(message, error = false) {
-  element("notice").textContent = message;
+  element("notice").textContent = message.replaceAll("finger_left", "gripper");
   element("notice").dataset.error = String(error);
 }
 
@@ -63,12 +66,13 @@ function makeRows(names) {
     row.className = "joint";
     const title = document.createElement("span");
     title.className = "joint-name";
-    title.textContent = name;
+    const label = name === "finger_left" ? "gripper" : name;
+    title.textContent = label;
     const measured = document.createElement("span");
     measured.className = "measured";
     const slider = document.createElement("input");
     const number = document.createElement("input");
-    const unit = name.startsWith("finger_") ? "m" : "rad";
+    const unit = name === "finger_left" ? "m" : "rad";
     slider.type = "range";
     slider.step = unit === "m" ? "0.0001" : "0.001";
     number.type = "number";
@@ -77,8 +81,8 @@ function makeRows(names) {
       input.min = snapshot.limits[name].min;
       input.max = snapshot.limits[name].max;
     }
-    slider.setAttribute("aria-label", `${name} 目标滑块 ${unit}`);
-    number.setAttribute("aria-label", `${name} 目标 ${unit}`);
+    slider.setAttribute("aria-label", `${label} 目标滑块 ${unit}`);
+    number.setAttribute("aria-label", `${label} 目标 ${unit}`);
     slider.addEventListener("input", () => {
       number.value = slider.value;
       edited.add(name);
@@ -111,6 +115,7 @@ function refresh() {
   element("acquire").disabled = busy || !state || !inputSource.value.trim();
   element("release").disabled = busy || (!state?.authority && !state?.session);
   inputSource.disabled = busy || !state;
+  recenterButton.disabled = busy || !snapshot.recenter_ready;
   element("sync").disabled = !state?.feedback_ready;
   element("send-all").disabled = !allowed || !edited.size;
   for (const [name, row] of rows) {
@@ -168,7 +173,7 @@ function renewSession() {
     api("/api/heartbeat", { session_id: current.id }).catch((error) => {
       if (error.status === 409 && session === current) {
         session = undefined;
-        notice("网页控制权已失效，可重新指定网页。", true);
+        if (!busy) notice("网页控制权已失效，可重新指定网页。", true);
         refresh();
       }
     }).finally(() => { current.renewing = false; });
@@ -226,6 +231,17 @@ element("release").addEventListener("click", () => mutate(async () => {
   await api("/api/authority", { source: "" });
   session = undefined;
   notice("已释放整机控制权。");
+}));
+recenterButton.addEventListener("click", () => mutate(async () => {
+  const current = session?.publicId === snapshot.status?.session ? session : undefined;
+  recenterButton.textContent = "正在归中…";
+  notice("正在归中…");
+  try {
+    const result = await api("/api/recenter", { session_id: current?.id });
+    notice(result.message);
+  } finally {
+    recenterButton.textContent = "一键归中";
+  }
 }));
 element("sync").addEventListener("click", () => {
   for (const [name, row] of rows) {

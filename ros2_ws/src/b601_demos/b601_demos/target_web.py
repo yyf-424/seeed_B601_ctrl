@@ -15,11 +15,14 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from b601_description.project_config import load_project_config
 from b601_target_interfaces.msg import TargetFrame
 from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource, SelectSource, SetAuthority, SetTarget
 
+from .mit_recenter import RECENTER_SERVICE
+from .mit_recenter_client import recenter_result_timeout
 from .target_arbiter import ARBITER
 from .web_robot_model import build_model, find_vendor_model
 
@@ -52,6 +55,9 @@ class TargetWeb(Node):
         self.release = self.create_client(ReleaseSource, f"{ARBITER}/release_source")
         self.revoke = self.create_client(RevokeSource, f"{ARBITER}/revoke_source")
         self.set_target = self.create_client(SetTarget, f"{ARBITER}/set_target")
+        self.recenter = self.create_client(Trigger, RECENTER_SERVICE)
+        self.release_for_recenter = self.create_client(ReleaseSource, f"{ARBITER}/release_web_for_recenter")
+        self.recenter_timeout = recenter_result_timeout(config)
 
     def on_status(self, message):
         self.status = json.loads(message.data)
@@ -70,6 +76,7 @@ class TargetWeb(Node):
         feedback_at = self.feedback_at
         return {
             "status": self.status if self.select.service_is_ready() else None,
+            "recenter_ready": self.recenter.service_is_ready(),
             "feedback": self.feedback,
             "limits": self.limits,
             "heartbeat_period_ms": self.heartbeat_period_ms,
@@ -77,6 +84,8 @@ class TargetWeb(Node):
         }
 
     def request(self, path, data):
+        if path == "/api/recenter":
+            return self.request_recenter(data.get("session_id"))
         if path == "/api/select":
             request = SelectSource.Request(source="web")
             client = self.select
@@ -103,15 +112,9 @@ class TargetWeb(Node):
         else:
             raise KeyError("unknown endpoint")
 
-        if not client.service_is_ready():
-            return HTTPStatus.SERVICE_UNAVAILABLE, {"message": "目标仲裁服务未就绪"}
-        future = client.call_async(request)
-        complete = Event()
-        future.add_done_callback(lambda _: complete.set())
-        if not complete.wait(3):
-            client.remove_pending_request(future)
-            return HTTPStatus.GATEWAY_TIMEOUT, {"message": "目标仲裁服务响应超时"}
-        reply = future.result()
+        status, reply = self.call_service(client, request)
+        if status != HTTPStatus.OK:
+            return status, reply
         result = {"accepted": reply.accepted, "message": reply.message}
         if isinstance(reply, SelectSource.Response) and reply.accepted:
             result["session_id"] = reply.session_id
@@ -119,6 +122,36 @@ class TargetWeb(Node):
         if isinstance(reply, SetTarget.Response) and reply.accepted:
             result["dispatch_id"] = str(reply.dispatch_id)
         return HTTPStatus.OK if reply.accepted else HTTPStatus.CONFLICT, result
+
+    def request_recenter(self, session_id):
+        if not self.recenter.service_is_ready():
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"message": "归中服务未就绪"}
+        if session_id:
+            request = ReleaseSource.Request(session_id=session_id)
+            status, reply = self.call_service(self.release_for_recenter, request)
+            if status != HTTPStatus.OK:
+                return status, reply
+            if not reply.accepted:
+                return HTTPStatus.CONFLICT, {"message": reply.message}
+        status, reply = self.call_service(self.recenter, Trigger.Request(), self.recenter_timeout)
+        if status == HTTPStatus.GATEWAY_TIMEOUT:
+            return status, {"message": "未收到归中结果，请查看当前机器人状态"}
+        if status != HTTPStatus.OK:
+            return status, reply
+        return (HTTPStatus.OK if reply.success else HTTPStatus.CONFLICT,
+                {"accepted": reply.success, "message": reply.message})
+
+    @staticmethod
+    def call_service(client, request, timeout=3):
+        if not client.service_is_ready():
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"message": "ROS 服务未就绪"}
+        future = client.call_async(request)
+        complete = Event()
+        future.add_done_callback(lambda _: complete.set())
+        if not complete.wait(timeout):
+            client.remove_pending_request(future)
+            return HTTPStatus.GATEWAY_TIMEOUT, {"message": "ROS 服务响应超时"}
+        return HTTPStatus.OK, future.result()
 
 
 class TargetHandler(BaseHTTPRequestHandler):
