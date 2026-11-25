@@ -91,7 +91,7 @@ export function createRobotView(section) {
   scene.background = new THREE.Color("#0a1924");
   const camera = new THREE.PerspectiveCamera(38, 1, 0.03, 15);
   camera.up.set(0, 0, 1);
-  camera.position.set(1.22, -0.98, 0.86);
+  camera.position.set(0.96, -0.80, 0.76);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.target.set(0, 0, 0.32);
   controls.update();

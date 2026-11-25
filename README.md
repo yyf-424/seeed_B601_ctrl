@@ -192,6 +192,7 @@ python3 scripts/test_target_arbitration.py --web
 最近下发的目标或待发送预览，视图下方显示两者的末端 XYZ 坐标。拖动旋转，滚轮缩放，
 「复位视角」回到初始视角。官方 STL 来自本机 `rebotarm_ros2` 参考目录，也可用
 `B601_VENDOR_DESCRIPTION` 指定 `rebotarm_bringup` 目录。缺少这些网格时使用运行时 URDF 的简化外形。
+宽窗口并排展示模型与关节控制，窄窗口滚动关节列表时，模型固定在屏幕上方。
 退出前释放控制权。这个入口启动本地零重力 MuJoCo 夹具，夹爪使用仿真测试增益，整机安全节点仍启用。
 服务只在本机回环地址监听。常规 MIT bringup 可通过 `use_target_web:=true` 启动同一页面。
 
