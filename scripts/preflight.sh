@@ -105,12 +105,8 @@ bad()  { printf '\033[1;31m  [FAIL]\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 info() { printf '\033[1;34m  [INFO]\033[0m %s\n' "$*"; }
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 
-set +u
-# shellcheck disable=SC1091
-source /opt/ros/humble/setup.bash
-# shellcheck disable=SC1091
-source "$WORKSPACE/install/setup.bash"
-set -u
+source "$REPO_ROOT/scripts/ros_env.sh"
+b601_source_workspace || exit 1
 
 export ROS_HOME="$TMP/roshome"
 export ROS_LOG_DIR="$TMP/roslog"

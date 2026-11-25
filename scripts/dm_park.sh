@@ -47,18 +47,8 @@ bad()  { printf '\033[1;31m  [FAIL]\033[0m %s\n' "$1"; }
 info() { printf '\033[1;34m==> %s\033[0m\n' "$1"; }
 
 # --- 0. 环境 ---
-if ! command -v ros2 >/dev/null 2>&1; then
-  set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; set -u
-fi
-if [[ -z "${ROS_DISTRO:-}" ]]; then
-  echo "❌ 没有 source ROS 环境（先 source /opt/ros/humble/setup.bash + ros2_ws/install/setup.bash）"
-  exit 2
-fi
-if [[ ! -f "$REPO_ROOT/ros2_ws/install/setup.bash" ]]; then
-  echo "❌ 找不到 ros2_ws/install/setup.bash —— 先 ./scripts/build.sh"
-  exit 2
-fi
-set +u; source "$REPO_ROOT/ros2_ws/install/setup.bash" >/dev/null 2>&1; set -u
+source "$REPO_ROOT/scripts/ros_env.sh"
+b601_source_workspace || exit 2
 
 CM_PID=""
 if [[ $KEEP_ENABLED -eq 0 ]]; then

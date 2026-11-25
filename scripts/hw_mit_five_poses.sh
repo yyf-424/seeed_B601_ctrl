@@ -8,8 +8,8 @@ case "$mode" in
   *) echo "用法：$0 --simulate | --probe | --readonly | --execute"; exit 2 ;;
 esac
 
-source /opt/ros/humble/setup.bash
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh
+b601_source_workspace
 plan=validation.mit_five_poses
 out="$(python3 scripts/project_config.py "$plan.hardware_retest.output_dir")"
 mkdir -p "$out"

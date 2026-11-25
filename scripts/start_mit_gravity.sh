@@ -17,10 +17,8 @@ if (( $# > 0 )); then
 fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-# shellcheck disable=SC1091
-source /opt/ros/humble/setup.bash
-# shellcheck disable=SC1091
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh
+b601_source_workspace
 export ROS_DOMAIN_ID ROS_LOCALHOST_ONLY
 
 exec ros2 launch b601_bringup bringup.launch.py \

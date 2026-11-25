@@ -3,6 +3,8 @@
 build/
 install/
 log/
+logs/
+*.log
 
 ros2_ws/build/
 ros2_ws/install/
@@ -29,6 +31,9 @@ venv/
 # 说明：代码/配置/脚本入库；docs/ 与 AGENTS.md 留在工作区但不跟踪。
 /AGENTS.md
 /docs/
+/validation/*.json
+/validation/mit-parameter-history.md
+/vendor/
 # 未验证/未登记的开发脚本：先不入库（本地保留，验证并登记文档后再 git add -f）
 /scripts/gen_chain_header.py
 /scripts/compare_taug.py

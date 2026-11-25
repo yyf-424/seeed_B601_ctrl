@@ -32,12 +32,8 @@ for arg in "$@"; do
   esac
 done
 
-# shellcheck disable=SC1091
-# ROS 的 setup.bash 不是 set -u 安全的（会引用未定义的 AMENT_TRACE_SETUP_FILES），
-# 所以 source 期间先关掉 -u。
-set +u
-source /opt/ros/humble/setup.bash
-set -u
+source "$REPO_ROOT/scripts/ros_env.sh"
+b601_source_ros
 
 if [[ $CLEAN -eq 1 ]]; then
   echo "==> 清理 build/ install/ log/"
@@ -115,17 +111,19 @@ cat > "$MARKER" <<EOF
 built_at=$(date -Iseconds)
 git_head=$GIT_HEAD
 packages=$BUILT_PKGS
-install=$WORKSPACE/install
+install=ros2_ws/install
 EOF
 
 cat <<EOF
 
 ==> 编译完成。默认启动已指向本次构建（标记文件：ros2_ws/.last_build）
 
-    source $WORKSPACE/install/setup.bash
-    ros2 launch b601_bringup bringup.launch.py hardware:=mock      # 位置模式 + 安全监控
-    ros2 launch b601_moveit_config demo.launch.py                  # MoveIt 全链路
+  在检出目录启动网页和模型预览：
+    ./scripts/start_target_web.sh
 
-  每个新终端都要先 source（放在 /opt/ros/humble/setup.bash 之后）。
+  使用 ROS CLI 前，在新终端的检出目录加载环境：
+    source scripts/ros_env.sh && b601_source_workspace
+    ros2 launch b601_bringup bringup.launch.py hardware:=mock
+    ros2 launch b601_moveit_config demo.launch.py
   改完源码没重编时，./scripts/verify.sh 会提示 install/ 不是最新的。
 EOF

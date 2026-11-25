@@ -37,28 +37,17 @@ step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 # ---------------------------------------------------------------- 1. 环境
 step "1/9 环境"
 
-if [[ -f /opt/ros/humble/setup.bash ]] && [[ -z ${ROS_DISTRO:-} ]]; then
-  # ROS 的 setup.bash 不是 set -u 安全的，source 期间先关掉 -u
-  set +u
-  # shellcheck disable=SC1091
-  source /opt/ros/humble/setup.bash
-  set -u
-fi
-if [[ -n ${ROS_DISTRO:-} ]]; then
+source "$REPO_ROOT/scripts/ros_env.sh"
+if b601_source_ros; then
   ok "ROS 2 $ROS_DISTRO（$(command -v ros2)）"
 else
-  fail "没有 ROS 2 环境：先 source /opt/ros/humble/setup.bash"
+  fail "没有可用的 ROS 2 Humble 环境"
 fi
 
-# xacro 可能来自 ROS 包，也可能是工作区里的 python 环境（本机目前只有后者）
 XACRO_CMD=()
 if command -v xacro >/dev/null 2>&1; then
   XACRO_CMD=(xacro)
   ok "xacro: $(command -v xacro)"
-elif [[ -x "$REPO_ROOT/../.tools/verify-venv/bin/xacro" ]]; then
-  export PYTHONPATH="/opt/ros/humble/lib/python3.10/site-packages:${PYTHONPATH:-}"
-  XACRO_CMD=("$REPO_ROOT/../.tools/verify-venv/bin/xacro")
-  warn "用工作区 venv 里的 xacro（ROS 包 xacro 尚未安装）：${XACRO_CMD[0]}"
 elif python3 -c 'import xacro' 2>/dev/null; then
   XACRO_CMD=(python3 -c 'import xacro; xacro.main()')
   ok "xacro: python 模块"
@@ -215,13 +204,8 @@ fi
 # ------------------------------------------- 6. 文档归档（docs/changes/）
 step "6/9 文档归档（docs/changes/）"
 CHANGES_DIR="$REPO_ROOT/docs/changes"
-# 开发文档按约定**不纳入 git**（只留本地）；本地没有 docs/ 时跳过本步而不是报错，
-# 这样别人 clone 到一份"只有代码"的仓库也能跑通静态自检。
 if [[ ! -d "$CHANGES_DIR" ]]; then
-  warn "本地没有 docs/changes/（开发文档不纳入 git）—— 跳过归档索引校验"
-else
-if [[ ! -d "$CHANGES_DIR" ]]; then
-  fail "缺 docs/changes/ 目录：架构变化必须有规划文档（见 AGENTS.md §11.2）"
+  printf '  跳过本地设计归档校验（当前检出没有 docs/changes/）。\n'
 else
   MISSING_INDEX=()
   MISSING_SECTION=()
@@ -261,7 +245,6 @@ else
 fi
 
 # ------------------------------------------------------- 7. 安全判定单测
-fi
 step "7/9 安全判定单测（scripts/test_safety.py）"
 if python3 "$REPO_ROOT/scripts/test_safety.py" 2>&1 | tail -3 | sed 's/^/         /'; then
   ok "安全判定矩阵全部通过（阈值取自生成的 safety_params.yaml）"
@@ -271,9 +254,9 @@ fi
 
 # -------------------------------------------------------------- 7. 语法
 step "8/9 Python 语法"
-PY_FILES=$(find "$WORKSPACE/src" -name "*.py" -not -path "*/build/*" | sort)
-if python3 -m py_compile $PY_FILES 2> "$TMP/py_compile.err"; then
-  ok "$(echo "$PY_FILES" | wc -l) 个 Python 文件语法正确"
+mapfile -d '' -t PY_FILES < <(find "$WORKSPACE/src" "$REPO_ROOT/scripts" -name '*.py' -print0 | sort -z)
+if python3 -m py_compile "${PY_FILES[@]}" 2> "$TMP/py_compile.err"; then
+  ok "${#PY_FILES[@]} 个 Python 文件语法正确"
 else
   fail "py_compile 报错："
   sed 's/^/         /' "$TMP/py_compile.err" | head -10
@@ -286,7 +269,7 @@ if [[ ${1:-} == "--build" ]]; then
   if has_pkg moveit_ros_move_group; then
     # 走 build.sh 而不是裸 colcon：它负责"默认启动指向最新构建"和清理旧构建
     if "$REPO_ROOT/scripts/build.sh" 2>&1 | tail -6 | sed 's/^/         /'; then
-      ok "colcon build 成功（记得 source ros2_ws/install/setup.bash）"
+      ok "colcon build 成功"
     else
       fail "colcon build 失败"
     fi
@@ -296,7 +279,7 @@ if [[ ${1:-} == "--build" ]]; then
 else
   # 不编译时至少要回答一个问题：现在 source 的 install/ 是不是最新构建？
   if [[ ! -f "$WORKSPACE/install/setup.bash" ]]; then
-    warn "还没构建过：先跑 ./scripts/build.sh（之后 source ros2_ws/install/setup.bash）"
+    warn "还没构建过：先跑 ./scripts/build.sh"
   else
     NEWER=$(find "$WORKSPACE/src" \( -name '*.py' -o -name '*.xacro' -o -name '*.yaml' \
               -o -name '*.xml' -o -name '*.cpp' -o -name '*.hpp' -o -name '*.srdf' \) \

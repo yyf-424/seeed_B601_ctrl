@@ -9,22 +9,24 @@ from ament_index_python.packages import PackageNotFoundError, get_package_share_
 
 DESCRIPTION_FOLDER = Path("description/DM")
 MESH_URI = "package://rebotarm_bringup/description/DM/"
+VENDOR_URDF = Path("urdf/ReBot_Arm_DM.urdf")
 
 
 def find_vendor_model():
     configured = os.environ.get("B601_VENDOR_DESCRIPTION")
     if configured:
         return Path(configured) / DESCRIPTION_FOLDER
+    bundled = (Path(get_package_share_directory("b601_description"))
+               / "assets" / "b601_dm" / VENDOR_URDF)
+    if bundled.is_file():
+        # colcon's symlink install links individual assets back to the same source tree.
+        return bundled.resolve().parents[1]
     try:
         installed = Path(get_package_share_directory("rebotarm_bringup")) / DESCRIPTION_FOLDER
         if installed.is_dir():
             return installed
     except PackageNotFoundError:
         pass
-    for root in Path(__file__).resolve().parents:
-        reference = root / "rebotarm_ros2/src/rebotarm_bringup" / DESCRIPTION_FOLDER
-        if reference.is_dir():
-            return reference
     return None
 
 
@@ -111,7 +113,7 @@ def build_model(description, vendor, mesh_prefix="/robot-mesh"):
     asset_source = "urdf"
     if vendor is not None:
         try:
-            vendor_robot = ET.parse(vendor / "urdf/ReBot_Arm_DM.urdf").getroot()
+            vendor_robot = ET.parse(vendor / VENDOR_URDF).getroot()
             vendor_visuals = link_visuals(vendor_robot, vendor, assets, mesh_prefix)
             if not all(vendor_visuals.get(link) for link, parts in visuals.items() if parts):
                 raise ValueError("Incomplete B601 visual model")

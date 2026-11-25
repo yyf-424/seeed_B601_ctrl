@@ -1,21 +1,38 @@
-# B601-DM v0.3.0 · 关节端 MIT 变刚度
+# B601-DM ROS 2 框架 v1.0.0
 
-机械臂支持标准位置控制和电机侧 MIT 变刚度控制。MIT 上层通过 [目标仲裁与网页](#mit-目标仲裁与网页) 接收整机目标。上层实机覆盖由操作者确认，可复现的自检和 MuJoCo 回归入口见 [上层框架验收](validation/target-web.md)。
+这套框架用 ROS 2 Humble 和 ros2_control 驱动 B601-DM 六轴机械臂与夹爪。
+上层提供本地网页、命令行、Python `TargetClient` 和原生 ROS 2 接口。
+MoveIt 2 提供标准位置轨迹规划，MuJoCo 提供动力学仿真。
 
-主机下发位置、速度、增益和前馈力矩，电机执行 MIT PD 闭环。v0.3.0 的真机验收覆盖六轴高刚度跟踪、两档重力补偿、低刚度短时表现、双向切换和正常停机。MoveIt 2 属于上层规划，单独验收。见 [发布记录](CHANGELOG.md)。
+**控制器目前可用，增益、重力补偿和切换表现仍需细调。**
+已完成高刚度跟踪、两档重力补偿、短时低刚度保持和归中失能的基础验收。负载变化、全工作区精度和长期低刚度表现仍待系统评估。上层实机覆盖按操作者确认登记。见 [上层验收](validation/target-web.md) 和 [发布记录](CHANGELOG.md)。
+
+## 选择使用方式
+
+| 场景 | 入口 |
+|---|---|
+| 只看网页与官方三维模型 | `./scripts/start_target_web.sh`，打开 [本地控制台](http://127.0.0.1:8765/) |
+| 演练网页发令与归中 | 在网页手动连接 MuJoCo，发送目标后归中、Disable |
+| 跑标准位置与 MoveIt 轨迹 | 加载当前工作区后运行 `ros2 launch b601_moveit_config demo.launch.py hardware:=mock` |
+| 控制真机 | 现场确认后，在网页连接「实机」或在终端运行 [MIT 重力补偿脚本](#快速启动重力补偿)，按所选入口归中并失能 |
+| 接入程序或策略 | 用 [TargetClient 或原生 ROS 2](#ros-2-接口) 申请整机控制权并发送六轴与夹爪目标 |
 
 ## 环境和离线回归
 
-在本标签的检出目录执行。需要 Ubuntu 22.04、ROS 2 Humble、ros2_control、MoveIt 2、Python
-`motorbridge` 和 `mujoco`。可用 `./scripts/install_deps.sh core control moveit` 查看 ROS 依赖。
+在当前检出目录执行。依赖 Ubuntu 22.04、ROS 2 Humble、ros2_control、MoveIt 2 和 Python
+`motorbridge`。MuJoCo 仿真还需要 Python `mujoco`。运行 `./scripts/install_deps.sh core control moveit` 查看 ROS 软件包。
+脚本优先使用 `B601_ROS_SETUP` 指定的 Humble 环境，其次使用已加载的 Humble 环境，或从系统 ROS 软件包查找
+`setup.bash`。项目文件由脚本位置和当前工作区的 ROS 包索引定位，每个检出目录单独构建。
 
 ```bash
 ./scripts/build.sh
-source /opt/ros/humble/setup.bash
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh && b601_source_workspace
 ./scripts/verify.sh
 ./scripts/preflight.sh
 ```
+
+需要 ROS CLI 或 Python SDK 时，在每个新终端从同一检出目录执行环境加载命令。自定义 ROS 安装可先加载其环境，
+也可将 `B601_ROS_SETUP` 设置为对应的 `setup.bash` 路径。相对路径从检出目录解析。移动检出后，在新位置重新构建。
 
 真机测试前固定机械臂，清空扫掠范围和夹爪，确认有人可以立即急停或断电。
 在归中位置开始。使能前完成探针回读、只读和方向核对。同一串口只运行一个控制程序。
@@ -45,7 +62,7 @@ source ros2_ws/install/setup.bash
 
 ```bash
 ./scripts/build.sh
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh && b601_source_workspace
 model="$(mktemp)"
 if python3 scripts/gen_mjcf.py > "$model"; then
   cp "$model" ros2_ws/src/b601_mujoco/models/b601_arm.xml
@@ -100,8 +117,7 @@ ros2 service call /b601_mit_recenter/recenter std_srvs/srv/Trigger '{}'
 保持启动终端运行。看到 `启动归中成功` 后，在第二个终端进入同一检出目录，加载工作区环境，按脚本顶部的值设置 ROS 域。下面向手臂发送一次已实测姿态，`position` 按 J1–J6 顺序填写绝对角度，单位为 rad。
 
 ```bash
-source /opt/ros/humble/setup.bash
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh && b601_source_workspace
 export ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=211
 
 python3 scripts/dm_mit_move.py --set \
@@ -128,23 +144,18 @@ ros2 launch b601_bringup bringup.launch.py hardware:=dm \
 仿真回归使用相同高低增益，夹具的前馈系数由 MuJoCo 模型质量和质心计算。检查 5% 跟踪误差带、自动降档和低档 5 秒的关节变化。JSON、CSV 和启动日志存放在 `.verify/`。
 
 ```bash
-source /opt/ros/humble/setup.bash
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh && b601_source_workspace
 ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=214 python3 scripts/sim_mit_ros.py \
   --gravity-varstiff-switch-test --tag varstiff_switch
 ```
 
-修改统一配置后运行 `./scripts/sync_config.py` 并重新构建。旧实验档的增益见 [MIT 历史试验参数](validation/mit-parameter-history.md)。
+修改统一配置后运行 `./scripts/sync_config.py` 并重新构建。早期实验参数可从历史标签查看。
 
 ## 6+1 MIT 真机复测
 
-碰撞核对使用 Seeed 官方 `reBotArmController_ROS2` 中的 DM 模型资源，历史实测使用
-`87780c6a5c2fb43b55ddebda5eac375ceb9c5a40`。把参考仓库的 `src/rebotarm_bringup` 目录
-设为 `B601_VENDOR_DESCRIPTION`。缺省查找本项目同级 `rebotarm_ros2/src/rebotarm_bringup`。
-只用 URDF 和网格文件，ROS 包由当前标签构建。
+碰撞复测默认使用随 `b601_description` 安装的 Seeed B601-DM URDF 和碰撞网格。历史实测使用同一上游提交。可通过 `B601_VENDOR_DESCRIPTION` 指定另一份厂商 `rebotarm_bringup` 目录。见 [模型来源](ros2_ws/src/b601_description/assets/b601_dm/README.md)。
 
 ```bash
-export B601_VENDOR_DESCRIPTION=/path/to/rebotarm_ros2/src/rebotarm_bringup
 ./scripts/hw_mit_five_poses.sh --simulate
 ./scripts/hw_mit_five_poses.sh --probe
 ./scripts/hw_mit_five_poses.sh --readonly
@@ -166,10 +177,14 @@ export B601_VENDOR_DESCRIPTION=/path/to/rebotarm_ros2/src/rebotarm_bringup
 v0.2.1 的纯 PD 真机五姿态记录可离线重算。
 
 ```bash
-python3 scripts/mit_five_poses.py --score-hardware validation/results.json
+mkdir -p .verify
+git show v0.2.1:validation/results.json > .verify/mit-v0.2.1-results.json
+source scripts/ros_env.sh && b601_source_workspace
+python3 scripts/mit_five_poses.py --score-hardware .verify/mit-v0.2.1-results.json
 ```
 
 历史位置回路的复测入口见 [pos_vel 流程](validation/pos-vel.md)。
+
 ## MIT 目标仲裁与网页
 
 上层架构、实机覆盖与复测结果见 [上层框架验收](validation/target-web.md)。
@@ -178,7 +193,7 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 根据实际加载的控制器配置建立内部路由。手动工具、分段归中、仿真与真机五姿态脚本、浏览器
 和外部策略共用整机仲裁入口。同一时刻只授予一个整机会话，默认启动时没有来源持有控制权。
 仲裁向各组发布 `/<控制器>/authorized_target`，转发节点是 `/<控制器>/joint_target`
-的唯一正常发布者。MIT 控制器沿用 `3d4efa5` 的实现和控制器配置。转发节点从
+的唯一正常发布者。转发节点从
 `/<控制器>/state` 读取主线控制器的目标序号，在 `/<控制器>/target_applied` 回报采纳编号。
 标准位置模式仍使用自己的 `FollowJointTrajectory` 接口。
 
@@ -189,11 +204,11 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 ./scripts/start_target_web.sh
 ```
 
-打开 [本地目标控制台](http://127.0.0.1:8765/)，页面启动后即可查看默认姿态的三维模型。脚本只启动网页和预览模型发布器，URDF 发布到 `/b601_preview/robot_description`，预览姿态来自项目配置。需要另一个端口时运行 `./scripts/start_target_web.sh port:=8766`。
+打开 [本地目标控制台](http://127.0.0.1:8765/)，页面会默认加载随包安装的 B601-DM 官方 STL，显示默认姿态。脚本只启动网页和预览模型发布器，URDF 发布到 `/b601_preview/robot_description`，预览姿态来自项目配置。需要另一个端口时运行 `./scripts/start_target_web.sh port:=8766`。
 
 重复运行会显示已有控制台的地址并返回终端。要退出控制台，在最初启动它的终端按 `Ctrl+C`。端口被其他服务占用时，启动命令会提示选择空闲端口。
 
-需要关节反馈时，在「运行后端」选择模式，再点击「连接」。网页收到后端的模型和关节反馈后切换到实测姿态。页面连接实机后，收工先按下文完成归中和 Disable，再结束启动脚本。
+需要关节反馈时，在「运行后端」选择模式，再点击「连接」。启动终端与目标客户端须使用相同的 ROS 域。网页收到后端的模型和关节反馈后切换到实测姿态。页面连接实机后，收工先按下文完成归中和 Disable，再结束启动脚本。
 
 - **Mock** 是网页的空操作，页面保持空闲。
 - **MuJoCo** 启动 MIT 控制器，默认关闭重力和物理碰撞。需要模拟重力时，连接前在
@@ -216,7 +231,7 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 ### MuJoCo 网页回归夹具
 
 ```bash
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh && b601_source_workspace
 python3 scripts/test_target_arbitration.py --web
 ```
 
@@ -225,12 +240,18 @@ python3 scripts/test_target_arbitration.py --web
 页面同时显示指定来源、当前会话持有者、实时反馈和整机回执。
 三维视图使用运行中的 URDF 和关节反馈。实测模型保留 B601 的外观配色，青色模型显示
 最近下发的目标或待发送预览，视图下方显示两者的末端 XYZ 坐标。拖动旋转，滚轮缩放，
-「复位视角」回到初始视角。官方 STL 来自本机 `rebotarm_ros2` 参考目录，也可用
-`B601_VENDOR_DESCRIPTION` 指定 `rebotarm_bringup` 目录。缺少这些网格时使用运行时 URDF 的简化外形。
+「复位视角」回到初始视角。网页默认使用工作区内的官方 STL，关节树和姿态来自项目 URDF 与关节反馈。可用 `B601_VENDOR_DESCRIPTION` 选择另一份厂商目录。见 [随包模型资源](ros2_ws/src/b601_description/assets/b601_dm/README.md)。
 宽窗口并排展示模型与关节控制，窄窗口滚动关节列表时，模型固定在屏幕上方。
 在三维视图点选 TCP，按住 Ctrl 沿当前视角平面拖动。页面按 URDF 逆解末端位置并填入同一列表，
 保留第七个关节的目标值。青色模型显示待发送预览，点击同一个「发送七关节目标」按钮执行。
 指定外部来源后由相应客户端申请和发送目标。点击「释放控制权」清除指定来源及现有会话。
+用上述 MuJoCo 夹具时，在网页指定 `manual`，再从第二个终端发送 J1 目标。其他关节由客户端用当前反馈补齐。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
+export ROS_DOMAIN_ID=227 ROS_LOCALHOST_ONLY=1
+python3 scripts/dm_mit_move.py --set 'joint1=0.035'
+```
 点击「一键归中」会调用现有 ROS 归中服务并显示执行结果。当前网页持有控制权时，它会先交还会话。
 若当前由外部来源持有或指定给外部来源，先在控制台释放该来源，再点击归中。
 归中沿用现有的 J4 上抬、其余轴归中和 J4 回落流程。三维目标模型跟随各段实际下发的目标，
@@ -264,7 +285,7 @@ SDK 支持局部编辑，首次用实测反馈补齐七关节，后续保留同�
 间隔可能超时，下面示例从程序取得令牌并用 SDK 定时续期。相同服务也可用任意 ROS 2 客户端调用。
 
 ```bash
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh && b601_source_workspace
 export ROS_DOMAIN_ID=227 ROS_LOCALHOST_ONLY=1
 
 python3 - <<'PYTHON'
@@ -305,7 +326,7 @@ ROS 通信和新鲜反馈。使用主线自带的刚度切换时，持位目标�
 ### 复测
 
 ```bash
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh && b601_source_workspace
 python3 scripts/test_target_arbitration.py
 ```
 
@@ -313,3 +334,8 @@ python3 scripts/test_target_arbitration.py
 单关节和多关节编辑后的完整下发、控制器采纳回执、旧会话拒绝、策略流、归中交接、撤销、来源失联持位以及仲裁进程断流后的重新接管。
 日志存于 `.verify/target-arbitration-227/`。完成网页预览后再运行自动验收，
 或用 `B601_TEST_ROS_DOMAIN_ID` 选另一空闲 ROS 域。
+
+## 文档与运行产物
+
+仓库保留本使用说明、发布记录与可复测的验收入口。设计、试验日志和历史原始回读在本地维护。
+构建和网页日志默认位于 `ros2_ws/log/`，回归输出位于 `.verify/`。旧版原始验收文件可由相应 Git 标签读取。

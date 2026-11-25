@@ -20,7 +20,7 @@ install(FILES "${generated_header}" DESTINATION include/b601_description)
 ament_export_include_directories(include)
 
 install(
-  DIRECTORY urdf config launch rviz
+  DIRECTORY urdf config launch rviz assets
   DESTINATION share/${PROJECT_NAME}
 )
 

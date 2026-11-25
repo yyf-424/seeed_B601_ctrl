@@ -11,8 +11,8 @@
 
 set -uo pipefail
 
-GROUPS=("$@")
-[[ ${#GROUPS[@]} -eq 0 ]] && GROUPS=(core control moveit observe)
+DEPENDENCY_GROUPS=("$@")
+[[ ${#DEPENDENCY_GROUPS[@]} -eq 0 ]] && DEPENDENCY_GROUPS=(core control moveit observe)
 
 declare -A PKGS=(
   [core]="ros-humble-xacro ros-humble-joint-state-publisher ros-humble-joint-state-publisher-gui ros-humble-robot-state-publisher ros-humble-rviz2"
@@ -31,7 +31,7 @@ declare -A WHY=(
 printf '\033[1mB601 示例项目依赖清单\033[0m\n'
 printf '（ROS 2 Humble / Ubuntu 22.04。安装需要 sudo，所以脚本不代跑。）\n'
 
-for g in "${GROUPS[@]}"; do
+for g in "${DEPENDENCY_GROUPS[@]}"; do
   if [[ -z ${PKGS[$g]:-} ]]; then
     printf '\n\033[1;33m未知分组 %s（可选：%s）\033[0m\n' "$g" "${!PKGS[*]}"
     continue
@@ -55,8 +55,8 @@ done
 cat <<'EOF'
 
 装完之后：
-  cd ros2_ws && colcon build --symlink-install && source install/setup.bash
   ./scripts/verify.sh --build
+  source scripts/ros_env.sh && b601_source_workspace
   ros2 launch b601_description display.launch.py      # 先看模型
   ros2 launch b601_bringup bringup.launch.py          # 再通控制
   ros2 launch b601_moveit_config demo.launch.py       # 最后上 MoveIt

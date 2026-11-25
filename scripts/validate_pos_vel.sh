@@ -7,8 +7,8 @@ case "${1:-}" in
   *) echo "用法：$0 --dry-run | --execute"; exit 2 ;;
 esac
 
-source /opt/ros/humble/setup.bash
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh
+b601_source_workspace
 plan="$(python3 - <<'PY'
 from pathlib import Path
 import yaml

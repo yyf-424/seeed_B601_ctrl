@@ -1,17 +1,16 @@
-# B601-DM v0.1.0 · pos_vel 位置回路
+# B601-DM pos_vel 位置回路
 
 ROS 2 轨迹控制器发送位置指令。硬件插件发送角度目标和速度上限，电机固件执行位置与速度闭环。
-历史真机五姿态全部通过，六轴最大稳态误差 0.0047 rad。见 [验收记录](pos-vel.json)。
+历史真机五姿态全部通过，六轴最大稳态误差 0.0047 rad。原始记录可通过 `git show v0.1.0:validation/pos-vel.json` 查阅。
 
 ## 环境和离线门禁
 
-在本标签的检出目录执行。需要 Ubuntu 22.04、ROS 2 Humble、ros2_control、MoveIt 2、Python
+在当前检出目录执行。需要 Ubuntu 22.04、ROS 2 Humble、ros2_control、MoveIt 2、Python
 `motorbridge` 和 `mujoco`。可用 `./scripts/install_deps.sh core control moveit` 查看 ROS 依赖。
 
 ```bash
 ./scripts/build.sh
-source /opt/ros/humble/setup.bash
-source ros2_ws/install/setup.bash
+source scripts/ros_env.sh && b601_source_workspace
 ./scripts/verify.sh
 ./scripts/preflight.sh
 ```

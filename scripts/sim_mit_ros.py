@@ -14,7 +14,7 @@
     5) 打印机器可读的汇总行 + 写一份 CSV。
 
 用法（必须在已经 source 过的 shell 里跑，DDS 才能对上）：
-    source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash
+    source scripts/ros_env.sh && b601_source_workspace
     ./scripts/sim_mit_ros.py                          # 默认 3 姿态
     ./scripts/sim_mit_ros.py --controller b601_mit_controller \\
         --controllers-file ros2_ws/src/b601_bringup/config/b601_mit_controllers.yaml
@@ -840,7 +840,8 @@ def main() -> int:
             patched.write_text(_yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
                                encoding="utf-8")
             cmds.append(f"project_config_file:={patched}")
-        if args.joint_friction > 0.0 or args.zero_gravity or args.gravity_varstiff_switch_test:
+        if (args.joint_friction > 0.0 or args.zero_gravity
+                or args.gravity_varstiff_switch_test or args.temp_trip_test):
             from ament_index_python.packages import get_package_share_directory
 
             source = Path(get_package_share_directory("b601_mujoco")) / "models" / "b601_arm.xml"
@@ -857,7 +858,9 @@ def main() -> int:
                 option = model.find("option")
                 if option is None:
                     raise RuntimeError(f"{source} 缺少 MuJoCo option")
-                option.set("gravity", "0 0 0")
+                # The thermal fixture needs gravity to load the holding controller.
+                if args.zero_gravity or not args.temp_trip_test:
+                    option.set("gravity", "0 0 0")
                 flag = option.find("flag")
                 if flag is None:
                     flag = ET.SubElement(option, "flag")
@@ -1011,7 +1014,7 @@ def main() -> int:
         if args.gravity_varstiff_switch_test:
             return gravity_varstiff_switch_test(node, csv_path)
         if args.temp_trip_test:
-            print(f"过温测试：失能线 {args.temp_limit:.0f} ℃，热模型满载 6 ℃/s（需真实重力负载）")
+            print(f"过温测试：失能线 {args.temp_limit:.0f} ℃，热模型满载 6 ℃/s（使用仿真重力负载）")
             node.spin_for(1.0)
             hold = node.q()
             end = time.monotonic() + SETTINGS["thermal_fixture"]["observe_sec"]
