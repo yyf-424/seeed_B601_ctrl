@@ -853,13 +853,17 @@ def main() -> int:
                 for joint in joints:
                     joint.set("frictionloss", str(args.joint_friction))
                 print(f"   已注入关节库仑摩擦 frictionloss={args.joint_friction}（{len(joints)} 个关节）")
-            if args.zero_gravity:
+            if args.zero_gravity or not args.gravity_varstiff_switch_test:
                 option = model.find("option")
                 if option is None:
                     raise RuntimeError(f"{source} 缺少 MuJoCo option")
                 option.set("gravity", "0 0 0")
-                if args.gravity_scale is None:
-                    args.gravity_scale = 0.0
+                flag = option.find("flag")
+                if flag is None:
+                    flag = ET.SubElement(option, "flag")
+                flag.set("contact", "disable")
+            if args.zero_gravity and args.gravity_scale is None:
+                args.gravity_scale = 0.0
             if args.gravity_varstiff_switch_test:
                 # 保持试验中两指机械联动，使 MuJoCo 在积分时计算从动指的反力。
                 # 后端步末的运动学镜像只保证外观，无法给自由滑动的从动指提供反力。

@@ -184,7 +184,7 @@
           <plugin>b601_hardware/MujocoSystemHardware</plugin>
           <!-- 留空就用包内默认模型；非空则是显式覆盖（零重力夹具等） -->
           <xacro:if value="${mujoco_model == ''}">
-            <param name="model_path">$(find b601_mujoco)/models/b601_arm.xml</param>
+            <param name="model_path">$(find b601_mujoco)/models/b601_arm_free.xml</param>
           </xacro:if>
           <xacro:unless value="${mujoco_model == ''}">
             <param name="model_path">${mujoco_model}</param>

@@ -41,7 +41,7 @@ import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler, SetLaunchConfiguration
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
@@ -73,6 +73,7 @@ def generate_launch_description():
     dm_command_mode = LaunchConfiguration("dm_command_mode")
     dm_log_csv = LaunchConfiguration("dm_log_csv")
     mujoco_model = LaunchConfiguration("mujoco_model")
+    mujoco_scene = LaunchConfiguration("mujoco_scene")
     use_target_web = LaunchConfiguration("use_target_web")
     target_web_port = LaunchConfiguration("target_web_port")
     use_rviz = LaunchConfiguration("use_rviz")
@@ -85,6 +86,16 @@ def generate_launch_description():
     safety_params_file = PathJoinSubstitution([safety_share, "config", "safety_params.yaml"])
     initial_positions_file = LaunchConfiguration("initial_positions_file")
     project_config_file = LaunchConfiguration("project_config_file")
+    physical_model = PathJoinSubstitution([FindPackageShare("b601_mujoco"), "models", "b601_arm.xml"])
+
+    def configure_mujoco_scene(context):
+        if hardware.perform(context) == "mujoco" and not mujoco_model.perform(context):
+            scene = mujoco_scene.perform(context)
+            actions = [SetLaunchConfiguration("attached_mujoco_scene", scene)]
+            if scene == "physical":
+                actions.append(SetLaunchConfiguration("mujoco_model", physical_model))
+            return actions
+        return []
 
     # robot_description 是 xacro 现算出来的字符串，不是磁盘上的 URDF 文件。
     # 这样 hardware 参数一变，硬件插件那一段就跟着变，不需要维护两份 URDF。
@@ -218,6 +229,8 @@ def generate_launch_description():
                     "project_config_file": project_config_file,
                     "port": ParameterValue(target_web_port, value_type=int),
                     "attached_backend": ParameterValue(hardware, value_type=str),
+                    "attached_mujoco_scene": ParameterValue(
+                        LaunchConfiguration("attached_mujoco_scene", default=""), value_type=str),
                 }],
             ),
         ]
@@ -309,9 +322,13 @@ def generate_launch_description():
                             "例：dm_log_csv:=\"$PWD/.verify/run.csv\"",
             ),
             DeclareLaunchArgument(
+                "mujoco_scene", default_value="free", choices=["free", "physical"],
+                description="MuJoCo 物理模式：free 关闭重力与碰撞，physical 同时开启",
+            ),
+            DeclareLaunchArgument(
                 "mujoco_model",
                 default_value="",
-                description="MuJoCo 模型路径（留空=用 xacro 默认的包内模型）；"
+                description="显式覆盖 MuJoCo 模型路径（留空=按 mujoco_scene 选择）；"
                             "仿真回归可指向零重力夹具等变体",
             ),
             DeclareLaunchArgument(
@@ -352,6 +369,7 @@ def generate_launch_description():
                 description="全项目唯一参数真值（关节限位/电机参数/控制模式）",
             ),
 
+            OpaqueFunction(function=configure_mujoco_scene),
             robot_state_publisher,
             OpaqueFunction(function=launch_manager),
             OpaqueFunction(function=launch_safety),

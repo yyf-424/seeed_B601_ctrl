@@ -3,6 +3,8 @@
 const element = (id) => document.getElementById(id);
 const inputSource = element("input-source");
 const backendSelect = element("backend");
+const mujocoSceneControls = element("mujoco-scene-controls");
+const mujocoSceneSelect = element("mujoco-scene");
 const connectButton = element("connect");
 const disableButton = element("disable");
 const recenterButton = element("recenter");
@@ -114,6 +116,11 @@ function refreshBackend() {
   if (backend?.name && backend.name !== shownBackend) backendSelect.value = backend.name;
   shownBackend = backend?.name;
   backendSelect.disabled = busy || !backend?.can_connect;
+  if (backend?.mujoco_scene) mujocoSceneSelect.value = backend.mujoco_scene;
+  mujocoSceneControls.hidden = backendSelect.value !== "mujoco" || !backend
+    || !Object.hasOwn(backend, "mujoco_scene")
+    || (backend.name === "mujoco" && !backend.mujoco_scene);
+  mujocoSceneSelect.disabled = backendSelect.disabled;
   connectButton.disabled = busy || !backend?.can_connect;
   disableButton.disabled = busy || !backend?.can_disable;
   const connection = element("connection");
@@ -259,8 +266,16 @@ backendSelect.addEventListener("change", () => {
   backendReply = undefined;
   refreshBackend();
 });
-connectButton.addEventListener("click", () => mutate(() =>
-  changeBackend("/api/connect", { backend: backendSelect.value })));
+mujocoSceneSelect.addEventListener("change", () => {
+  backendReply = undefined;
+  refreshBackend();
+});
+connectButton.addEventListener("click", () => mutate(() => {
+  const backend = backendSelect.value;
+  const payload = { backend };
+  if (!mujocoSceneControls.hidden) payload.mujoco_scene = mujocoSceneSelect.value;
+  return changeBackend("/api/connect", payload);
+}));
 disableButton.addEventListener("click", () => mutate(() => changeBackend("/api/disable", {})));
 
 inputSource.addEventListener("input", refresh);

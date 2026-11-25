@@ -1,0 +1,6 @@
+<mujoco>
+  <include file="b601_arm.xml"/>
+  <option gravity="0 0 0">
+    <flag contact="disable"/>
+  </option>
+</mujoco>

@@ -7,7 +7,6 @@ import re
 import signal
 import subprocess
 import time
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import yaml
@@ -259,10 +258,6 @@ def test(node, launch_log):
 def start_fixture(output, web):
     root = Path(__file__).resolve().parent.parent
     source = root / "ros2_ws/src"
-    model = ET.parse(source / "b601_mujoco/models/b601_arm.xml")
-    model.getroot().find("option").set("gravity", "0 0 0")
-    model_path = output / "model.xml"
-    model.write(model_path)
 
     initial = {
         "initial_positions": {"joint1": 0.0, "joint2": -0.3, "joint3": -0.6,
@@ -283,7 +278,7 @@ def start_fixture(output, web):
         return subprocess.Popen([
             "ros2", "launch", "b601_bringup", "bringup.launch.py",
             "hardware:=mujoco", "dm_command_mode:=mit_impedance", "use_rviz:=false",
-            "mit_recenter_check_collisions:=false", f"mujoco_model:={model_path}",
+            "mit_recenter_check_collisions:=false",
             f"initial_positions_file:={initial_path}", f"controllers_file:={controllers}",
             f"use_target_web:={str(web).lower()}",
         ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)

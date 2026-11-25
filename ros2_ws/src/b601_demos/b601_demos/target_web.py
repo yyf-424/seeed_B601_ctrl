@@ -36,7 +36,8 @@ class TargetWeb(Node):
         config_path = self.declare_parameter("project_config_file", "").value
         config = load_project_config(config_path or None)
         attached = self.declare_parameter("attached_backend", "").value
-        self.backend = WebBackend(self, config, config_path, attached)
+        attached_scene = self.declare_parameter("attached_mujoco_scene", "").value
+        self.backend = WebBackend(self, config, config_path, attached, attached_scene)
         self.feedback_timeout = config["safety"]["feedback_timeout_sec"]
         self.heartbeat_period_ms = round(
             config["tools"]["target_arbitration"]["authority_timeout_sec"] * 200)
@@ -113,7 +114,7 @@ class TargetWeb(Node):
 
     def request(self, path, data):
         if path == "/api/connect":
-            return self.backend.connect(data["backend"])
+            return self.backend.connect(data["backend"], data.get("mujoco_scene", "free"))
         if path == "/api/disable":
             return self.backend.disable(self.call_service)
         if path == "/api/recenter":

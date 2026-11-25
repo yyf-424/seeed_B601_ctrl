@@ -52,6 +52,13 @@
             <button id="connect" disabled>连接</button>
             <button id="disable" class="quiet" disabled>Disable</button>
           </div>
+          <div id="mujoco-scene-controls" class="selection" hidden>
+            <label for="mujoco-scene">MuJoCo 物理模式</label>
+            <select id="mujoco-scene" disabled>
+              <option value="free">关闭重力与碰撞</option>
+              <option value="physical">开启重力与碰撞</option>
+            </select>
+          </div>
           <p id="backend-feedback" class="backend-feedback" role="status"></p>
         </section>
         <section class="authority" aria-label="控制权">

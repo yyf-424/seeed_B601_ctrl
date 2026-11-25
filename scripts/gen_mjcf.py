@@ -25,7 +25,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from project_config import load_project_config
+from project_config import ROOT, load_project_config
 
 
 def rpy_to_quat(r, p, y):
@@ -227,13 +227,13 @@ def main() -> int:
                   f'size="{pars[0]:.6f} {length / 2:.6f}" '
                   f'pos="{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}" '
                   f'quat="{rq[0]:.6f} {rq[1]:.6f} {rq[2]:.6f} {rq[3]:.6f}" '
-                  f'material="{mat}" contype="0" conaffinity="0"/>')
+                  f'material="{mat}"/>')
             else:
                 w(f'{pad}  <geom name="{link_name}_geom" type="box" '
                   f'size="{pars[0] / 2:.6f} {pars[1] / 2:.6f} {pars[2] / 2:.6f}" '
                   f'pos="{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}" '
                   f'quat="{rq[0]:.6f} {rq[1]:.6f} {rq[2]:.6f} {rq[3]:.6f}" '
-                  f'material="{mat}" contype="0" conaffinity="0"/>')
+                  f'material="{mat}"/>')
 
         # 子 link
         for cj in children_of.get(link_name, []):
@@ -265,13 +265,13 @@ def main() -> int:
                   f'size="{pars[0]:.6f} {length / 2:.6f}" '
                   f'pos="{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}" '
                   f'quat="{rq[0]:.6f} {rq[1]:.6f} {rq[2]:.6f} {rq[3]:.6f}" '
-                  f'material="{mat}" contype="0" conaffinity="0"/>')
+                  f'material="{mat}"/>')
             else:
                 w(f'{pad}  <geom name="{link_name}_geom" type="box" '
                   f'size="{pars[0] / 2:.6f} {pars[1] / 2:.6f} {pars[2] / 2:.6f}" '
                   f'pos="{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}" '
                   f'quat="{rq[0]:.6f} {rq[1]:.6f} {rq[2]:.6f} {rq[3]:.6f}" '
-                  f'material="{mat}" contype="0" conaffinity="0"/>')
+                  f'material="{mat}"/>')
         for cj in children_of.get(link_name, []):
             if cj.type == "fixed":
                 emit_body_fixed(cj.child, indent + 1, cj.xyz, rpy_to_matrix(cj.rpy), depth + 1)
@@ -287,6 +287,14 @@ def main() -> int:
         emit_body("base_link", 2)
 
     w('  </worldbody>')
+    w('')
+    exclusions = ET.parse(ROOT / "ros2_ws/src/b601_moveit_config/config/b601_dm.srdf")
+    w('  <contact>')
+    for pair in exclusions.findall("disable_collisions"):
+        first, second = pair.get("link1"), pair.get("link2")
+        if first in links and second in links and links[first].geoms and links[second].geoms:
+            w("    " + empty_element("exclude", {"body1": first, "body2": second}))
+    w('  </contact>')
     w('')
     w('  <!-- 执行器：六个手臂关节 + 夹爪主动指，各一个力矩执行器（力矩控制 = MIT 控制律）-->')
     # 夹爪为什么也要执行器：真机夹爪是电机驱动的；以前仿真里手指没有执行器，

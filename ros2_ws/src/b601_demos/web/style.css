@@ -29,6 +29,7 @@ h2 { margin: 0; font-size: 1.05rem; }
 .controls, .robot-view { background: var(--panel); border: 1px solid var(--line); border-radius: .85rem; }
 .backend-controls, .authority { display: grid; grid-template-columns: minmax(7rem, 1fr) auto; align-items: end; gap: .55rem .7rem; }
 .backend-controls { margin-bottom: .7rem; padding-bottom: .6rem; border-bottom: 1px solid var(--line); }
+#mujoco-scene-controls { grid-column: 1 / -1; }
 .backend-feedback { grid-column: 1 / -1; margin: 0; color: var(--subtle); font-size: .78rem; overflow-wrap: anywhere; }
 .backend-feedback:empty { display: none; }
 .backend-feedback[data-error="true"] { color: #ffad9b; }

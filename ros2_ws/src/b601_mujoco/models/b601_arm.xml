@@ -22,43 +22,43 @@
     <camera name="overview" pos="0.75 -0.75 0.75" xyaxes="1 1 0 -0.4 0.4 1" fovy="45"/>
     <body name="base_link" pos="0.000000 0.000000 0.000000" quat="1.000000 0.000000 0.000000 0.000000">
       <inertial pos="-0.000008 -0.000001 0.029841" mass="0.836600" fullinertia="0.00133040 0.00213119 0.00275877 0.00000001 0.00000000 0.00000000"/>
-      <geom name="base_link_geom" type="box" size="0.070000 0.100000 0.044000" pos="0.000000 0.000000 0.043900" quat="1.000000 0.000000 0.000000 0.000000" material="dark_grey" contype="0" conaffinity="0"/>
+      <geom name="base_link_geom" type="box" size="0.070000 0.100000 0.044000" pos="0.000000 0.000000 0.043900" quat="1.000000 0.000000 0.000000 0.000000" material="dark_grey"/>
       <body name="link1" pos="-0.000084 0.000000 0.084650" quat="1.000000 0.000000 0.000000 0.000000">
         <inertial pos="0.000114 -0.000616 0.023648" mass="0.161300" fullinertia="0.00025207 0.00015464 0.00023416 0.00000000 -0.00002832 0.00000000"/>
         <joint name="joint1" type="hinge" axis="0.000000 0.000000 1.000000" range="-2.59000 2.60000" damping="0.02" armature="0.01"/>
-        <geom name="link1_geom" type="cylinder" size="0.042000 0.042000" pos="0.006700 0.000000 0.042000" quat="1.000000 0.000000 0.000000 0.000000" material="seeed_yellow" contype="0" conaffinity="0"/>
+        <geom name="link1_geom" type="cylinder" size="0.042000 0.042000" pos="0.006700 0.000000 0.042000" quat="1.000000 0.000000 0.000000 0.000000" material="seeed_yellow"/>
         <body name="link2" pos="0.020084 0.031625 0.055550" quat="0.707105 -0.707108 0.000000 0.000000">
           <inertial pos="-0.132256 -0.003062 -0.030831" mass="1.326600" fullinertia="0.00073374 0.01255987 0.01281387 -0.00000043 0.00000851 0.00000128"/>
           <joint name="joint2" type="hinge" axis="0.000000 0.000000 -1.000000" range="-3.14000 0.00000" damping="0.02" armature="0.01"/>
-          <geom name="link2_geom" type="cylinder" size="0.030000 0.160500" pos="-0.132000 0.000000 -0.031600" quat="0.707107 0.000000 0.707107 0.000000" material="seeed_yellow" contype="0" conaffinity="0"/>
+          <geom name="link2_geom" type="cylinder" size="0.030000 0.160500" pos="-0.132000 0.000000 -0.031600" quat="0.707107 0.000000 0.707107 0.000000" material="seeed_yellow"/>
           <body name="link3" pos="-0.264000 0.000000 0.000000" quat="1.000000 0.000000 0.000000 0.000000">
             <inertial pos="0.121040 -0.053621 -0.031014" mass="0.835300" fullinertia="0.00046807 0.00632695 0.00648221 -0.00003456 -0.00004260 0.00000006"/>
             <joint name="joint3" type="hinge" axis="0.000000 0.000000 1.000000" range="-3.14000 0.00000" damping="0.02" armature="0.01"/>
-            <geom name="link3_geom" type="cylinder" size="0.032000 0.149000" pos="0.122000 -0.030000 -0.031000" quat="0.707107 0.000000 0.707107 0.000000" material="seeed_yellow" contype="0" conaffinity="0"/>
+            <geom name="link3_geom" type="cylinder" size="0.032000 0.149000" pos="0.122000 -0.030000 -0.031000" quat="0.707107 0.000000 0.707107 0.000000" material="seeed_yellow"/>
             <body name="link4" pos="0.242600 -0.054000 -0.001625" quat="1.000000 0.000000 0.000000 0.000000">
               <inertial pos="0.060820 -0.051171 -0.030299" mass="0.520000" fullinertia="0.00045986 0.00075258 0.00066742 0.00024219 -0.00000672 -0.00000535"/>
               <joint name="joint4" type="hinge" axis="0.000000 0.000000 1.000000" range="-1.56000 1.57000" damping="0.02" armature="0.01"/>
-              <geom name="link4_geom" type="cylinder" size="0.026000 0.062500" pos="0.048000 -0.030000 -0.030000" quat="0.707107 0.000000 0.707107 0.000000" material="silver" contype="0" conaffinity="0"/>
+              <geom name="link4_geom" type="cylinder" size="0.026000 0.062500" pos="0.048000 -0.030000 -0.030000" quat="0.707107 0.000000 0.707107 0.000000" material="silver"/>
               <body name="link5" pos="0.078308 -0.037500 -0.030000" quat="0.707105 -0.707108 0.000000 0.000000">
                 <inertial pos="-0.005028 0.000002 0.038623" mass="0.383000" fullinertia="0.00019772 0.00021737 0.00017191 -0.00000062 -0.00002426 0.00000002"/>
                 <joint name="joint5" type="hinge" axis="0.000000 0.000000 1.000000" range="-0.73000 1.57000" damping="0.02" armature="0.01"/>
-                <geom name="link5_geom" type="cylinder" size="0.038000 0.042500" pos="-0.003000 0.000000 0.035500" quat="1.000000 0.000000 0.000000 0.000000" material="silver" contype="0" conaffinity="0"/>
+                <geom name="link5_geom" type="cylinder" size="0.038000 0.042500" pos="-0.003000 0.000000 0.035500" quat="1.000000 0.000000 0.000000 0.000000" material="silver"/>
                 <body name="link6" pos="0.028008 0.000000 0.040000" quat="0.707105 -0.000000 0.707108 -0.000000">
                   <inertial pos="0.000004 -0.000101 0.025331" mass="0.366300" fullinertia="0.00015554 0.00015554 0.00013966 -0.00000000 -0.00000000 -0.00000000"/>
                   <joint name="joint6" type="hinge" axis="0.000000 0.000000 1.000000" range="-3.14000 3.14000" damping="0.02" armature="0.01"/>
-                  <geom name="link6_geom" type="cylinder" size="0.034000 0.029000" pos="0.000000 0.000000 0.024000" quat="1.000000 0.000000 0.000000 0.000000" material="matte_black" contype="0" conaffinity="0"/>
+                  <geom name="link6_geom" type="cylinder" size="0.034000 0.029000" pos="0.000000 0.000000 0.024000" quat="1.000000 0.000000 0.000000 0.000000" material="matte_black"/>
                   <body name="end_link" pos="0.000000 0.000000 0.155390" quat="0.000033 0.707108 -0.000033 0.707105">
                     <inertial pos="-0.073765 -0.000010 0.000007" mass="0.500000" fullinertia="0.00037354 0.00015830 0.00045353 -0.00000011 0.00000050 0.00000348"/>
-                    <geom name="end_link_geom" type="box" size="0.017000 0.075000 0.034500" pos="-0.090000 0.000000 0.000000" quat="1.000000 0.000000 0.000000 0.000000" material="accent_blue" contype="0" conaffinity="0"/>
+                    <geom name="end_link_geom" type="box" size="0.017000 0.075000 0.034500" pos="-0.090000 0.000000 0.000000" quat="1.000000 0.000000 0.000000 0.000000" material="accent_blue"/>
                     <body name="finger_left_link" pos="0.000000 0.000000 0.000000" quat="1.000000 0.000000 0.000000 0.000000">
                       <inertial pos="0.000000 0.000000 0.000000" mass="0.050000" fullinertia="0.00001675 0.00003930 0.00004340 0.00000000 0.00000000 0.00000000"/>
                       <joint name="finger_left" type="slide" axis="0.000000 1.000000 0.000000" range="0.00000 0.05000" damping="0.02" armature="0.01"/>
-                      <geom name="finger_left_link_geom" type="box" size="0.044500 0.025000 0.019500" pos="-0.044000 0.026000 0.000000" quat="1.000000 0.000000 0.000000 0.000000" material="matte_black" contype="0" conaffinity="0"/>
+                      <geom name="finger_left_link_geom" type="box" size="0.044500 0.025000 0.019500" pos="-0.044000 0.026000 0.000000" quat="1.000000 0.000000 0.000000 0.000000" material="matte_black"/>
                     </body>
                     <body name="finger_right_link" pos="0.000000 0.000000 0.000000" quat="1.000000 0.000000 0.000000 0.000000">
                       <inertial pos="0.000000 0.000000 0.000000" mass="0.050000" fullinertia="0.00001675 0.00003930 0.00004340 0.00000000 0.00000000 0.00000000"/>
                       <joint name="finger_right" type="slide" axis="0.000000 1.000000 0.000000" range="-0.05000 0.00000" damping="0.02" armature="0.01"/> <!-- mimic finger_left x-1.0 -->
-                      <geom name="finger_right_link_geom" type="box" size="0.044500 0.025000 0.019500" pos="-0.044000 -0.026000 0.000000" quat="1.000000 0.000000 0.000000 0.000000" material="matte_black" contype="0" conaffinity="0"/>
+                      <geom name="finger_right_link_geom" type="box" size="0.044500 0.025000 0.019500" pos="-0.044000 -0.026000 0.000000" quat="1.000000 0.000000 0.000000 0.000000" material="matte_black"/>
                     </body>
                   </body>
                 </body>
@@ -69,6 +69,22 @@
       </body>
     </body>
   </worldbody>
+
+  <contact>
+    <exclude body1="base_link" body2="link1"/>
+    <exclude body1="link1" body2="link2"/>
+    <exclude body1="link2" body2="link3"/>
+    <exclude body1="link3" body2="link4"/>
+    <exclude body1="link4" body2="link5"/>
+    <exclude body1="link5" body2="link6"/>
+    <exclude body1="link6" body2="end_link"/>
+    <exclude body1="end_link" body2="finger_left_link"/>
+    <exclude body1="end_link" body2="finger_right_link"/>
+    <exclude body1="finger_left_link" body2="finger_right_link"/>
+    <exclude body1="link2" body2="link5"/>
+    <exclude body1="link3" body2="link5"/>
+    <exclude body1="link4" body2="link6"/>
+  </contact>
 
   <!-- 执行器：六个手臂关节 + 夹爪主动指，各一个力矩执行器（力矩控制 = MIT 控制律）-->
   <actuator>
