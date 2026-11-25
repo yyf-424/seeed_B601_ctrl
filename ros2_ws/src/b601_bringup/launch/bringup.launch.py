@@ -194,12 +194,19 @@ def generate_launch_description():
         }
         if not routes:
             return []
+        route_params = {"project_config_file": project_config_file, "routes": json.dumps(routes)}
         return [
             Node(
                 package="b601_demos",
                 executable="target_arbiter",
                 output="screen",
-                parameters=[{"project_config_file": project_config_file, "routes": json.dumps(routes)}],
+                parameters=[route_params],
+            ),
+            Node(
+                package="b601_demos",
+                executable="target_bridge",
+                output="screen",
+                parameters=[route_params],
             ),
             Node(
                 package="b601_demos",

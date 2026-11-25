@@ -170,12 +170,13 @@ python3 scripts/mit_five_poses.py --score-hardware validation/results.json
 历史位置回路的复测入口见 [pos_vel 流程](validation/pos-vel.md)。
 ## MIT 目标仲裁与网页
 
-MIT bringup 启动 `b601_target_arbiter`，
+MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 根据实际加载的控制器配置识别关节组。手动工具、分段归中、仿真与真机五姿态脚本、浏览器
 和外部策略共用仲裁入口。每组同一时刻只授予一个会话，默认启动时没有来源持有控制权。
-仲裁是各 `/<控制器>/authorized_target` 的唯一正常发布者，控制器通过
-`/<控制器>/target_applied` 回报采纳的编号。旧的位置目标话题 `/<控制器>/joint_target`
-在此工作树已迁移到仲裁接口。标准位置模式仍使用自己的 `FollowJointTrajectory` 接口。
+仲裁向各组发布 `/<控制器>/authorized_target`，转发节点是 `/<控制器>/joint_target`
+的唯一正常发布者。MIT 控制器与主工作区使用同一份实现和配置。转发节点从
+`/<控制器>/state` 读取主线控制器的目标序号，在 `/<控制器>/target_applied` 回报采纳编号。
+标准位置模式仍使用自己的 `FollowJointTrajectory` 接口。
 
 ### 在 MuJoCo 中使用网页
 
@@ -245,12 +246,12 @@ ros2 topic echo /b601_target_arbiter/status --qos-durability transient_local --o
 发布带私有会话号和递增序号的 `TargetFrame`，也可用 `set_target` 取得转发编号。
 `select_source` 的状态公开编号可与 `revoke_source` 一起使用。
 
-按整机配置 `implementation.mit.target_authority_timeout_sec=0.5`，当前来源失联或仲裁链路
-断流时，控制器取当时的实测位置进入受控持位，继续使用 MIT PD、限位与设备安全机制。
+按 `tools.target_arbitration.authority_timeout_sec=0.5`，当前来源失联或仲裁链路断流时，
+转发节点把新鲜的实测位置作为普通目标送入 MIT 控制器。控制器按主线的目标斜坡和刚度策略执行。
 恢复发送前需重新申请，先前会话的目标即使迟到也会被拒绝。
 完成任务后主动释放时，控制器继续执行已接受的目标。关闭还持有控制权的网页会触发断流持位。
-运动状态可通过各控制器的
-`target_holding` 和 `target_applied` 读取。
+转发节点通过各组的 `target_holding` 和 `target_applied` 报告状态。断流持位依赖转发进程、
+ROS 通信和新鲜反馈。使用主线自带的刚度切换时，持位目标仍可按正常策略进入低刚度。
 
 ### 复测
 

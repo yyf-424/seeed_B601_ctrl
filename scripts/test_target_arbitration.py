@@ -97,7 +97,10 @@ def test(node, launch_log):
     for controller in (ARM, GRIPPER):
         pubs = node.get_publishers_info_by_topic(f"/{controller}/authorized_target")
         assert [info.node_name for info in pubs] == ["b601_target_arbiter"], pubs
-        assert node.count_subscribers(f"/{controller}/joint_target") == 0
+        inputs = node.get_publishers_info_by_topic(f"/{controller}/joint_target")
+        assert [info.node_name for info in inputs] == ["b601_target_bridge"], inputs
+        subscribers = node.get_subscriptions_info_by_topic(f"/{controller}/joint_target")
+        assert [info.node_name for info in subscribers] == [controller], subscribers
         assert node.controller(controller)["source"] is None
     print("PASS idle startup and one publisher per controller")
 
@@ -228,7 +231,7 @@ def test(node, launch_log):
         os.kill(arbiter_pid, signal.SIGSTOP)
         try:
             node.until(lambda: node.watchdog_hold and node.holds.get(GRIPPER),
-                       "both controllers must detect missing arbiter independently",
+                       "the bridge must forward a measured hold to both controllers",
                        timeout=2)
             arbiter_hold_time = time.monotonic() - started
             assert 0.35 <= arbiter_hold_time <= 0.8, arbiter_hold_time

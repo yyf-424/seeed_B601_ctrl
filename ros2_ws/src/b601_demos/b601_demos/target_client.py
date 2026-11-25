@@ -23,7 +23,7 @@ class TargetClient:
         self.lock = Lock()
 
         if auto_renew:
-            timeout = load_project_config()["implementation"]["mit"]["target_authority_timeout_sec"]
+            timeout = load_project_config()["tools"]["target_arbitration"]["authority_timeout_sec"]
             self.heartbeats = node.create_publisher(String, f"{ARBITER}/source_heartbeat", 10)
             self.heartbeat_timer = node.create_timer(
                 timeout / 5, self.heartbeat, callback_group=callback_group,

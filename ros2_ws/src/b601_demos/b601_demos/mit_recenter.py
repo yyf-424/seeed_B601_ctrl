@@ -141,8 +141,9 @@ class MitRecenter(Node):
                 raise RuntimeError(f"安全状态不允许继续归中：{status}")
             if self.latest is None or monotonic() - self.latest[0] >= self.feedback_timeout:
                 raise RuntimeError("未收到新鲜的六轴位置反馈")
-            if not self.count_subscribers("/b601_mit_arm/authorized_target"):
-                raise RuntimeError("MIT 位置目标话题没有控制器订阅")
+            if not (self.count_subscribers("/b601_mit_arm/authorized_target")
+                    and self.count_subscribers("/b601_mit_arm/joint_target")):
+                raise RuntimeError("MIT 位置目标转发节点或控制器未就绪")
             return self.latest
 
     def at_home(self, positions, axes):

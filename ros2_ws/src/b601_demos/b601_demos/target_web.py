@@ -29,7 +29,7 @@ class TargetWeb(Node):
         config_path = self.declare_parameter("project_config_file", "").value
         config = load_project_config(config_path or None)
         self.heartbeat_period_ms = round(
-            config["implementation"]["mit"]["target_authority_timeout_sec"] * 200)
+            config["tools"]["target_arbitration"]["authority_timeout_sec"] * 200)
         self.limits = {joint: {"min": bounds["min_pos"], "max": bounds["max_pos"]}
                        for joint, bounds in config["joints"].items()}
         self.status = None

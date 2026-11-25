@@ -1,7 +1,6 @@
 #include "b601_mit_controller/b601_mit_controller.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -17,14 +16,6 @@ using Vec3 = std::array<double, 3>;
 using Mat3 = std::array<double, 9>;   // 行主序
 
 constexpr double kGravity = b601_config::mit::gravity_m_s2;
-constexpr auto kAuthorityTimeoutNs = static_cast<int64_t>(
-  b601_config::mit::target_authority_timeout_sec * 1e9);
-
-int64_t steady_ns()
-{
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-    std::chrono::steady_clock::now().time_since_epoch()).count();
-}
 
 Vec3 mul(const Mat3 & R, const Vec3 & v)
 {
@@ -584,13 +575,9 @@ controller_interface::CallbackReturn B601MitController::on_configure(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
   auto node = get_node();
-  target_sub_ = node->create_subscription<b601_target_interfaces::msg::AuthorizedTarget>(
-    "~/authorized_target", rclcpp::QoS(b601_config::mit::topic_depth).reliable(),
+  target_sub_ = node->create_subscription<sensor_msgs::msg::JointState>(
+    "~/joint_target", rclcpp::SystemDefaultsQoS(),
     std::bind(&B601MitController::target_callback, this, std::placeholders::_1));
-  target_applied_pub_ = node->create_publisher<std_msgs::msg::UInt64>("~/target_applied", 10);
-  target_holding_pub_ = node->create_publisher<std_msgs::msg::Bool>("~/target_holding", 10);
-  target_epoch_request_pub_ = node->create_publisher<std_msgs::msg::UInt64>(
-    "~/target_epoch_requested", 10);
   task_sub_ = node->create_subscription<std_msgs::msg::Float64MultiArray>(
     "~/task_torque", b601_config::mit::topic_depth,
     std::bind(&B601MitController::task_torque_callback, this, std::placeholders::_1));
@@ -613,7 +600,7 @@ controller_interface::CallbackReturn B601MitController::on_configure(
   t_in_band_ = 0.0;
   t_track_ = 0.0;
   seq_seen_ = 0;
-  RCLCPP_INFO(node->get_logger(), "已配置：等待仲裁目标 %s/authorized_target", node->get_name());
+  RCLCPP_INFO(node->get_logger(), "已配置：等待目标话题 %s/joint_target", node->get_name());
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -681,15 +668,6 @@ controller_interface::CallbackReturn B601MitController::on_activate(
     init.q = q_cmd_;
     init.seq = target_seq_.load();
     seq_seen_ = init.seq;
-    dispatch_seen_ = 0;
-    arbiter_id_ = 0;
-    blocked_arbiter_id_ = 0;
-    hold_revision_ = 0;
-    arbiter_heartbeat_ns_ = 0;
-    hold_generation_ = 0;
-    hold_seen_ = 0;
-    holding_after_loss_ = false;
-    arbiter_timed_out_ = false;
     target_buffer_.writeFromNonRT(init);
   }
   task_buffer_.writeFromNonRT({});
@@ -714,53 +692,11 @@ controller_interface::CallbackReturn B601MitController::on_deactivate(
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-void B601MitController::target_callback(
-  const b601_target_interfaces::msg::AuthorizedTarget::SharedPtr frame)
+void B601MitController::target_callback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
-  using Frame = b601_target_interfaces::msg::AuthorizedTarget;
-  if (!accepting_commands_.load() || frame->arbiter_id == 0) {
-    return;
-  }
-  const auto now = steady_ns();
-  const auto previous = arbiter_heartbeat_ns_.load();
-  const auto arbiter = arbiter_id_.load();
-  const bool heartbeat = frame->kind == Frame::HEARTBEAT;
-  if (previous != 0 && now - previous >= kAuthorityTimeoutNs && arbiter != 0) {
-    blocked_arbiter_id_ = arbiter;
-  }
-  if (arbiter != frame->arbiter_id) {
-    if (!heartbeat) {
-      return;
-    }
-    if (arbiter != 0) {
-      ++hold_generation_;
-    }
-    hold_revision_ = frame->hold_revision;
-    arbiter_id_ = frame->arbiter_id;
-  } else {
-    const auto revision = hold_revision_.load();
-    if (frame->hold_revision < revision) {
-      return;
-    }
-    if (frame->hold_revision > revision) {
-      hold_revision_ = frame->hold_revision;
-      ++hold_generation_;
-    }
-  }
-  if (heartbeat) {
-    arbiter_heartbeat_ns_ = now;
-    return;
-  }
-  if (frame->kind != Frame::TARGET || frame->dispatch_id == 0 ||
-    blocked_arbiter_id_.load() == frame->arbiter_id)
-  {
-    return;
-  }
-
-  const auto * msg = &frame->target;
   const auto stamp_ns = get_node()->now().nanoseconds();
   const auto n = joint_names_.size();
-  if (msg->name.size() != msg->position.size() ||
+  if (!accepting_commands_.load() || msg->name.size() != msg->position.size() ||
     (!msg->velocity.empty() && msg->velocity.size() != msg->name.size()))
   {
     return;
@@ -787,8 +723,6 @@ void B601MitController::target_callback(
   }
   cmd.stamp_ns = stamp_ns;
   cmd.seq = ++target_seq_;
-  cmd.dispatch_id = frame->dispatch_id;
-  cmd.hold_generation = hold_generation_.load();
   target_buffer_.writeFromNonRT(cmd);
   target_received_ = true;
 }
@@ -884,34 +818,9 @@ controller_interface::return_type B601MitController::update(
       return stamp_ns >= activation_ns && stamp_ns <= now_ns &&
              (now_ns - stamp_ns) * 1e-9 < timeout_sec;
     };
-  const auto arbiter = arbiter_id_.load();
-  const auto heartbeat = arbiter_heartbeat_ns_.load();
-  const bool timed_out = heartbeat != 0 && steady_ns() - heartbeat >= kAuthorityTimeoutNs;
-  if (timed_out && arbiter != 0 && arbiter == arbiter_id_.load()) {
-    blocked_arbiter_id_ = arbiter;
-  }
-  const bool authority_blocked = arbiter != 0 && blocked_arbiter_id_.load() == arbiter;
-  const auto hold_generation = hold_generation_.load();
-  const bool entered_loss = hold_generation != hold_seen_ ||
-    (authority_blocked && !arbiter_timed_out_);
-  if (entered_loss && !holding_after_loss_) {
-    // Use measured positions once, then let PD and damping hold those positions.
-    std::copy(q_.begin(), q_.end(), q_cmd_.begin());
-    std::copy(q_.begin(), q_.end(), q_up_.begin());
-    std::copy(q_.begin(), q_.end(), q_ref_.begin());
-    holding_after_loss_ = true;
-    done_ = false;
-    t_in_band_ = 0.0;
-    t_track_ = 0.0;
-    dispatch_seen_ = 0;
-    RCLCPP_WARN(get_node()->get_logger(), "目标来源失效，使用实时反馈持位");
-  }
-  hold_seen_ = hold_generation;
-  arbiter_timed_out_ = authority_blocked;
   const auto * cmd = target_buffer_.readFromRT();
-  const bool valid_target = cmd && have_target_ && target_received_.load() && !timed_out && !authority_blocked &&
-    cmd->hold_generation == hold_generation && cmd->q.size() == n &&
-    cmd->stamp_ns >= activation_ns && cmd->stamp_ns <= now_ns;
+  const bool valid_target = cmd && have_target_ && target_received_.load() &&
+    cmd->q.size() == n && cmd->stamp_ns >= activation_ns && cmd->stamp_ns <= now_ns;
   const bool velocity_fresh = valid_target && is_fresh(cmd->stamp_ns, target_velocity_timeout_sec_);
   const bool moving_reference = velocity_fresh &&
     std::any_of(cmd->velocity.begin(), cmd->velocity.end(), [](double v) {return v != 0.0;});
@@ -920,8 +829,7 @@ controller_interface::return_type B601MitController::update(
     is_fresh(task->stamp_ns, task_torque_timeout_sec_);
   if (valid_target && cmd->seq != seq_seen_)
   {
-    bool changed = holding_after_loss_ || (done_ && moving_reference);
-    holding_after_loss_ = false;
+    bool changed = done_ && moving_reference;
     for (std::size_t i = 0; i < n; ++i) {
       if (cmd->q[i] != q_cmd_[i]) {
         changed = true;
@@ -954,7 +862,6 @@ controller_interface::return_type B601MitController::update(
         settle_band_.front(), std::abs(q_cmd_.front() - q_ref_.front()));
     }
     seq_seen_ = cmd->seq;
-    dispatch_seen_ = cmd->dispatch_id;
   }
 
   // ================== ② 目标斜坡（只决定"怎么走"） ==================
@@ -976,7 +883,7 @@ controller_interface::return_type B601MitController::update(
   }
 
   // ================== ③ 整组到位判定（对着 q_cmd，不用斜坡数据） ==================
-  if (!done_ && !holding_after_loss_ && (!low_after_first_target_ || valid_target)) {
+  if (!done_ && (!low_after_first_target_ || valid_target)) {
     bool in_band = !moving_reference;
     for (std::size_t i = 0; i < n; ++i) {
       // 允许带内小幅震荡：只看"在不在带里"，不判速度
@@ -1076,17 +983,6 @@ controller_interface::return_type B601MitController::update(
     st.data[8 * n + 2] = t_in_band_;
     st.data[8 * n + 3] = t_track_;
     state_pub_->publish(st);
-    std_msgs::msg::UInt64 applied;
-    applied.data = dispatch_seen_;
-    target_applied_pub_->publish(applied);
-    std_msgs::msg::Bool holding;
-    holding.data = holding_after_loss_;
-    target_holding_pub_->publish(holding);
-    if (authority_blocked) {
-      std_msgs::msg::UInt64 request;
-      request.data = arbiter;
-      target_epoch_request_pub_->publish(request);
-    }
   }
   if (debug_counter_ % b601_config::mit::diagnostic_divider == 0 && ff_pub_) {
     std_msgs::msg::Float64MultiArray ff;

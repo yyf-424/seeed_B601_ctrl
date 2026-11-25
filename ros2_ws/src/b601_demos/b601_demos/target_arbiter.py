@@ -52,7 +52,7 @@ class TargetArbiter(Node):
         self.feedback_stamp = None
         self.feedback_ready = dict.fromkeys(self.routes, False)
         self.feedback_timeout_ns = project["safety"]["feedback_timeout_sec"] * 1e9
-        authority_timeout = project["implementation"]["mit"]["target_authority_timeout_sec"]
+        authority_timeout = project["tools"]["target_arbitration"]["authority_timeout_sec"]
         self.authority_timeout_ns = int(authority_timeout * 1e9)
         self.holding = {}
         self.epochs = {name: self.new_epoch() for name in self.routes}
@@ -311,7 +311,7 @@ class TargetArbiter(Node):
                 if name != controller:
                     self.request_hold(name)
         self.event("controller_timeout", session.source if session else "",
-                   f"{controller} disconnected; previous authority revoked")
+                   f"{controller} target bridge lost arbiter heartbeat; previous authority revoked")
 
     def on_holding(self, controller, message):
         if self.holding.get(controller) != message.data:
