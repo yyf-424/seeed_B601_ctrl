@@ -131,7 +131,7 @@ rm "$model"
 
 位置回路使用 `./scripts/dm_park.sh` 核对归中并失能，`--keep-enabled` 用于只归中核对。
 正常停机在实测归中通过后依次停用活动控制器、确认硬件进入 `inactive`、退出 `controller_manager`，最后回读电机状态。
-位置回路和关节端 MIT 都使用 `recenter.joints` 的校准停放位。MIT 归中使用逐轴容差与整机关节限位的交集。J3 容差为 ±0.03 rad，J4 为 ±0.02 rad，其余四轴为 ±0.01 rad。
+位置回路和关节端 MIT 都使用 `recenter.joints` 的校准停放位。MIT 归中使用逐轴容差与整机关节限位的交集。J2 的实际归中范围为 −0.02 至 0 rad，J3 容差为 ±0.03 rad，J4 为 ±0.02 rad，J1、J5 和 J6 为 ±0.01 rad。
 
 ### 电机侧 MIT 归中
 
