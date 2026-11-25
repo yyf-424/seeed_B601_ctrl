@@ -143,14 +143,18 @@ def main() -> int:
     if "low_vel_max" in params:
         low = replace(limits, vel_max=params["low_vel_max"], stop_at_velocity_limit=frozenset(limits.names))
         finger = limits.names.index("finger_left")
-        speed = (limits.vel_max[finger] + low.vel_max[finger]) / 2
+        normal_speed = limits.vel_max[finger]
+        low_speed = low.vel_max[finger]
         profile_cases += [
             ("低档速度到达 10 rad/s 急停", low, startup, dict(still, joint1=low.vel_max[0]), True),
             ("低档速度在扩大范围内", low, startup,
              dict(still, joint1=(low.vel_max[0] + limits.vel_max[0]) / 2), False),
-            ("夹爪常规速度仍判急停", limits, startup, dict(still, finger_left=speed, finger_right=-speed), True),
-            ("夹爪低档允许扩大速度", low, startup, dict(still, finger_left=speed, finger_right=-speed), False),
-            ("夹爪低档速度到达上限急停", low, startup, dict(still, finger_left=low.vel_max[finger]), True),
+            ("夹爪常规速度等于上限", limits, startup, dict(still, finger_left=normal_speed), False),
+            ("夹爪常规速度超过上限急停", limits, startup,
+             dict(still, finger_left=math.nextafter(normal_speed, math.inf)), True),
+            ("夹爪低档速度低于上限", low, startup,
+             dict(still, finger_left=math.nextafter(low_speed, 0.0)), False),
+            ("夹爪低档速度到达上限急停", low, startup, dict(still, finger_left=low_speed), True),
         ]
         for label, profile in [("常规档", limits), ("低档", low)]:
             for joint, lower, upper in zip(limits.names, limits.pos_min, limits.pos_max):

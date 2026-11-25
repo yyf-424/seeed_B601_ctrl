@@ -5,7 +5,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from xml.etree.ElementTree import ParseError
 
 import rclpy
@@ -48,10 +48,17 @@ class TargetWeb(Node):
         self.feedback_at = None
         self.stiffness_sample = None
         self.robot_model = None
+        self.preview_model = None
+        self.model_revision = 0
         self.vendor_model = find_vendor_model()
-        self.create_subscription(
-            String, "/robot_description", self.on_description,
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        description_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String, "/robot_description", self.on_description, description_qos)
+        self.preview_pose = None
+        if self.declare_parameter("preview_model", False).value:
+            self.preview_pose = {joint: bounds["startup"] for joint, bounds in config["joints"].items()}
+            self.create_subscription(
+                String, "/b601_preview/robot_description",
+                lambda message: self.on_description(message, preview=True), description_qos)
         self.create_subscription(
             String, f"{ARBITER}/status", self.on_status,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -81,11 +88,19 @@ class TargetWeb(Node):
         flag = dict(zip(joint.interface_names, joint.values)).get("low_stiffness") if joint else None
         self.stiffness_sample = (flag, time.monotonic()) if flag in (0.0, 1.0) else None
 
-    def on_description(self, message):
+    def on_description(self, message, *, preview=False):
+        mesh_prefix = "/robot-mesh/preview" if preview else "/robot-mesh"
         try:
-            self.robot_model = build_model(message.data, self.vendor_model)
+            model, assets = build_model(message.data, self.vendor_model, mesh_prefix)
         except (KeyError, ValueError, ParseError) as error:
             self.get_logger().warning(f"网页机械臂模型读取失败：{error}")
+            return
+        self.model_revision += 1
+        model["revision"] = self.model_revision
+        if preview:
+            self.preview_model = (model, assets)
+        else:
+            self.robot_model = (model, assets)
 
     def snapshot(self):
         feedback_at = self.feedback_at
@@ -96,6 +111,9 @@ class TargetWeb(Node):
         backend = self.backend.snapshot(
             fresh and bool(status and status["feedback_ready"]),
             fresh and bool(status and status.get("disable_ready")))
+        preview = self.preview_model
+        show_preview = preview is not None and backend["phase"] == "idle"
+        model = preview if show_preview else self.robot_model or preview
         sample = self.stiffness_sample
         stiffness = None
         if (backend["phase"] == "connected" and self.backend.active and sample is not None
@@ -106,7 +124,10 @@ class TargetWeb(Node):
             "backend": backend,
             "stiffness": stiffness,
             "recenter_ready": self.recenter.service_is_ready(),
-            "feedback": self.feedback,
+            "feedback": {} if show_preview else self.feedback,
+            "preview_enabled": self.preview_pose is not None,
+            "preview_pose": self.preview_pose if show_preview else None,
+            "model_revision": model[0]["revision"] if model else None,
             "limits": self.limits,
             "heartbeat_period_ms": self.heartbeat_period_ms,
             "feedback_age_ms": round(age * 1000) if age is not None else None,
@@ -201,18 +222,24 @@ class TargetHandler(BaseHTTPRequestHandler):
     }
 
     def do_GET(self):
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        path = url.path
         if path == "/api/state":
             self.send_json(HTTPStatus.OK, self.server.bridge.snapshot())
             return
-        robot = self.server.bridge.robot_model
+        bridge = self.server.bridge
+        models = (bridge.robot_model, bridge.preview_model)
         if path == "/api/model":
+            revision = parse_qs(url.query).get("revision", [""])[0]
+            robot = next((model for model in models if model and
+                          (not revision or str(model[0]["revision"]) == revision)), None)
             if robot is None:
                 self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"message": "等待机械臂模型"})
             else:
                 self.send_json(HTTPStatus.OK, robot[0])
             return
-        if robot is not None and (mesh := robot[1].get(path)) is not None:
+        mesh = next((model[1][path] for model in models if model and path in model[1]), None)
+        if mesh is not None:
             try:
                 data = mesh.read_bytes()
             except OSError:

@@ -44,6 +44,7 @@ function refreshRobotView() {
   robotView.update({
     feedback: snapshot.feedback, target, label, online: !!snapshot.status,
     armJoints: state?.joints, limits: snapshot.limits,
+    previewPose: snapshot.preview_pose, modelRevision: snapshot.model_revision,
   });
 }
 

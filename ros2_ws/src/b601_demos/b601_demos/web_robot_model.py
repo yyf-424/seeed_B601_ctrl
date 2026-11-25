@@ -49,19 +49,19 @@ def visual_color(visual, colors):
     return colors.get(material.get("name"), default)
 
 
-def mesh_geometry(geometry, vendor, assets):
+def mesh_geometry(geometry, vendor, assets, mesh_prefix):
     uri = geometry.attrib["filename"]
     mesh_root = (vendor / "meshes").resolve()
     path = (vendor / uri.removeprefix(MESH_URI)).resolve()
     if not (uri.startswith(MESH_URI) and path.is_relative_to(mesh_root)
             and path.suffix.lower() == ".stl" and path.is_file()):
         raise ValueError("Unavailable B601 visual mesh")
-    key = f"/robot-mesh/{len(assets)}-{path.stat().st_mtime_ns}.stl"
+    key = f"{mesh_prefix}/{len(assets)}-{path.stat().st_mtime_ns}.stl"
     assets[key] = path
     return {"kind": "mesh", "url": key, "scale": vector(geometry.get("scale", "1 1 1"))}
 
 
-def link_visuals(robot, vendor=None, assets=None):
+def link_visuals(robot, vendor=None, assets=None, mesh_prefix="/robot-mesh"):
     colors = {material.attrib["name"]: vector(color.attrib["rgba"])[:3]
               for material in robot.findall("material")
               if (color := material.find("color")) is not None}
@@ -73,7 +73,7 @@ def link_visuals(robot, vendor=None, assets=None):
             if geometry is None:
                 continue
             if geometry.tag == "mesh" and vendor is not None:
-                shape = mesh_geometry(geometry, vendor, assets)
+                shape = mesh_geometry(geometry, vendor, assets, mesh_prefix)
             elif geometry.tag == "box":
                 shape = {"kind": "box", "size": vector(geometry.attrib["size"])}
             elif geometry.tag in ("sphere", "cylinder"):
@@ -104,7 +104,7 @@ def joint_model(joint):
     return values
 
 
-def build_model(description, vendor):
+def build_model(description, vendor, mesh_prefix="/robot-mesh"):
     robot = ET.fromstring(description)
     visuals = link_visuals(robot)
     assets = {}
@@ -112,7 +112,7 @@ def build_model(description, vendor):
     if vendor is not None:
         try:
             vendor_robot = ET.parse(vendor / "urdf/ReBot_Arm_DM.urdf").getroot()
-            vendor_visuals = link_visuals(vendor_robot, vendor, assets)
+            vendor_visuals = link_visuals(vendor_robot, vendor, assets, mesh_prefix)
             if not all(vendor_visuals.get(link) for link, parts in visuals.items() if parts):
                 raise ValueError("Incomplete B601 visual model")
             visuals = {name: vendor_visuals.get(name, parts) for name, parts in visuals.items()}

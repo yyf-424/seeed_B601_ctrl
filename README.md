@@ -113,7 +113,9 @@ ros2 topic echo /b601_safety/status --qos-durability transient_local
 
 ### 安全档位与只读检查
 
-驱动激活和两档急停共用 `safety.angle` 的位置边界，各端从实测端点向外扩展全行程的 5%。夹爪从动指的边界由主动指镜像。六轴低档增益到位并跟随实测位置时，急停速度为臂轴 `10 rad/s`、夹爪 `0.10 m/s`，其余时间采用常规档速度。`/b601_safety/status` 的 `limit_profile` 显示当前速度档。主动指令按 `joints` 中的保守位置限位执行。
+驱动激活和两档急停共用 `safety.angle` 的位置边界，各端从实测端点向外扩展全行程的 5%。夹爪从动指的边界由主动指镜像。手臂的实测超速急停阈值为常规档 `6 rad/s`、低刚度档 `10 rad/s`。两档的夹爪急停阈值由 `safety.velocity.gripper_estop_m_s` 指定，主动指和从动指均为 `0.25 m/s`，速度警告从 `0.20 m/s` 开始。常规档超过急停阈值触发，低刚度档达到阈值即触发。夹爪的命令速度上限为 `0.05 m/s`。`/b601_safety/status` 的 `limit_profile` 显示当前速度档。
+
+既有回读记录的 4310 `VMAX` 为 `30 rad/s`，按夹爪比例 `0.01 m/rad` 换算，反馈满量程约为 `0.30 m/s`。
 
 以下命令只读取真机反馈。使能和运动需要现场确认。
 
@@ -170,6 +172,8 @@ python3 scripts/mit_five_poses.py --score-hardware validation/results.json
 历史位置回路的复测入口见 [pos_vel 流程](validation/pos-vel.md)。
 ## MIT 目标仲裁与网页
 
+上层架构、版本验收范围及复测结果见 [v0.4.0 上层框架验收](validation/target-web.md)。
+
 MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 根据实际加载的控制器配置建立内部路由。手动工具、分段归中、仿真与真机五姿态脚本、浏览器
 和外部策略共用整机仲裁入口。同一时刻只授予一个整机会话，默认启动时没有来源持有控制权。
@@ -182,11 +186,14 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 
 ```bash
 ./scripts/build.sh
-source ros2_ws/install/setup.bash
-ros2 run b601_demos target_web
+./scripts/start_target_web.sh
 ```
 
-打开 [本地目标控制台](http://127.0.0.1:8765/)，在「运行后端」选择模式，再点击「连接」。
+打开 [本地目标控制台](http://127.0.0.1:8765/)，页面启动后即可查看默认姿态的三维模型。脚本只启动网页和预览模型发布器，URDF 发布到 `/b601_preview/robot_description`，预览姿态来自项目配置。需要另一个端口时运行 `./scripts/start_target_web.sh port:=8766`。
+
+重复运行会显示已有控制台的地址并返回终端。要退出控制台，在最初启动它的终端按 `Ctrl+C`。端口被其他服务占用时，启动命令会提示选择空闲端口。
+
+需要关节反馈时，在「运行后端」选择模式，再点击「连接」。网页收到后端的模型和关节反馈后切换到实测姿态。页面连接实机后，收工先按下文完成归中和 Disable，再结束启动脚本。
 
 - **Mock** 是网页的空操作，页面保持空闲。
 - **MuJoCo** 启动 MIT 控制器，默认关闭重力和物理碰撞。需要模拟重力时，连接前在
@@ -302,7 +309,7 @@ source ros2_ws/install/setup.bash
 python3 scripts/test_target_arbitration.py
 ```
 
-这个脚本会自动启动和关闭隔离 MuJoCo，验证唯一输出、并发争用、手臂与夹爪独立授权、
-单关节和多关节下发、实际采纳回执、旧会话拒绝、策略流、归中交接、撤销、来源失联持位以及仲裁进程断流后的重新接管。
+这个脚本会自动启动和关闭隔离 MuJoCo，验证转发节点的唯一输出、整机独占会话、七关节目标、
+单关节和多关节编辑后的完整下发、控制器采纳回执、旧会话拒绝、策略流、归中交接、撤销、来源失联持位以及仲裁进程断流后的重新接管。
 日志存于 `.verify/target-arbitration-227/`。完成网页预览后再运行自动验收，
 或用 `B601_TEST_ROS_DOMAIN_ID` 选另一空闲 ROS 域。

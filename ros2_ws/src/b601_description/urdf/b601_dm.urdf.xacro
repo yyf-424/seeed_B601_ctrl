@@ -18,6 +18,7 @@
 <robot name="b601_dm" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <xacro:arg name="hardware" default="mock"/>
+  <xacro:arg name="include_ros2_control" default="true"/>
   <xacro:arg name="initial_positions_file"
              default="$(find b601_description)/config/initial_positions.yaml"/>
   <!-- 全项目唯一参数真值。所有关节限位、电机参数、控制频率都从这里取，
@@ -49,9 +50,10 @@
   <xacro:b601_links project_config_file="$(arg project_config_file)"/>
 
   <!-- ② ros2_control 硬件接口（把 hardware 参数透传下去） -->
-  <xacro:property name="dm_position_limits"
-    value="${xacro.load_yaml('../config/safety_position_limits.yaml') if '$(arg hardware)' == 'dm' else dict()}"/>
-  <xacro:b601_ros2_control
+  <xacro:if value="$(arg include_ros2_control)">
+    <xacro:property name="dm_position_limits"
+      value="${xacro.load_yaml('../config/safety_position_limits.yaml') if '$(arg hardware)' == 'dm' else dict()}"/>
+    <xacro:b601_ros2_control
       name="b601"
       hardware="$(arg hardware)"
       initial_positions_file="$(arg initial_positions_file)"
@@ -62,5 +64,6 @@
       dm_command_mode="$(arg dm_command_mode)"
       dm_log_csv="$(arg dm_log_csv)"
       mujoco_model="$(arg mujoco_model)"/>
+  </xacro:if>
 
 </robot>

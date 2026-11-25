@@ -4,11 +4,12 @@ package_name = "b601_demos"
 
 setup(
     name=package_name,
-    version="0.3.0",
+    version="0.4.0",
     packages=find_packages(exclude=["test"]),
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
+        ("share/" + package_name + "/launch", ["launch/target_web.launch.py"]),
         ("share/" + package_name + "/web", [
             "web/index.html", "web/style.css", "web/app.js", "web/robot-view.js", "web/tcp-ik.js",
         ]),

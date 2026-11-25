@@ -94,6 +94,10 @@ def validate(cfg: dict) -> list[str]:
     vel = safety.get("velocity", {})
     if not 0.0 <= vel.get("warn_ratio", 0) < 1.0:
         errors.append("safety.velocity.warn_ratio 必须在 [0,1) 内")
+    if "gripper_estop_m_s" in vel:
+        speed = vel["gripper_estop_m_s"]
+        if type(speed) not in (int, float) or not math.isfinite(speed) or speed <= 0:
+            errors.append("safety.velocity.gripper_estop_m_s 必须为有限正数")
     angle = safety.get("angle", {})
     if angle.get("warn_margin", 0) <= 0:
         errors.append("safety.angle.warn_margin 必须 > 0")
@@ -323,12 +327,16 @@ def render_safety_params(cfg: dict) -> str:
     default_margin = float(angle["warn_margin"])
     active = cfg["robot"]["gripper_joint"]
     mimic = cfg["robot"]["mimic_joint"]
+    gripper_speed = safety["velocity"].get("gripper_estop_m_s")
+    velocities = {name: float(joints[name]["max_velocity"]) for name in names}
+    if gripper_speed is not None:
+        velocities[active] = velocities[mimic] = float(gripper_speed)
     bounds = safety_position_limits(cfg)
     params: dict = {
         "joint_names": names,
         "pos_min": [bounds[n][0] for n in names],
         "pos_max": [bounds[n][1] for n in names],
-        "vel_max": [float(joints[n]["max_velocity"]) for n in names],
+        "vel_max": list(velocities.values()),
         "startup_pose": [float(joints[n]["startup"]) for n in names],
         # 逐关节的软警告配置（夹爪关掉"接近限位/离开启动位形"，否则开合会一直挂警告）
         "warn_pos_margin": [float(joints[n].get("warn_pos_margin", default_margin))
@@ -359,8 +367,9 @@ def render_safety_params(cfg: dict) -> str:
     }
     if low := safety.get("low_stiffness"):
         arm_speed = float(low["max_velocity"])
-        gripper_speed = arm_speed * abs(float(joints[active]["motor"]["scale"]))
-        params["low_vel_max"] = [gripper_speed if n in (active, mimic) else arm_speed for n in names]
+        low_gripper_speed = (float(gripper_speed) if gripper_speed is not None
+                             else arm_speed * abs(float(joints[active]["motor"]["scale"])))
+        params["low_vel_max"] = [low_gripper_speed if n in (active, mimic) else arm_speed for n in names]
     data = {safety.get("node_name", "b601_safety_monitor"): {"ros__parameters": params}}
     head = (
         GENERATED_NOTE

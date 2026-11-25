@@ -80,6 +80,7 @@ export function createRobotView(section, onTcpDraft) {
   let actualLayer;
   let targetLayer;
   let ikLayer;
+  let displayedRevision;
   let latest = { feedback: {}, target: {}, label: "", online: false };
   let loading = false;
   let nextAttempt = 0;
@@ -121,6 +122,10 @@ export function createRobotView(section, onTcpDraft) {
   const fill = new THREE.DirectionalLight(0x9cdbff, 0.9);
   fill.position.set(-1.5, 1.6, 1.0);
   scene.add(key, fill);
+  const ghost = new THREE.MeshBasicMaterial({
+    color: "#54def8", transparent: true, opacity: 0.28, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+  });
 
   function draw() {
     if (requestedFrame) return;
@@ -136,7 +141,9 @@ export function createRobotView(section, onTcpDraft) {
         renderer.setSize(clientWidth, clientHeight, false);
       }
       renderer.render(scene, camera);
-      if (actualLayer) actualTip.textContent = actualLayer.root.visible ? actualLayer.tipText() : "—";
+      if (actualLayer) {
+        actualTip.textContent = actualLayer.root.visible && !latest.previewPose ? actualLayer.tipText() : "—";
+      }
       if (targetLayer) targetTip.textContent = targetLayer.root.visible ? targetLayer.tipText() : "—";
       placeTcpHandle();
     });
@@ -155,7 +162,8 @@ export function createRobotView(section, onTcpDraft) {
   }
 
   function placeTcpHandle() {
-    const point = latest.armJoints?.length && actualLayer?.root.visible ? tcpPosition() : null;
+    const point = !latest.previewPose && latest.armJoints?.length && actualLayer?.root.visible
+      ? tcpPosition() : null;
     if (!point) {
       tcpHandle.hidden = true;
       return;
@@ -255,29 +263,36 @@ export function createRobotView(section, onTcpDraft) {
 
   function applyPose() {
     if (!actualLayer) return;
-    const { feedback, target, label, online } = latest;
+    const { feedback, target, label, online, previewPose } = latest;
     const hasFeedback = actualLayer.joints.every(({ type, name, mimic }) =>
       type === "fixed" || mimic || Number.isFinite(feedback[name]));
-    actualLayer.root.visible = hasFeedback;
-    hasTarget = hasFeedback && online && Object.keys(target).length > 0;
+    actualLayer.root.visible = hasFeedback || Boolean(previewPose);
+    hasTarget = !previewPose && hasFeedback && online && Object.keys(target).length > 0;
     targetLayer.root.visible = hasTarget && showTarget.checked;
-    if (hasFeedback) actualLayer.setPose(feedback);
+    showTarget.disabled = Boolean(previewPose);
+    if (actualLayer.root.visible) actualLayer.setPose(previewPose ?? feedback);
     if (hasTarget) targetLayer.setPose({ ...feedback, ...target });
     if (!latest.armJoints?.length && tcpSelected) {
       if (drag) finishDrag({ pointerId: drag.id });
       setTcpSelected(false);
     }
-    notice.textContent = !hasFeedback ? "等待关节反馈" : online ? assetText : "反馈中断 · 显示最后一帧";
+    notice.textContent = previewPose ? "默认姿态预览 · 等待连接后端"
+      : !hasFeedback ? "等待关节反馈" : online ? assetText : "反馈中断 · 显示最后一帧";
     targetLabel.textContent = targetLayer.root.visible ? label : "关节目标";
     draw();
   }
 
-  async function loadModel() {
+  async function loadModel(revision) {
     loading = true;
+    nextAttempt = performance.now() + 1800;
     try {
-      const response = await fetch("/api/model");
-      if (response.status === 503) return;
+      const response = await fetch(`/api/model?revision=${revision}`);
+      if (response.status === 503) {
+        notice.textContent = "等待后端发布机械臂模型";
+        return;
+      }
       if (!response.ok) throw new Error("模型接口不可用");
+      notice.textContent = "正在载入机械臂模型…";
       const model = await response.json();
       const loader = new STLLoader();
       const visualGroups = await Promise.all(Object.entries(model.links).map(async ([name, visuals]) =>
@@ -289,14 +304,24 @@ export function createRobotView(section, onTcpDraft) {
           }),
         })))],
       ));
-      const ghost = new THREE.MeshBasicMaterial({
-        color: "#54def8", transparent: true, opacity: 0.28, depthWrite: false,
-        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
-      });
-      actualLayer = new RobotLayer(model, visualGroups);
-      targetLayer = new RobotLayer(model, visualGroups, ghost);
-      ikLayer = new RobotLayer(model, Object.keys(model.links).map((name) => [name, []]));
+      const nextActualLayer = new RobotLayer(model, visualGroups);
+      const nextTargetLayer = new RobotLayer(model, visualGroups, ghost);
+      const nextIkLayer = new RobotLayer(model, Object.keys(model.links).map((name) => [name, []]));
+      if (actualLayer) {
+        scene.remove(actualLayer.root, targetLayer.root);
+        actualLayer.root.traverse((object) => {
+          if (object.isMesh) {
+            object.geometry.dispose();
+            object.material.dispose();
+          }
+        });
+      }
+      actualLayer = nextActualLayer;
+      targetLayer = nextTargetLayer;
+      ikLayer = nextIkLayer;
       scene.add(actualLayer.root, targetLayer.root);
+      displayedRevision = model.revision;
+      nextAttempt = 0;
       assetText = model.asset_source === "vendor" ? "B601 官方外观模型" : "B601 简化外观模型";
       reset.disabled = false;
       showTarget.disabled = false;
@@ -306,15 +331,17 @@ export function createRobotView(section, onTcpDraft) {
       notice.textContent = `三维模型加载失败：${error.message}`;
     } finally {
       loading = false;
-      nextAttempt = performance.now() + 1800;
     }
   }
 
   return {
     update(next) {
       latest = next;
-      if (actualLayer) applyPose();
-      else if (!loading && performance.now() >= nextAttempt) void loadModel();
+      applyPose();
+      if (next.modelRevision && next.modelRevision !== displayedRevision
+          && !loading && performance.now() >= nextAttempt) {
+        void loadModel(next.modelRevision);
+      }
     },
   };
 }

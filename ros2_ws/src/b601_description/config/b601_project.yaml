@@ -42,7 +42,7 @@ robot:
 # 关节：物理事实（URDF 限位）+ 电机映射（真机后端）+ 启动姿态
 #
 #   min_pos / max_pos     URDF limit 与 ros2_control 软限位，一改全改
-#   max_velocity          关节单位（rad/s 或 m/s），MoveIt 时间参数化与安全节点都用它
+#   max_velocity          关节单位（rad/s 或 m/s），用于命令限速和 MoveIt 时间参数化
 #   max_effort            关节单位力矩，同时作为真机 torque_limit
 #   startup               上电/启动姿态（mock 初值 + 真机"以为在哪儿" + 安全节点警告基线）
 #   motor.*               仅 hardware:=dm 生效；scale 把电机 rad 换成关节单位
@@ -546,11 +546,11 @@ recenter:
 #
 #   ESTOP 触发条件（只看这两类，别往里加别的，否则会误停）：
 #     · 位置越限：pos < min_pos 或 pos > max_pos
-#     · 速度越限：|vel| > max_velocity
+#     · 速度越限：常规档 |vel| > 急停阈值，低刚度档 |vel| ≥ 急停阈值
 #   WARNING 触发条件（不下发任何停机动作）：
 #     · 角度接近限位（距限位 < 该关节的 warn_pos_margin，默认 angle.warn_margin）
 #       —— 每个关节可在 joints 段用 warn_near_limit / warn_pos_margin 单独开关与调值
-#     · 角速度达到 velocity.warn_ratio × max_velocity
+#     · 速度达到 velocity.warn_ratio × 当前档急停阈值
 #     · 与启动姿态的偏差 > pose.warn_deviation（默认开：机械臂已离开启动位形）
 #     · /joint_states 断流（默认只警告；把 estop_on_feedback_timeout 设 true 才升级为急停）
 #
@@ -591,13 +591,14 @@ safety:
 
   velocity:
     warn_ratio: 0.80
+    gripper_estop_m_s: 0.25  # 主动指与从动指，两档共用的实测超速急停阈值
 
   pose:
     warn_on_deviation: true
     warn_deviation: 0.35
 
   low_stiffness:
-    max_velocity: 10.0  # rad/s，臂轴低档急停值及夹爪速度换算基准
+    max_velocity: 10.0  # rad/s，臂轴低档急停阈值
 
   estop:
     # ["*"] = 停掉当前所有 active 控制器；也可以显式列出（只停这些）
