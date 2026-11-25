@@ -18,7 +18,7 @@ from std_msgs.msg import String
 
 from b601_description.project_config import load_project_config
 from b601_target_interfaces.msg import TargetFrame
-from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource, SelectSource, SetTarget
+from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource, SelectSource, SetAuthority, SetTarget
 
 from .target_arbiter import ARBITER
 from .web_robot_model import build_model, find_vendor_model
@@ -47,6 +47,7 @@ class TargetWeb(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(JointState, "/joint_states", self.on_feedback, qos_profile_sensor_data)
         self.select = self.create_client(SelectSource, f"{ARBITER}/select_source")
+        self.authority = self.create_client(SetAuthority, f"{ARBITER}/set_authority")
         self.renew = self.create_client(RenewSource, f"{ARBITER}/renew_source")
         self.release = self.create_client(ReleaseSource, f"{ARBITER}/release_source")
         self.revoke = self.create_client(RevokeSource, f"{ARBITER}/revoke_source")
@@ -77,11 +78,11 @@ class TargetWeb(Node):
 
     def request(self, path, data):
         if path == "/api/select":
-            source = data.get("source", "web")
-            if source not in ("web", "web_ik"):
-                raise ValueError("请选择网页关节或网页 TCP")
-            request = SelectSource.Request(source=source, controllers=[data["controller"]])
+            request = SelectSource.Request(source="web")
             client = self.select
+        elif path == "/api/authority":
+            request = SetAuthority.Request(source=data["source"])
+            client = self.authority
         elif path == "/api/heartbeat":
             request = RenewSource.Request(session_id=data["session_id"])
             client = self.renew
@@ -89,7 +90,7 @@ class TargetWeb(Node):
             request = ReleaseSource.Request(session_id=data["session_id"])
             client = self.release
         elif path == "/api/revoke":
-            request = RevokeSource.Request(controller=data["controller"], session=data["session"])
+            request = RevokeSource.Request(session=data["session"])
             client = self.revoke
         elif path == "/api/target":
             positions = data["positions"]

@@ -171,8 +171,8 @@ python3 scripts/mit_five_poses.py --score-hardware validation/results.json
 ## MIT 目标仲裁与网页
 
 MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
-根据实际加载的控制器配置识别关节组。手动工具、分段归中、仿真与真机五姿态脚本、浏览器
-和外部策略共用仲裁入口。每组同一时刻只授予一个会话，默认启动时没有来源持有控制权。
+根据实际加载的控制器配置建立内部路由。手动工具、分段归中、仿真与真机五姿态脚本、浏览器
+和外部策略共用整机仲裁入口。同一时刻只授予一个整机会话，默认启动时没有来源持有控制权。
 仲裁向各组发布 `/<控制器>/authorized_target`，转发节点是 `/<控制器>/joint_target`
 的唯一正常发布者。MIT 控制器与主工作区使用同一份实现和配置。转发节点从
 `/<控制器>/state` 读取主线控制器的目标序号，在 `/<控制器>/target_applied` 回报采纳编号。
@@ -186,16 +186,17 @@ source ros2_ws/install/setup.bash
 python3 scripts/test_target_arbitration.py --web
 ```
 
-浏览器打开 [本地目标控制台](http://127.0.0.1:8765/)。选手臂或夹爪和输入来源，点击「指定控制权」，
-用滑块或数值框修改目标，按关节发送或批量发送。页面显示实时反馈、当前来源和控制器回执。
+浏览器打开 [本地目标控制台](http://127.0.0.1:8765/)，可以指定网页、外部策略或其他来源名。
+指定 `web` 后，可用滑块或数值框编辑同一列表中的七个关节，点击「发送七关节目标」提交。
+页面同时显示指定来源、当前会话持有者、实时反馈和整机回执。
 三维视图使用运行中的 URDF 和关节反馈。实测模型保留 B601 的外观配色，青色模型显示
 最近下发的目标或待发送预览，视图下方显示两者的末端 XYZ 坐标。拖动旋转，滚轮缩放，
 「复位视角」回到初始视角。官方 STL 来自本机 `rebotarm_ros2` 参考目录，也可用
 `B601_VENDOR_DESCRIPTION` 指定 `rebotarm_bringup` 目录。缺少这些网格时使用运行时 URDF 的简化外形。
 宽窗口并排展示模型与关节控制，窄窗口滚动关节列表时，模型固定在屏幕上方。
-在手臂视图点选 TCP，按住 Ctrl 沿当前视角平面拖动。页面按 URDF 逆解末端位置并填入关节角，
-青色模型显示待发送预览。选择「网页 TCP」并指定控制权后，点击「发送已修改目标」执行。
-可用「释放控制权」释放当前来源。若有其他客户端持有，网页会先显示受影响的组并要求确认。
+在三维视图点选 TCP，按住 Ctrl 沿当前视角平面拖动。页面按 URDF 逆解末端位置并填入同一列表，
+保留第七个关节的目标值。青色模型显示待发送预览，点击同一个「发送七关节目标」按钮执行。
+指定外部来源后由相应客户端申请和发送目标。点击「释放控制权」清除指定来源及现有会话。
 退出前释放控制权。这个入口启动本地零重力 MuJoCo 夹具，夹爪使用仿真测试增益，整机安全节点仍启用。
 服务只在本机回环地址监听。常规 MIT bringup 可通过 `use_target_web:=true` 启动同一页面。
 
@@ -203,20 +204,21 @@ python3 scripts/test_target_arbitration.py --web
 
 | 端点（前缀 `/b601_target_arbiter`） | 类型 | 用途 |
 |---|---|---|
-| `/select_source` | `b601_target_interfaces/srv/SelectSource` | 显式指定来源和关节组。任一组忙时整次申请失败，成功返回私有 `session_id` 和公开 `session` |
-| `/release_source` | `b601_target_interfaces/srv/ReleaseSource` | 持有者释放本次申请中的各组 |
-| `/revoke_source` | `b601_target_interfaces/srv/RevokeSource` | 操作者以控制器组和状态上的公开会话编号撤销会话，包括会话持有的其他组 |
+| `/set_authority` | `b601_target_interfaces/srv/SetAuthority` | 指定整机权威的来源名。切换时撤销旧会话，传空字符串清除指定并释放当前会话 |
+| `/select_source` | `b601_target_interfaces/srv/SelectSource` | 以来源名申请整机会话，成功返回私有 `session_id` 和公开 `session` |
+| `/release_source` | `b601_target_interfaces/srv/ReleaseSource` | 持有者释放整机会话，已指定的来源可以再次申请 |
+| `/revoke_source` | `b601_target_interfaces/srv/RevokeSource` | 操作者按公开会话编号撤销指定会话 |
 | `/renew_source` | `b601_target_interfaces/srv/RenewSource` | 维持现有会话，接受新目标也会续期 |
-| `/set_target` | `b601_target_interfaces/srv/SetTarget` | 单关节或多关节请求，返回仲裁结果和转发编号 |
+| `/set_target` | `b601_target_interfaces/srv/SetTarget` | 接收完整七关节目标，返回仲裁结果和转发编号 |
 | `/source_heartbeat` | `std_msgs/msg/String` | 低开销续期，`data` 为私有 `session_id` |
-| `/target` | `b601_target_interfaces/msg/TargetFrame` | 策略流式目标，按会话内序号递增发布 |
-| `/status` | `std_msgs/msg/String` | JSON，包含当前来源、公开会话号、最近转发信息及控制器采纳编号、断流持位状态 |
+| `/target` | `b601_target_interfaces/msg/TargetFrame` | 流式提交七关节目标，按会话内序号递增 |
+| `/status` | `std_msgs/msg/String` | JSON，包含指定来源、当前来源、公开会话号、最近七关节目标、整机采纳编号和掉线持位状态 |
 
-一次申请可以覆盖手臂和夹爪，单次目标可以包含这两组中的关节。位置用绝对关节坐标，手臂是
-rad，`finger_left` 是 m。关节与数值按名称配对。首次发送部分关节时用新的实测反馈补全，
-同一会话中后续请求保留未改的目标。策略可传可选速度数组。会话令牌用于命令和释放，
-状态话题仅公布独立的公开编号。ROS 域内的应用应部署为可信节点，若需隔离未经授权的参与者，
-由部署端设置 DDS/SROS2 发布与服务权限。
+未指定来源时，第一个申请成功的客户端持有整机控制权。手动指定后，只有名称匹配的客户端可以申请。
+`joint1` 到 `joint6` 的位置单位为 rad，`finger_left` 为 m。七个位置按关节名配对，也可提交七个速度。
+SDK 支持局部编辑，首次用实测反馈补齐七关节，后续保留同一会话已发送的其它目标。
+会话令牌用于命令和释放，状态话题只公布独立的公开编号。ROS 域内的应用应部署为可信节点，
+若需隔离未经授权的参与者，由部署端设置 DDS/SROS2 发布与服务权限。
 
 下面的调用可在上述 MuJoCo 预览的第二个终端运行。默认预览使用 `ROS_DOMAIN_ID=227`。
 会话在约 0.5 秒内需要持续收到心跳或新目标，建议心跳间隔 0.1 秒。CLI 调用若分开手动输入，
@@ -234,9 +236,9 @@ rclpy.init()
 node = rclpy.create_node("external_target_example")
 client = TargetClient(node, "external")
 try:
-    client.select(["b601_mit_arm"], timeout=3.0)
-    print("single:", client.set_joint("joint1", 0.04, timeout=3.0))
-    print("multi:", client.set_joints({"joint1": 0.02, "joint4": 0.03}, timeout=3.0))
+    client.select(timeout=3.0)
+    target = dict(zip(client.joints, [0.04, -0.3, -0.6, 0.03, 0.0, 0.0, 0.015]))
+    print(client.set_joints(target, timeout=3.0))
     for _ in range(60):
         rclpy.spin_once(node, timeout_sec=0.02)
 finally:

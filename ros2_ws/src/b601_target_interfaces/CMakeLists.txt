@@ -9,6 +9,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TargetFrame.msg"
   "msg/AuthorizedTarget.msg"
   "srv/SelectSource.srv"
+  "srv/SetAuthority.srv"
   "srv/ReleaseSource.srv"
   "srv/RevokeSource.srv"
   "srv/RenewSource.srv"

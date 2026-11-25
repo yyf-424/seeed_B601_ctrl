@@ -1,0 +1,5 @@
+# Exact input source name. Empty clears the designation and releases the current holder.
+string source
+---
+bool accepted
+string message

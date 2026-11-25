@@ -1,6 +1,6 @@
 """Exclusive MIT joint-target sessions and routing."""
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from math import isfinite
 from time import monotonic_ns
 from uuid import uuid4
@@ -14,7 +14,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String, UInt64
 
 from b601_target_interfaces.msg import AuthorizedTarget, TargetFrame
-from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource, SelectSource, SetTarget
+from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource, SelectSource, SetAuthority, SetTarget
 
 from b601_description.project_config import load_project_config
 
@@ -24,11 +24,10 @@ ARBITER = "/b601_target_arbiter"
 @dataclass
 class Session:
     source: str
-    controllers: tuple
+    id: str
     expires_at: int
     status_id: str
     sequence: int = 0
-    positions: dict = field(default_factory=dict)
 
 
 class TargetArbiter(Node):
@@ -39,18 +38,20 @@ class TargetArbiter(Node):
         routes = self.declare_parameter("routes", "{}").value
         self.routes = {name: tuple(joints) for name, joints in json.loads(routes).items()}
         self.limits = project["joints"]
+        robot = project["robot"]
+        self.joints = (*robot["arm_joints"], robot["gripper_joint"])
         if not self.routes:
             raise ValueError("No MIT target controller routes")
-        if any(not names or any(j not in self.limits for j in names)
+        if any(not names or any(j not in self.joints for j in names)
                for names in self.routes.values()):
             raise ValueError("Invalid MIT joint route")
         self.feedback = {}
-        self.sessions = {}
-        self.owners = {}
-        self.dispatched = {}
+        self.session = None
+        self.authority = None
+        self.dispatched = None
         self.applied = {}
         self.feedback_stamp = None
-        self.feedback_ready = dict.fromkeys(self.routes, False)
+        self.feedback_ready = False
         self.feedback_timeout_ns = project["safety"]["feedback_timeout_sec"] * 1e9
         authority_timeout = project["tools"]["target_arbitration"]["authority_timeout_sec"]
         self.authority_timeout_ns = int(authority_timeout * 1e9)
@@ -81,6 +82,7 @@ class TargetArbiter(Node):
         self.create_subscription(TargetFrame, "~/target", self.on_target, 10)
         self.create_subscription(String, "~/source_heartbeat", self.source_heartbeat, 10)
         self.create_service(SelectSource, "~/select_source", self.select_source)
+        self.create_service(SetAuthority, "~/set_authority", self.set_authority)
         self.create_service(ReleaseSource, "~/release_source", self.release_source)
         self.create_service(RevokeSource, "~/revoke_source", self.revoke_source)
         self.create_service(RenewSource, "~/renew_source", self.renew_source)
@@ -100,27 +102,31 @@ class TargetArbiter(Node):
         now = monotonic_ns()
         self.expire_sessions(now)
         source = request.source.strip()
-        controllers = tuple(dict.fromkeys(request.controllers))
-        if not source or not controllers:
-            response.message = "source and controllers are required"
-        elif unknown := set(controllers).difference(self.routes):
-            response.message = f"unknown controllers: {', '.join(sorted(unknown))}"
-        elif busy := [name for name in controllers if name in self.owners]:
-            response.message = "control held: " + ", ".join(
-                f"{name} by {self.sessions[self.owners[name]].source}" for name in busy)
+        if not source:
+            response.message = "source is required"
+        elif self.authority is not None and source != self.authority:
+            response.message = f"authority designated to {self.authority}"
+        elif self.session:
+            response.message = f"control held by {self.session.source}"
         else:
-            session_id = uuid4().hex
-            public_id = uuid4().hex
-            self.sessions[session_id] = Session(
-                source, controllers, now + self.authority_timeout_ns, public_id)
-            for name in controllers:
-                self.owners[name] = session_id
-                self.publish_heartbeat(name)
+            self.session = Session(
+                source, uuid4().hex, now + self.authority_timeout_ns, uuid4().hex)
             response.accepted = True
-            response.session_id = session_id
-            response.session = public_id
+            response.session_id = self.session.id
+            response.session = self.session.status_id
             response.message = "granted"
         self.event("select", source, response.message)
+        return response
+
+    def set_authority(self, request, response):
+        self.expire_sessions(monotonic_ns())
+        source = request.source.strip() or None
+        if self.session and source != self.session.source:
+            self.session = None
+        self.authority = source
+        response.accepted = True
+        response.message = "authority designated" if source else "authority released"
+        self.event("authority", source or "", response.message)
         return response
 
     @staticmethod
@@ -140,10 +146,7 @@ class TargetArbiter(Node):
         now = monotonic_ns()
         self.expire_sessions(now)
         self.announce_heartbeat(now)
-        available = {
-            controller: self.feedback_is_fresh(now) and all(name in self.feedback for name in joints)
-            for controller, joints in self.routes.items()
-        }
+        available = self.feedback_is_fresh(now) and all(name in self.feedback for name in self.joints)
         if available != self.feedback_ready:
             self.feedback_ready = available
             self.publish_status()
@@ -158,54 +161,45 @@ class TargetArbiter(Node):
 
     def expire_sessions(self, now):
         if now - self.last_heartbeat_ns >= self.authority_timeout_ns:
-            for session_id in list(self.sessions):
-                self.close_session(session_id)
+            self.session = None
             self.epochs = {name: self.new_epoch() for name in self.routes}
             self.announce_heartbeat(now)
             self.event("arbiter_timeout", "", "all prior sessions revoked after arbiter interruption")
             return
-        expired = [key for key, session in self.sessions.items() if session.expires_at <= now]
-        for session_id in expired:
-            session = self.close_session(session_id)
-            for controller in session.controllers:
+        if self.session and self.session.expires_at <= now:
+            session, self.session = self.session, None
+            for controller in self.routes:
                 self.request_hold(controller)
             self.event("expire", session.source, "source heartbeat timed out; hold requested")
 
-    def close_session(self, session_id):
-        session = self.sessions.pop(session_id, None)
-        if session is not None:
-            for controller in session.controllers:
-                del self.owners[controller]
-        return session
-
     def release_source(self, request, response):
         self.expire_sessions(monotonic_ns())
-        session = self.close_session(request.session_id)
-        response.accepted = session is not None
-        response.message = "released" if session else "unknown or released session"
-        self.event("release", session.source if session else "", response.message)
+        session = self.session
+        if session and session.id == request.session_id:
+            self.session = None
+            response.accepted = True
+        response.message = "released" if response.accepted else "unknown or released session"
+        self.event("release", session.source if response.accepted else "", response.message)
         return response
 
     def revoke_source(self, request, response):
         self.expire_sessions(monotonic_ns())
-        session_id = self.owners.get(request.controller)
-        session = self.sessions.get(session_id)
+        session = self.session
         if session is None or session.status_id != request.session:
-            response.message = "controller no longer has that session"
+            response.message = "no matching active session"
         else:
-            self.close_session(session_id)
+            self.session = None
             response.accepted = True
             response.message = "revoked"
-        self.event("revoke", session.source if session else "", response.message)
+        self.event("revoke", session.source if response.accepted else "", response.message)
         return response
 
     def keep_alive(self, session_id):
         now = monotonic_ns()
         self.expire_sessions(now)
-        session = self.sessions.get(session_id)
-        if session is None:
+        if self.session is None or self.session.id != session_id:
             return False
-        session.expires_at = now + self.authority_timeout_ns
+        self.session.expires_at = now + self.authority_timeout_ns
         return True
 
     def source_heartbeat(self, message):
@@ -226,10 +220,10 @@ class TargetArbiter(Node):
     def dispatch(self, frame):
         now = monotonic_ns()
         self.expire_sessions(now)
-        session = self.sessions.get(frame.session_id)
+        session = self.session if self.session and self.session.id == frame.session_id else None
         source = session.source if session else ""
         try:
-            commands = self.prepare(frame, session)
+            positions, velocities = self.prepare(frame, session)
         except ValueError as error:
             self.event("reject", source, str(error))
             return False, str(error), 0
@@ -237,13 +231,16 @@ class TargetArbiter(Node):
         self.dispatch_id += 1
         session.sequence = frame.sequence
         session.expires_at = now + self.authority_timeout_ns
-        for controller, target in commands.items():
-            session.positions.update(zip(target.name, target.position))
-            self.dispatched[controller] = {
-                "source": source, "session": session.status_id,
-                "sequence": frame.sequence, "dispatch_id": str(self.dispatch_id),
-                "position": dict(zip(target.name, target.position)),
-            }
+        self.dispatched = {
+            "source": source, "session": session.status_id,
+            "sequence": frame.sequence, "dispatch_id": str(self.dispatch_id),
+            "position": {name: positions[name] for name in self.joints},
+        }
+        for controller, joints in self.routes.items():
+            target = JointState(
+                name=list(joints), position=[positions[name] for name in joints],
+                velocity=[velocities[name] for name in joints] if velocities else [],
+            )
             self.outputs[controller].publish(
                 AuthorizedTarget(kind=AuthorizedTarget.TARGET, arbiter_id=self.epochs[controller],
                                  hold_revision=self.hold_revisions[controller],
@@ -258,12 +255,10 @@ class TargetArbiter(Node):
             raise ValueError("sequence must increase")
         msg = frame.target
         names = msg.name
-        if (not names or len(set(names)) != len(names) or len(names) != len(msg.position)
+        if (len(names) != len(self.joints) or set(names) != set(self.joints)
+                or len(msg.position) != len(names)
                 or (msg.velocity and len(msg.velocity) != len(names)) or msg.effort):
-            raise ValueError("send distinct joint names, positions and optional velocities")
-        controlled = {key for controller in session.controllers for key in self.routes[controller]}
-        if unknown := set(names).difference(controlled):
-            raise ValueError(f"session does not control: {', '.join(sorted(unknown))}")
+            raise ValueError("send all seven configured joints exactly once with positions and optional velocities")
         velocities = dict(zip(names, msg.velocity))
         positions = dict(zip(names, msg.position))
         if not all(isfinite(value) for value in [*positions.values(), *velocities.values()]):
@@ -272,23 +267,7 @@ class TargetArbiter(Node):
             bounds = self.limits[name]
             if not bounds["min_pos"] <= value <= bounds["max_pos"]:
                 raise ValueError(f"{name} outside configured position bounds")
-        commands = {}
-        for controller in session.controllers:
-            joints = self.routes[controller]
-            if set(joints).isdisjoint(positions):
-                continue
-            current = self.feedback if self.feedback_is_fresh(monotonic_ns()) else {}
-            filled = {
-                name: positions.get(name, session.positions.get(name, current.get(name)))
-                for name in joints
-            }
-            if any(value is None for value in filled.values()):
-                raise ValueError(f"waiting for joint feedback for {controller}")
-            commands[controller] = JointState(
-                name=list(joints), position=list(filled.values()),
-                velocity=[velocities.get(name, 0.0) for name in joints] if velocities else [],
-            )
-        return commands
+        return positions, velocities
 
     def on_applied(self, controller, message):
         previous = self.applied.get(controller, 0)
@@ -303,11 +282,11 @@ class TargetArbiter(Node):
     def on_epoch_requested(self, controller, message):
         if message.data != self.epochs[controller]:
             return
-        session = self.close_session(self.owners.get(controller))
+        session, self.session = self.session, None
         self.epochs[controller] = self.new_epoch()
         self.publish_heartbeat(controller)
         if session:
-            for name in session.controllers:
+            for name in self.routes:
                 if name != controller:
                     self.request_hold(name)
         self.event("controller_timeout", session.source if session else "",
@@ -323,21 +302,20 @@ class TargetArbiter(Node):
         self.publish_status()
 
     def publish_status(self):
-        state = {}
-        for controller, joints in self.routes.items():
-            session_id = self.owners.get(controller)
-            session = self.sessions.get(session_id)
-            state[controller] = {
-                "joints": joints,
-                "feedback_ready": self.feedback_ready[controller],
-                "source": session.source if session else None,
-                "session": session.status_id if session else None,
-                "holding_after_loss": self.holding.get(controller, False),
-                "last_forwarded": self.dispatched.get(controller),
-                "last_applied_id": str(self.applied[controller]) if controller in self.applied else None,
-            }
-        self.status.publish(String(data=json.dumps(
-            {"controllers": state, "last_event": self.last_event}, ensure_ascii=False)))
+        acknowledgments = {self.applied.get(controller) for controller in self.routes}
+        applied = next(iter(acknowledgments)) if len(acknowledgments) == 1 else None
+        state = {
+            "joints": self.joints,
+            "feedback_ready": self.feedback_ready,
+            "authority": self.authority,
+            "source": self.session.source if self.session else None,
+            "session": self.session.status_id if self.session else None,
+            "holding_after_loss": any(self.holding.values()),
+            "last_forwarded": self.dispatched,
+            "last_applied_id": str(applied) if applied else None,
+            "last_event": self.last_event,
+        }
+        self.status.publish(String(data=json.dumps(state, ensure_ascii=False)))
 
 
 def main(args=None):

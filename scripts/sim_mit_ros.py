@@ -993,10 +993,7 @@ def main() -> int:
                     if "effort" in line or "controller" in line.lower() or "active" in line:
                         print("   " + line.strip())
         if args.mode == "mit":
-            target_controllers = [args.controller]
-            if not args.gravity_varstiff_switch_test:
-                target_controllers.extend(extra_controllers)
-            node.targets.select(target_controllers, args.startup_timeout)
+            node.targets.select(args.startup_timeout)
         if args.mit_frame_test:
             return mit_frame_test(node)
         if args.gravity_varstiff_switch_test:

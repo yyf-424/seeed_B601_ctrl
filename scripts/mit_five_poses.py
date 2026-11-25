@@ -271,7 +271,7 @@ def main():
         node.hold(PLAN["forward_observation_sec"])
         if len(node.ff) != 18 or len(node.gripper_ff) != 3:
             raise RuntimeError("6+1 前馈观测未就绪")
-        node.targets.select(controllers[1:], PLAN["controller_timeout_sec"])
+        node.targets.select(PLAN["controller_timeout_sec"])
         print(f"MoveIt 计划路径采样通过 {count}/{count}，MuJoCo 开始运动验证。", flush=True)
         with (output / "trace.csv").open("w", newline="") as stream:
             writer = csv.writer(stream)

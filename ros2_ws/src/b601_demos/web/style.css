@@ -24,19 +24,19 @@ h2 { margin: 0; font-size: 1.05rem; }
 .connection[data-connected="true"]::before { background: #75e0b1; }
 .controls, .robot-view { background: var(--panel); border: 1px solid var(--line); border-radius: .85rem; }
 .authority { display: grid; grid-template-columns: minmax(7rem, 1fr) auto; align-items: end; gap: .55rem .7rem; }
-.selection { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .5rem; min-width: 0; }
+.selection { min-width: 0; }
 .selection label { display: block; margin: 0 0 .25rem; color: var(--subtle); font-size: .78rem; }
-.metrics { grid-column: 1 / -1; margin: 0; padding: .55rem 0; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .5rem; border-bottom: 1px solid var(--line); }
+.metrics { grid-column: 1 / -1; margin: 0; padding: .55rem 0; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: .5rem; border-bottom: 1px solid var(--line); }
 .metrics dt { color: var(--subtle); font-size: .75rem; margin-bottom: .15rem; }
 .metrics dd { margin: 0; overflow-wrap: anywhere; font: 600 .84rem ui-monospace, monospace; }
 .authority-actions, .joint-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
-button, select, input[type="number"] { border: 1px solid var(--line); border-radius: .45rem; font: inherit; min-height: 2.3rem; }
+button, input[type="text"], input[type="number"] { border: 1px solid var(--line); border-radius: .45rem; font: inherit; min-height: 2.3rem; }
 button { padding: .4rem .65rem; background: var(--amber); color: #222017; font-size: .825rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
 button.quiet { background: #183442; color: var(--text); }
-button:disabled, select:disabled { opacity: .48; cursor: default; }
+button:disabled, input[type="text"]:disabled { opacity: .48; cursor: default; }
 button:not(:disabled):hover { filter: brightness(1.13); }
-button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-select, input[type="number"] { background: #0b1c27; color: var(--text); padding: .3rem .45rem; width: 100%; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+input[type="text"], input[type="number"] { background: #0b1c27; color: var(--text); padding: .3rem .45rem; width: 100%; }
 .workspace { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: .8rem; align-items: start; }
 .controls { min-width: 0; padding: .85rem; container-type: inline-size; }
 .robot-view { position: sticky; top: .65rem; z-index: 1; padding: .85rem; min-width: 0; }
@@ -79,7 +79,7 @@ select, input[type="number"] { background: #0b1c27; color: var(--text); padding:
 .pose-summary small { white-space: nowrap; }
 .placeholder { color: var(--subtle); margin: .6rem 0; }
 .joint-header { flex-wrap: wrap; padding: .65rem 0 .45rem; }
-.joint { display: grid; grid-template-columns: minmax(3.55rem, .78fr) minmax(6rem, 1fr) minmax(3rem, 1.85fr) minmax(4.25rem, .85fr) auto; gap: .55rem; align-items: center; min-height: 3rem; border-top: 1px solid var(--line); padding: .3rem 0; }
+.joint { display: grid; grid-template-columns: minmax(3.55rem, .78fr) minmax(6rem, 1fr) minmax(3rem, 1.85fr) minmax(4.25rem, .85fr); gap: .55rem; align-items: center; min-height: 3rem; border-top: 1px solid var(--line); padding: .3rem 0; }
 .joint:last-child { border-bottom: 1px solid var(--line); }
 .joint-name { font-family: ui-monospace, monospace; font-weight: 650; }
 .measured { color: var(--blue); font: .825rem ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -88,8 +88,7 @@ input[type="number"] { color: var(--amber); font-family: ui-monospace, monospace
 .notice { min-height: 1.2rem; margin: .55rem 0 0; color: var(--subtle); font-size: .8rem; }
 .notice[data-error="true"] { color: #ffad9b; }
 @container (max-width: 23.5rem) {
-  .selection { grid-template-columns: minmax(0,1fr); }
-  .joint { grid-template-columns: minmax(0, 1fr) minmax(4.25rem, .65fr) auto; gap: .22rem .55rem; }
+  .joint { grid-template-columns: minmax(0, 1fr) minmax(4.25rem, .65fr); gap: .22rem .55rem; }
   .joint .measured { grid-column: 2 / -1; justify-self: end; }
   .joint input[type="range"] { grid-row: 2; }
 }

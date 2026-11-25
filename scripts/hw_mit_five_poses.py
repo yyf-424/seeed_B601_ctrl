@@ -333,7 +333,7 @@ def run(node):
         check_cancelled()
         process = bringup(True)
         ready(node, process, "hardware")
-        node.targets.select(CONFIG["controllers"]["mit"]["instances"], PLAN["controller_timeout_sec"])
+        node.targets.select(PLAN["controller_timeout_sec"])
         q, _ = state(node)
         if not at_recenter(q[:GRIPPER_INDEX], mit=True):
             raise RuntimeError(f"启动归中后实测位形超出容差：{q}")
@@ -378,7 +378,7 @@ def run(node):
                         current, _ = state(node)
                         grip_target = [*current[:GRIPPER_INDEX], PARK[GRIPPER_INDEX]]
                         precheck(node, client, "park gripper", current, grip_target)
-                        node.targets.select(["b601_mit_gripper"], PLAN["controller_timeout_sec"])
+                        node.targets.select(PLAN["controller_timeout_sec"])
                         node.targets.set_joint(GRIPPER, grip_target[-1], PLAN["controller_timeout_sec"])
                         motion.monitor(HARDWARE["park_settle_sec"])
                         after, final_rows = state(node, PLAN["settle_window_sec"])

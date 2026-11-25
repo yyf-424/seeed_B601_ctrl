@@ -1,26 +1,23 @@
 "use strict";
 
 const element = (id) => document.getElementById(id);
-const group = element("group");
 const inputSource = element("input-source");
-const sourceLabels = new Map([["web", "网页关节"], ["web_ik", "网页 TCP"]]);
-const sessions = new Map();
+const sourceLabels = new Map([["web", "网页"], ["policy", "外部策略"], ["external", "外部接口"]]);
+let session;
 const rows = new Map();
 const edited = new Set();
 let snapshot = { feedback: {}, limits: {} };
 let busy = false;
 let robotView;
 
-function controllers() {
-  return snapshot.status?.controllers || {};
+function sourceLabel(source) {
+  return sourceLabels.get(source) || source || "无";
 }
 
 function refreshRobotView() {
   if (!robotView) return;
-  const target = {};
-  for (const state of Object.values(controllers())) {
-    if (!state.holding_after_loss) Object.assign(target, state.last_forwarded?.position);
-  }
+  const state = snapshot.status;
+  const target = { ...(!state?.holding_after_loss && state?.last_forwarded?.position) };
   let label = "最近下发目标";
   for (const name of edited) {
     const input = rows.get(name).number;
@@ -29,10 +26,9 @@ function refreshRobotView() {
       label = "待发送预览";
     }
   }
-  const armJoints = group.value === "b601_mit_arm" ? controllers()[group.value]?.joints : [];
   robotView.update({
     feedback: snapshot.feedback, target, label, online: !!snapshot.status,
-    armJoints, limits: snapshot.limits,
+    armJoints: state?.joints, limits: snapshot.limits,
   });
 }
 
@@ -57,12 +53,12 @@ function setValue(row, value) {
   if (value !== undefined) row.slider.value = value;
 }
 
-function makeRows() {
+function makeRows(names) {
   rows.clear();
   edited.clear();
   const list = element("joints");
   list.replaceChildren();
-  for (const name of controllers()[group.value]?.joints || []) {
+  for (const name of names) {
     const row = document.createElement("div");
     row.className = "joint";
     const title = document.createElement("span");
@@ -93,39 +89,30 @@ function makeRows() {
       edited.add(name);
       refresh();
     });
-    const send = document.createElement("button");
-    send.className = "quiet";
-    send.textContent = "发送";
-    send.setAttribute("aria-label", `发送 ${name} 目标`);
-    send.addEventListener("click", () => mutate(() => sendTargets([name])));
-    row.append(title, measured, slider, number, send);
+    row.append(title, measured, slider, number);
     list.append(row);
-    rows.set(name, { measured, slider, number, send, unit });
+    rows.set(name, { measured, slider, number, unit });
   }
 }
 
 function refresh() {
-  const state = controllers()[group.value];
-  const session = sessions.get(group.value);
-  const allowed = !busy && state?.session === session?.publicId && !!session;
+  const state = snapshot.status;
+  const allowed = !busy && !!session && state?.session === session.publicId;
   const connection = element("connection");
   connection.dataset.connected = String(!!state && snapshot.feedback_age_ms !== null);
   connection.textContent = state ? "仲裁在线" : "等待仲裁节点";
-  element("source").textContent = sourceLabels.get(state?.source) || state?.source || "无";
+  element("authority").textContent = sourceLabel(state?.authority);
+  element("source").textContent = sourceLabel(state?.source);
   element("age").textContent = snapshot.feedback_age_ms === null || snapshot.feedback_age_ms === undefined
     ? "—" : `${snapshot.feedback_age_ms} ms`;
   const forwarded = state?.last_forwarded;
   element("applied").textContent = state?.holding_after_loss ? "受控持位"
     : !forwarded ? "—" : state.last_applied_id === forwarded.dispatch_id ? "已采纳" : "等待采纳";
-  element("acquire").disabled = busy || !state || !!state.source || !!session;
-  element("release").disabled = busy || !state?.session;
-  const supportsTcp = group.value === "b601_mit_arm";
-  inputSource.options[1].disabled = !supportsTcp;
-  if (!supportsTcp && inputSource.value === "web_ik") inputSource.value = "web";
-  inputSource.disabled = busy || !state || !!state.source || !!session;
-  element("sync").disabled = !state || !Object.keys(snapshot.feedback).length;
+  element("acquire").disabled = busy || !state || !inputSource.value.trim();
+  element("release").disabled = busy || (!state?.authority && !state?.session);
+  inputSource.disabled = busy || !state;
+  element("sync").disabled = !state?.feedback_ready;
   element("send-all").disabled = !allowed || !edited.size;
-  group.disabled = busy || !state;
   for (const [name, row] of rows) {
     const value = snapshot.feedback[name];
     row.measured.textContent = value === undefined ? "—" : `${value.toFixed(4)} ${row.unit}`;
@@ -134,7 +121,6 @@ function refresh() {
         ? forwarded?.position[name] : undefined;
       setValue(row, desired ?? value);
     }
-    row.send.disabled = !allowed || !edited.has(name);
   }
   refreshRobotView();
 }
@@ -144,19 +130,12 @@ async function poll() {
     const response = await fetch("/api/state");
     if (!response.ok) throw new Error("状态读取失败");
     snapshot = await response.json();
-    const names = Object.keys(controllers());
-    const current = group.value;
-    for (const [name, session] of sessions) {
-      const active = controllers()[name]?.session;
-      if (active === session.publicId) session.observed = true;
-      else if (session.observed) sessions.delete(name);
+    const state = snapshot.status;
+    if (session && state) {
+      if (state.session === session.publicId) session.observed = true;
+      else if (session.observed) session = undefined;
     }
-    if (names.join() !== [...group.options].map((item) => item.value).join()) {
-      group.replaceChildren(...names.map((name) => new Option(
-        name === "b601_mit_arm" ? "手臂六轴" : name === "b601_mit_gripper" ? "夹爪" : name, name)));
-      if (names.includes(current)) group.value = current;
-      makeRows();
-    }
+    if (state?.joints && state.joints.join() !== [...rows.keys()].join()) makeRows(state.joints);
     refresh();
   } catch (error) {
     snapshot.status = null;
@@ -182,19 +161,19 @@ async function api(path, payload) {
   return result;
 }
 
-function renewSessions() {
-  for (const [name, session] of sessions) {
-    if (session.renewing) continue;
-    session.renewing = true;
-    api("/api/heartbeat", { session_id: session.id }).catch((error) => {
-      if (error.status === 409 && sessions.get(name) === session) {
-        sessions.delete(name);
-        notice("网页控制权已失效，请重新接管。", true);
+function renewSession() {
+  const current = session;
+  if (current && !current.renewing) {
+    current.renewing = true;
+    api("/api/heartbeat", { session_id: current.id }).catch((error) => {
+      if (error.status === 409 && session === current) {
+        session = undefined;
+        notice("网页控制权已失效，可重新指定网页。", true);
         refresh();
       }
-    }).finally(() => { session.renewing = false; });
+    }).finally(() => { current.renewing = false; });
   }
-  window.setTimeout(renewSessions, snapshot.heartbeat_period_ms || 100);
+  window.setTimeout(renewSession, snapshot.heartbeat_period_ms || 100);
 }
 
 async function mutate(task) {
@@ -211,11 +190,9 @@ async function mutate(task) {
   }
 }
 
-async function sendTargets(names) {
-  const session = sessions.get(group.value);
-  const positions = Object.fromEntries(names.map((name) => {
-    const input = rows.get(name).number;
-    if (!input.value || !input.checkValidity()) {
+async function sendTargets() {
+  const positions = Object.fromEntries([...rows].map(([name, {number: input}]) => {
+    if (!Number.isFinite(input.valueAsNumber) || !input.checkValidity()) {
       input.reportValidity();
       throw new Error(`${name} 超出关节范围，或未填写数值。`);
     }
@@ -224,31 +201,31 @@ async function sendTargets(names) {
   const reply = await api("/api/target", {
     session_id: session.id, sequence: ++session.sequence, positions,
   });
-  for (const name of names) edited.delete(name);
-  notice(`目标已转发，编号 ${reply.dispatch_id}。`);
+  for (const name of edited) {
+    if (rows.get(name).number.valueAsNumber === positions[name]) edited.delete(name);
+  }
+  notice(`七关节目标已转发，编号 ${reply.dispatch_id}。`);
 }
 
-group.addEventListener("change", () => { makeRows(); refresh(); });
+inputSource.addEventListener("input", refresh);
 element("acquire").addEventListener("click", () => mutate(async () => {
-  const source = inputSource.value;
-  const reply = await api("/api/select", { controller: group.value, source });
-  sessions.set(group.value, { id: reply.session_id, publicId: reply.session, sequence: 0 });
-  notice(`${sourceLabels.get(source)}已取得控制权。`);
+  const source = inputSource.value.trim();
+  await api("/api/authority", { source });
+  if (source === "web") {
+    if (!session || session.publicId !== snapshot.status?.session) {
+      const reply = await api("/api/select", {});
+      session = { id: reply.session_id, publicId: reply.session, sequence: 0 };
+    }
+    notice("网页已取得整机控制权。");
+  } else {
+    session = undefined;
+    notice(`已指定 ${sourceLabel(source)}，该来源可申请整机控制权。`);
+  }
 }));
 element("release").addEventListener("click", () => mutate(async () => {
-  const controller = group.value;
-  const state = controllers()[controller];
-  const session = sessions.get(controller);
-  if (session?.publicId === state.session) {
-    await api("/api/release", { session_id: session.id });
-    sessions.delete(controller);
-  } else {
-    const groups = Object.entries(controllers()).filter(([, route]) => route.session === state.session)
-      .map(([name]) => name === "b601_mit_arm" ? "手臂六轴" : name === "b601_mit_gripper" ? "夹爪" : name);
-    if (!window.confirm(`释放 ${sourceLabels.get(state.source) || state.source} 的 ${groups.join("、")} 控制权？`)) return;
-    await api("/api/revoke", { controller, session: state.session });
-  }
-  notice("已释放控制权。");
+  await api("/api/authority", { source: "" });
+  session = undefined;
+  notice("已释放整机控制权。");
 }));
 element("sync").addEventListener("click", () => {
   for (const [name, row] of rows) {
@@ -258,8 +235,8 @@ element("sync").addEventListener("click", () => {
   }
   refresh();
 });
-element("send-all").addEventListener("click", () => mutate(() => sendTargets([...edited])));
-window.addEventListener("pagehide", () => { sessions.clear(); });
+element("send-all").addEventListener("click", () => mutate(sendTargets));
+window.addEventListener("pagehide", () => { session = undefined; });
 import("/robot-view.js").then(({ createRobotView }) => {
   robotView = createRobotView(element("robot-view"), applyTcpDraft);
   refreshRobotView();
@@ -267,4 +244,4 @@ import("/robot-view.js").then(({ createRobotView }) => {
   element("model-status").textContent = `三维渲染不可用：${error.message}`;
 });
 poll();
-renewSessions();
+renewSession();

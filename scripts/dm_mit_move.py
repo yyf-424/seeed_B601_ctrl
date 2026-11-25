@@ -226,8 +226,8 @@ def parse_pose(spec: str) -> dict[str, float]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="MIT 力控模式的限速摆动工具")
     ap.add_argument("--controller", default="b601_mit_arm",
-                    help="向仲裁节点申请的 MIT 控制器组")
-    ap.add_argument("--debug-topic", default="/b601_mit_arm/debug",
+                    help="默认诊断话题所属的 MIT 控制器")
+    ap.add_argument("--debug-topic",
                     help="MIT 控制器心跳（激活后 ~10 Hz 发布），用于确认控制器真在跑")
     ap.add_argument("--set", default="", help="目标姿态，例：joint2=-0.35,joint5=0.2")
     ap.add_argument("--poses", default="", help="多个姿态用 ; 分隔，依次执行")
@@ -244,8 +244,8 @@ def main() -> int:
         return 2
 
     rclpy.init()
-    node = MitMover(args.rate,
-                    args.tolerance, args.debug_topic, args.settle)
+    debug_topic = args.debug_topic or f"/{args.controller}/debug"
+    node = MitMover(args.rate, args.tolerance, debug_topic, args.settle)
     try:
         if not node.wait_ready():
             node.get_logger().error("等不到 /joint_states 或 /b601_safety/status（bringup 起来了吗？）")
@@ -254,7 +254,7 @@ def main() -> int:
             "起始位形：" + ", ".join(f"{n}={node.current[n]:+.3f}" for n in ARM)
             + f"；安全状态 {node.safety}；斜坡 {node.slew:.2f} rad/s")
 
-        node.targets.select([args.controller], SETTINGS["ready_timeout_sec"])
+        node.targets.select(SETTINGS["ready_timeout_sec"])
         specs = [p for p in args.poses.split(";") if p.strip()] if args.poses else [args.set]
         for i, spec in enumerate(specs, 1):
             target = parse_pose(spec)

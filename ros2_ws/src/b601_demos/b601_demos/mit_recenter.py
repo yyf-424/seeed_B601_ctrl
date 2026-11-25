@@ -273,7 +273,7 @@ class MitRecenter(Node):
             return response
         try:
             self.wait_for_start_feedback()
-            self.target_client.select(["b601_mit_arm"], self.state_check_timeout, spinning=True)
+            self.target_client.select(self.state_check_timeout, spinning=True)
             self.run_sequence()
             response.success = True
             response.message = "六轴已归中"

@@ -25,7 +25,7 @@ from b601_description.project_config import load_project_config
 from b601_demos.target_arbiter import ARBITER
 from b601_demos.target_client import TargetClient
 from b601_target_interfaces.msg import TargetFrame
-from b601_target_interfaces.srv import RevokeSource, SelectSource, SetTarget
+from b601_target_interfaces.srv import RevokeSource, SelectSource, SetAuthority, SetTarget
 
 ARM = "b601_mit_arm"
 GRIPPER = "b601_mit_gripper"
@@ -64,9 +64,6 @@ class TestNode(Node):
     def on_safety(self, message):
         self.safety = message.level
 
-    def controller(self, controller=ARM):
-        return self.status.get("controllers", {}).get(controller, {})
-
     def until(self, condition, label, timeout=TIMEOUT):
         end = time.monotonic() + timeout
         while time.monotonic() < end and not condition():
@@ -74,9 +71,9 @@ class TestNode(Node):
         if not condition():
             raise AssertionError(f"{label}; status={self.status}; feedback={self.feedback}; safety={self.safety}")
 
-    def applied(self, dispatch_id, controller=ARM):
-        self.until(lambda: self.controller(controller).get("last_applied_id") == str(dispatch_id),
-                   f"{controller} must acknowledge dispatch {dispatch_id}")
+    def applied(self, dispatch_id):
+        self.until(lambda: self.status.get("last_applied_id") == str(dispatch_id),
+                   f"all routes must acknowledge dispatch {dispatch_id}")
 
     def reaches(self, values, tolerance=0.004):
         self.until(
@@ -89,11 +86,12 @@ class TestNode(Node):
 def test(node, launch_log):
     external = TargetClient(node, "external")
     policy = TargetClient(node, "policy")
-    gripper = TargetClient(node, "external_gripper")
-    node.until(lambda: node.controller().get("joints") and len(node.feedback) == 8 and node.safety is not None
-               and len(node.holds) == 2
-               and all(node.controller(name).get("feedback_ready") for name in (ARM, GRIPPER)),
+    authority = node.create_client(SetAuthority, f"{ARBITER}/set_authority")
+    node.until(lambda: node.status.get("feedback_ready") and len(node.feedback) == 8
+               and node.safety is not None and len(node.holds) == 2,
                "MIT controllers, live feedback and safety must be present")
+    assert len(node.status["joints"]) == 7 and "controllers" not in node.status
+    assert node.status["source"] is None and node.status["authority"] is None
     for controller in (ARM, GRIPPER):
         pubs = node.get_publishers_info_by_topic(f"/{controller}/authorized_target")
         assert [info.node_name for info in pubs] == ["b601_target_arbiter"], pubs
@@ -101,124 +99,114 @@ def test(node, launch_log):
         assert [info.node_name for info in inputs] == ["b601_target_bridge"], inputs
         subscribers = node.get_subscriptions_info_by_topic(f"/{controller}/joint_target")
         assert [info.node_name for info in subscribers] == [controller], subscribers
-        assert node.controller(controller)["source"] is None
     print("PASS idle startup and one publisher per controller")
 
     first_frame = TargetFrame(session_id="no-session", sequence=1,
                               target=JointState(name=["joint1"], position=[-0.1]))
-    request = SetTarget.Request(frame=first_frame)
-    assert not external.call(external.sender, request, TIMEOUT).accepted
-    external.select([ARM], TIMEOUT)
-    gripper.select([GRIPPER], TIMEOUT)
+    assert not external.call(external.sender, SetTarget.Request(frame=first_frame), TIMEOUT).accepted
+    external.select(TIMEOUT)
     try:
-        busy = policy.call(policy.selector, SelectSource.Request(source="policy", controllers=[ARM]), TIMEOUT)
+        busy = policy.call(policy.selector, SelectSource.Request(source="policy"), TIMEOUT)
         assert not busy.accepted and "external" in busy.message
-        contender = policy.call(policy.selector, SelectSource.Request(
-            source="another_external", controllers=[ARM, GRIPPER]), TIMEOUT)
-        assert not contender.accepted and "external_gripper" in contender.message
-        wrong_group = external.frame(JointState(name=["finger_left"], position=[0.02]))
-        assert not external.call(external.sender, SetTarget.Request(frame=wrong_group), TIMEOUT).accepted
-        gripper_goal = node.feedback["finger_left"] + 0.0003
-        grip = gripper.set_joint("finger_left", gripper_goal, TIMEOUT)
-        node.applied(grip, GRIPPER)
-        node.reaches({"finger_left": gripper_goal}, tolerance=0.00015)
-        print("PASS exclusive claims and independent simulated gripper")
+        partial = external.frame(JointState(name=["finger_left"], position=[0.02]))
+        rejected = external.call(external.sender, SetTarget.Request(frame=partial), TIMEOUT)
+        assert not rejected.accepted and "all seven" in rejected.message
 
-        old = external.frame(JointState(name=["joint1"], position=[0.12]))
+        positions = {name: node.feedback[name] for name in node.status["joints"]}
+        goal = {"joint1": 0.12, "finger_left": positions["finger_left"] + 0.0003}
+        positions.update(goal)
+        old = external.frame(JointState(name=list(positions), position=list(positions.values())))
         response = external.call(external.sender, SetTarget.Request(frame=old), TIMEOUT)
         assert response.accepted, response.message
         node.applied(response.dispatch_id)
-        node.reaches({"joint1": 0.12})
+        node.reaches({"joint1": goal["joint1"]})
+        node.reaches({"finger_left": goal["finger_left"]}, tolerance=0.00015)
         assert not external.call(external.sender, SetTarget.Request(frame=old), TIMEOUT).accepted
-        multi = {"joint1": 0.07, "joint4": 0.05}
-        forwarded = external.set_joints(multi, TIMEOUT)
-        node.applied(forwarded)
-        node.reaches(multi)
-        assert node.controller()["last_forwarded"]["position"]["joint1"] == 0.07
-        assert node.controller()["last_forwarded"]["position"]["joint4"] == 0.05
-        assert node.controller()["last_forwarded"]["source"] == "external"
-        print("PASS external single/multi goals, applied IDs, and sequence replay rejection")
+        assert node.status["last_forwarded"]["position"] == positions
+        print("PASS exclusive owner, full seven-joint wire target, replay rejection and both routes")
 
-        external.release(TIMEOUT)
-        policy.select([ARM], TIMEOUT)
+        reply = external.call(authority, SetAuthority.Request(source="policy"), TIMEOUT)
+        assert reply.accepted
+        node.until(lambda: node.status.get("authority") == "policy" and node.status.get("source") is None,
+                   "designating a new input must revoke the prior holder")
+        denied = external.call(external.selector, SelectSource.Request(source="external"), TIMEOUT)
+        assert not denied.accepted and "designated to policy" in denied.message
+        policy.select(TIMEOUT)
+        assert external.call(authority, SetAuthority.Request(source="policy"), TIMEOUT).accepted
         old.sequence += 1000
-        old.target.position = [-0.14]
+        old.target.position[0] = -0.14
         external.publisher.publish(old)
         assert not external.call(external.sender, SetTarget.Request(frame=old), TIMEOUT).accepted
-        node.until(lambda: node.controller()["source"] == "policy", "policy is the selected owner")
-        assert node.controller()["last_forwarded"]["dispatch_id"] == str(forwarded)
+        node.until(lambda: node.status["source"] == "policy", "policy is the designated owner")
+        assert node.status["last_forwarded"]["dispatch_id"] == str(response.dispatch_id)
         new_goal = JointState(name=["joint1", "joint4"], position=[0.02, 0.03], velocity=[0.0, 0.0])
         policy.publish(new_goal)
-        node.until(lambda: node.controller()["last_forwarded"]["source"] == "policy",
+        node.until(lambda: node.status["last_forwarded"]["source"] == "policy",
                    "policy stream must reach the arbiter")
-        node.applied(node.controller()["last_forwarded"]["dispatch_id"])
+        node.applied(node.status["last_forwarded"]["dispatch_id"])
         node.reaches(dict(zip(new_goal.name, new_goal.position)))
+        assert list(node.status["last_forwarded"]["position"]) == node.status["joints"]
         assert node.safety == DiagnosticStatus.OK, node.safety
-        print("PASS handover, delayed previous-session rejection and streaming policy")
+
+        policy.release(TIMEOUT)
+        denied = external.call(external.selector, SelectSource.Request(source="external"), TIMEOUT)
+        assert not denied.accepted and "designated to policy" in denied.message
+        policy.select(TIMEOUT)
+        assert external.call(authority, SetAuthority.Request(source=""), TIMEOUT).accepted
+        node.until(lambda: node.status["source"] is None and node.status["authority"] is None,
+                   "operator release must clear the designation and the active holder")
+        print("PASS operator handover, previous-session rejection, policy stream and release")
     finally:
         external.close(TIMEOUT)
         policy.close(TIMEOUT)
-        gripper.close(TIMEOUT)
-
-    external.select([ARM, GRIPPER], TIMEOUT)
-    try:
-        combined_goal = {"joint1": 0.04, "finger_left": gripper_goal + 0.0002}
-        combined = external.set_joints(combined_goal, TIMEOUT)
-        node.applied(combined)
-        node.applied(combined, GRIPPER)
-        node.reaches({"joint1": combined_goal["joint1"]})
-        node.reaches({"finger_left": combined_goal["finger_left"]}, tolerance=0.00015)
-        print("PASS one multi-group target reaches both MuJoCo controllers")
-    finally:
-        external.close(TIMEOUT)
 
     recenter = node.create_client(Trigger, "/b601_mit_recenter/recenter")
     assert recenter.wait_for_service(timeout_sec=TIMEOUT)
     result = recenter.call_async(Trigger.Request())
-    node.until(lambda: node.controller().get("source") == "recenter", "recenter must acquire ownership")
+    node.until(lambda: node.status.get("source") == "recenter", "recenter must acquire ownership")
     contention = policy.call(
-        policy.selector, SelectSource.Request(source="policy", controllers=[ARM]), TIMEOUT)
+        policy.selector, SelectSource.Request(source="policy"), TIMEOUT)
     assert not contention.accepted and "recenter" in contention.message
     node.until(result.done, "recenter action must finish", timeout=45)
     assert result.result().success, result.result().message
-    node.until(lambda: node.controller()["source"] is None, "recenter must release ownership")
-    assert node.controller()["last_forwarded"]["source"] == "recenter"
+    node.until(lambda: node.status["source"] is None, "recenter must release ownership")
+    assert node.status["last_forwarded"]["source"] == "recenter"
     project = load_project_config()
     for joint, value in project["recenter"]["joints"].items():
-        if joint in node.controller()["joints"]:
+        if joint in node.status["joints"]:
             assert abs(node.feedback[joint] - value) < 0.03, (joint, node.feedback[joint], value)
     assert node.safety in (DiagnosticStatus.OK, DiagnosticStatus.WARN), node.safety
     print("PASS real MuJoCo recenter through arbitration, contention and release")
 
     revoke = node.create_client(RevokeSource, f"{ARBITER}/revoke_source")
-    abandoned = external.call(external.selector, SelectSource.Request(source="abandoned", controllers=[ARM]), TIMEOUT)
+    abandoned = external.call(external.selector, SelectSource.Request(source="abandoned"), TIMEOUT)
     assert abandoned.accepted
-    node.until(lambda: node.controller().get("source") == "abandoned", "operator must see orphaned ownership")
-    public_id = node.controller()["session"]
-    wrong = RevokeSource.Request(controller=ARM, session="old-selection")
+    node.until(lambda: node.status.get("source") == "abandoned", "operator must see orphaned ownership")
+    public_id = node.status["session"]
+    wrong = RevokeSource.Request(session="old-selection")
     assert not external.call(revoke, wrong, TIMEOUT).accepted
-    current = RevokeSource.Request(controller=ARM, session=public_id)
+    current = RevokeSource.Request(session=public_id)
     assert external.call(revoke, current, TIMEOUT).accepted
     print("PASS operator revocation matches only the selected session")
 
     lost = TargetClient(node, "lost_source", auto_renew=False)
-    lost.select([ARM], TIMEOUT)
+    lost.select(TIMEOUT)
     lost.renew(TIMEOUT)
     started = time.monotonic()
     first = lost.set_joint("joint1", 0.8, TIMEOUT)
     node.applied(first)
     previous = lost.frame(JointState(name=["joint1"], position=[0.7]))
-    node.until(lambda: node.controller().get("source") is None and node.watchdog_hold,
+    node.until(lambda: node.status.get("source") is None and node.watchdog_hold and node.holds.get(GRIPPER),
                "lost source must release authority and put the MIT controller into measured hold", timeout=2)
     source_hold_time = time.monotonic() - started
     assert 0.45 <= source_hold_time <= 0.8, source_hold_time
     hold_position = node.feedback["joint1"]
     assert hold_position < 0.4, hold_position
     assert not external.call(external.sender, SetTarget.Request(frame=previous), TIMEOUT).accepted
-    node.until(lambda: node.controller()["last_applied_id"] is None, "hold clears prior receipt")
+    node.until(lambda: node.status["last_applied_id"] is None, "hold clears prior receipt")
     print(f"PASS source disconnect, hold after {source_hold_time:.3f}s, prior frame rejected")
 
-    policy.select([ARM], TIMEOUT)
+    policy.select(TIMEOUT)
     try:
         dispatch = policy.set_joint("joint1", 0.8, TIMEOUT)
         node.applied(dispatch)
@@ -245,9 +233,9 @@ def test(node, launch_log):
             policy.release(TIMEOUT)
         except RuntimeError as error:
             assert "released session" in str(error)
-        node.until(lambda: node.controller().get("source") is None,
+        node.until(lambda: node.status.get("source") is None,
                    "resumed arbiter must leave the old owner revoked")
-        policy.select([ARM], TIMEOUT)
+        policy.select(TIMEOUT)
         recovered = policy.set_joint("joint1", 0.07, TIMEOUT)
         node.applied(recovered)
         node.reaches({"joint1": 0.07})
@@ -314,7 +302,7 @@ def main():
             raise RuntimeError("Test domain already contains a robot, choose B601_TEST_ROS_DOMAIN_ID.")
         process = start_fixture(output, args.web)
         if args.web:
-            node.until(lambda: node.controller().get("joints") and bool(node.feedback),
+            node.until(lambda: node.status.get("feedback_ready"),
                        "MuJoCo preview must become ready")
             print("MuJoCo：访问 http://127.0.0.1:8765/ ，Ctrl-C 停止。", flush=True)
             while rclpy.ok() and process.poll() is None:

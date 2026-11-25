@@ -2,5 +2,5 @@
 string session_id
 # Start at 1, increment for every target in this session.
 uint64 sequence
-# position is required. velocity is optional and in joint-space units.
+# Supply all seven configured joint names and positions. Velocities are optional.
 sensor_msgs/JointState target

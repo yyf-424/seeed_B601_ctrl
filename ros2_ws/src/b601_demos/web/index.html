@@ -38,24 +38,21 @@
       <section class="controls" aria-labelledby="joints-title">
         <section class="authority" aria-label="控制权">
           <div class="selection">
-            <div>
-              <label for="group">控制器组</label>
-              <select id="group" disabled><option>等待仲裁节点</option></select>
-            </div>
-            <div>
-              <label for="input-source">输入来源</label>
-              <select id="input-source" disabled>
-                <option value="web">网页关节</option>
-                <option value="web_ik">网页 TCP</option>
-              </select>
-            </div>
+            <label for="input-source">权威输入来源</label>
+            <input id="input-source" type="text" list="input-sources" value="web" autocomplete="off" disabled>
+            <datalist id="input-sources">
+              <option value="web">网页</option>
+              <option value="policy">外部策略</option>
+              <option value="external">外部接口</option>
+            </datalist>
           </div>
           <div class="authority-actions">
             <button id="acquire" disabled>指定控制权</button>
             <button id="release" class="quiet" disabled>释放控制权</button>
           </div>
           <dl class="metrics">
-            <div><dt>活动来源</dt><dd id="source">—</dd></div>
+            <div><dt>指定来源</dt><dd id="authority">—</dd></div>
+            <div><dt>当前持有者</dt><dd id="source">—</dd></div>
             <div><dt>反馈延迟</dt><dd id="age">—</dd></div>
             <div><dt>最近目标回执</dt><dd id="applied">—</dd></div>
           </dl>
@@ -64,7 +61,7 @@
           <h2 id="joints-title">实测与关节目标</h2>
           <div class="joint-actions">
             <button id="sync" class="quiet" disabled>读入实测</button>
-            <button id="send-all" disabled>发送已修改目标</button>
+            <button id="send-all" disabled>发送七关节目标</button>
           </div>
         </div>
         <div class="table" id="joints"><p class="placeholder">收到关节列表后可编辑目标。</p></div>
