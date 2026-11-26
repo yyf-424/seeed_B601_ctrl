@@ -62,15 +62,16 @@ def validate(cfg: dict) -> list[str]:
             errors.append(f"robot 段引用了 joints 里不存在的关节 {name}")
 
     for name, j in joints.items():
-        for key in ("min_pos", "max_pos", "max_velocity", "max_effort", "startup"):
+        for key in ("min_pos", "max_pos", "max_velocity", "startup"):
             if key not in j:
                 errors.append(f"关节 {name} 缺 {key}")
         if j.get("min_pos", 0) >= j.get("max_pos", 0):
             errors.append(f"关节 {name} 限位区间非法：[{j.get('min_pos')}, {j.get('max_pos')}]")
         if j.get("max_velocity", 0) <= 0:
             errors.append(f"关节 {name} 的 max_velocity 必须 > 0")
-        if not 0 < j.get("max_effort", 0) < float("inf"):
-            errors.append(f"关节 {name} 的 max_effort 必须为有限正数")
+        torque_nm = j.get("max_motor_torque_nm")
+        if type(torque_nm) not in (int, float) or not math.isfinite(torque_nm) or torque_nm <= 0:
+            errors.append(f"关节 {name} 的 max_motor_torque_nm 必须为有限正数")
         start = j.get("startup")
         if start is not None and not (j["min_pos"] <= start <= j["max_pos"]):
             errors.append(f"关节 {name} 的启动姿态 {start} 不在限位内")
@@ -492,7 +493,7 @@ def render_hardware_dm(cfg: dict) -> str:
         "command_mode": dm["command_mode"],
         "kp": [motor["kp"] for motor in motors],
         "kd": [motor["kd"] for motor in motors],
-        "torque_limit": [joint["max_effort"] for joint in joints],
+        "motor_torque_limit_nm": [joint["max_motor_torque_nm"] for joint in joints],
         "enable_on_activate": dm["enable_motors"],
         "watchdog_timeout": dm["watchdog_timeout"],
         "max_velocity": [joint["max_velocity"] for joint in joints],

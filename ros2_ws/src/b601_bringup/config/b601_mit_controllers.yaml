@@ -129,7 +129,7 @@ b601_mit_gripper:
     - position
     - velocity
     kp_move:
-    - 65000.0
+    - 60000.0
     kd_move:
     - 12000.0
     free_enabled: false

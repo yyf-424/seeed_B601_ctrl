@@ -248,7 +248,12 @@ bool DmSystemHardware::parse_joint_config(
   cfg.kd = get_double(p, "kd", 0.0, where);
   cfg.vel_limit = get_double(p, "vel_limit", cfg.vel_limit, where);
   cfg.target_slew = get_double(p, "target_slew", cfg.target_slew, where);
-  cfg.torque_limit = get_double(p, "torque_limit", cfg.torque_limit, where);
+  if (p.count("motor_torque_limit_nm")) {
+    cfg.motor_torque_limit_nm = get_double(p, "motor_torque_limit_nm", 0.0, where);
+  } else {
+    // 旧版 URDF 的 torque_limit 使用关节单位。
+    cfg.motor_torque_limit_nm = get_double(p, "torque_limit", 0.0, where) * cfg.effort_scale;
+  }
   if (p.find("min_pos") != p.end() && p.find("max_pos") != p.end()) {
     cfg.min_pos = get_double(p, "min_pos", 0.0, where);
     cfg.max_pos = get_double(p, "max_pos", 0.0, where);
@@ -788,10 +793,9 @@ void DmSystemHardware::command_motor(JointConfig & joint, double target, double 
     // MIT：位置 + 速度前馈 0 + kp/kd 阻抗 + 力矩前馈 0
     const double kp = std::clamp(joint.kp, 0.0, 500.0);
     const double kd = std::clamp(joint.kd, 0.0, 5.0);
-    const double pd = (kp * (target - joint.state_pos) - kd * joint.state_vel) /
-      (joint.effort_scale * joint.scale);
-    const double scale = std::abs(pd) > joint.torque_limit ?
-      joint.torque_limit / std::abs(pd) : 1.0;
+    const double pd_nm = (kp * (target - joint.state_pos) - kd * joint.state_vel) / joint.scale;
+    const double scale = std::abs(pd_nm) > joint.motor_torque_limit_nm ?
+      joint.motor_torque_limit_nm / std::abs(pd_nm) : 1.0;
     rc = motor_handle_send_mit(
       joint.handle, static_cast<float>(motor_target), 0.0F, static_cast<float>(kp * scale),
       static_cast<float>(kd * scale), 0.0F);
@@ -868,16 +872,17 @@ hardware_interface::return_type DmSystemHardware::write(
       const double gain_scale = joint.effort_scale * joint.scale;
       const double kp_motor = std::clamp(joint.cmd_kp * gain_scale, 0.0, 500.0);
       const double kd_motor = std::clamp(joint.cmd_kd * gain_scale, 0.0, 5.0);
-      // 使用最新反馈估算电机端 PD 与前馈的总关节力矩。超限时同比缩放整帧。
-      const double pd = (kp_motor * (pos_des - joint.state_pos) +
-        kd_motor * (velocity_des - joint.state_vel)) / gain_scale;
-      const double peak = std::max(std::abs(pd + joint.cmd_effort), std::abs(joint.cmd_effort));
-      const double scale = peak > joint.torque_limit ? joint.torque_limit / peak : 1.0;
+      // 用电机侧单位估算 PD 与前馈的总输出，超限时同比缩放整帧。
+      const double pd_nm = (kp_motor * (pos_des - joint.state_pos) +
+        kd_motor * (velocity_des - joint.state_vel)) / joint.scale;
+      const double feedforward_nm = joint.cmd_effort * joint.effort_scale;
+      const double peak_nm = std::max(std::abs(pd_nm + feedforward_nm), std::abs(feedforward_nm));
+      const double scale = peak_nm > joint.motor_torque_limit_nm ?
+        joint.motor_torque_limit_nm / peak_nm : 1.0;
       const std::int32_t rc = motor_handle_send_mit(
         joint.handle, static_cast<float>(pos_motor), static_cast<float>(velocity_motor),
         static_cast<float>(kp_motor * scale), static_cast<float>(kd_motor * scale),
-        static_cast<float>(command_sign_ * joint.direction * joint.cmd_effort *
-        joint.effort_scale * scale));
+        static_cast<float>(command_sign_ * joint.direction * feedforward_nm * scale));
       if (rc != 0) {
         ++consecutive_write_failures_;
         RCLCPP_WARN_THROTTLE(
@@ -893,16 +898,16 @@ hardware_interface::return_type DmSystemHardware::write(
 
     // ---- mit_torque：直接把控制器算好的 τ 发下去（kp=kd=0，纯力矩）----
     if (command_mode_ == "mit_torque") {
-      double tau = joint.cmd_effort;
-      if (joint.torque_limit > 0.0) {
-        tau = std::clamp(tau, -joint.torque_limit, joint.torque_limit);
+      double torque_nm = joint.cmd_effort * joint.effort_scale;
+      if (joint.motor_torque_limit_nm > 0.0) {
+        torque_nm = std::clamp(torque_nm, -joint.motor_torque_limit_nm, joint.motor_torque_limit_nm);
       }
       // 电机侧 MIT 的 pos/vel 在 kp=kd=0 时不生效，但给当前值更安全
       const std::int32_t rc = motor_handle_send_mit(
         joint.handle, static_cast<float>(joint.direction * (joint.state_pos - joint.zero_offset) /
                                          joint.scale),
         0.0F, 0.0F, 0.0F,
-        static_cast<float>(command_sign_ * joint.direction * tau * joint.effort_scale));
+        static_cast<float>(command_sign_ * joint.direction * torque_nm));
       if (rc != 0) {
         ++consecutive_write_failures_;
         RCLCPP_WARN_THROTTLE(logger(), *clock_, b601_config::dm::write_warning_throttle_ms,

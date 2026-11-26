@@ -94,7 +94,7 @@ private:
     double kd{0.0};             // MIT 模式阻尼
     double vel_limit{0.0};      // rad/s，用于限速与 POS_VEL 模式的 vlim
     double target_slew{0.0};   // 关节位置目标每秒变化量（rad/s 或 m/s）
-    double torque_limit{0.0};  // MIT 总输出限幅（N·m 或 N）
+    double motor_torque_limit_nm{0.0};  // 电机侧 MIT 总输出限幅（N·m）
     double min_pos{0.0};       // 关节位置下限（rad 或 m）
     double max_pos{0.0};       // 关节位置上限
     double feedback_min_pos{0.0};  // 与急停一致的激活下限，也是反馈合理性守卫的基准

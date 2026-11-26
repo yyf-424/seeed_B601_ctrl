@@ -94,7 +94,7 @@
     <motor name="joint4_motor" joint="joint4" gear="1" forcerange="-10.0 10.0" forcelimited="true"/>
     <motor name="joint5_motor" joint="joint5" gear="1" forcerange="-10.0 10.0" forcelimited="true"/>
     <motor name="joint6_motor" joint="joint6" gear="1" forcerange="-10.0 10.0" forcelimited="true"/>
-    <motor name="finger_left_motor" joint="finger_left" gear="1" forcerange="-10.0 10.0" forcelimited="true"/>
+    <motor name="finger_left_motor" joint="finger_left" gear="1" forcerange="-1000.0 1000.0" forcelimited="true"/>
   </actuator>
 
   <!-- 传感器：便于和真机 /joint_states 对照 -->

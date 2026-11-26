@@ -48,7 +48,7 @@ dm_hardware:
   - 2.0
   - 2.0
   - 1.0
-  torque_limit:
+  motor_torque_limit_nm:
   - 24.0
   - 24.0
   - 24.0

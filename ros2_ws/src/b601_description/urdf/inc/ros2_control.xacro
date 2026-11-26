@@ -29,6 +29,17 @@
     <param name="feedback_max_pos">${bounds[1]}</param>
   </xacro:macro>
 
+  <xacro:macro name="b601_output_limit" params="joint hardware">
+    <xacro:property name="effort_scale" value="${joint['motor']['effort_scale']}"/>
+    <xacro:property name="torque_nm" value="${joint['max_motor_torque_nm'] if 'max_motor_torque_nm' in joint else joint['max_effort'] * effort_scale}"/>
+    <xacro:if value="${hardware == 'dm'}">
+      <param name="motor_torque_limit_nm">${torque_nm}</param>
+    </xacro:if>
+    <xacro:if value="${hardware == 'mujoco'}">
+      <param name="torque_limit">${torque_nm / effort_scale}</param>
+    </xacro:if>
+  </xacro:macro>
+
   <!-- 单个手臂关节：接口 + （仅 dm 后端）电机参数 -->
   <xacro:macro name="b601_arm_joint" params="name initial_position with_effort hardware cfg dm_command_mode dm_position_limits">
     <xacro:property name="jc" value="${cfg['joints'][name]}"/>
@@ -90,7 +101,7 @@
         <param name="min_pos">${jc['min_pos']}</param>
         <param name="max_pos">${jc['max_pos']}</param>
         <xacro:b601_dm_feedback_bounds bounds="${dm_position_limits[name]}"/>
-        <param name="torque_limit">${jc['max_effort']}</param>
+        <xacro:b601_output_limit joint="${jc}" hardware="${hardware}"/>
         <!-- 反馈跳变门限（rad/周期）：显式钉死，避免放宽 vel_limit 时把坏帧守卫也放松 -->
         <param name="feedback_jump_limit">${jc['feedback_jump_limit']}</param>
              只用激活检查，命令夹紧仍按真实限位。夹爪单位是 m，真值里单独给 0.002。 -->
@@ -106,7 +117,7 @@
         <param name="target_slew">${cfg['target_slew'][jc['type']]}</param>
         <param name="min_pos">${jc['min_pos']}</param>
         <param name="max_pos">${jc['max_pos']}</param>
-        <param name="torque_limit">${jc['max_effort']}</param>
+        <xacro:b601_output_limit joint="${jc}" hardware="${hardware}"/>
       </xacro:if>
     </joint>
   </xacro:macro>
@@ -271,7 +282,7 @@
           <param name="min_pos">${FL['min_pos']}</param>
           <param name="max_pos">${FL['max_pos']}</param>
           <xacro:b601_dm_feedback_bounds bounds="${dm_position_limits['finger_left']}"/>
-          <param name="torque_limit">${FL['max_effort']}</param>
+          <xacro:b601_output_limit joint="${FL}" hardware="${hardware}"/>
           <param name="feedback_jump_limit">${FL['feedback_jump_limit']}</param>
         </xacro:if>
         <xacro:if value="${hardware == 'mujoco'}">
@@ -281,7 +292,7 @@
           <param name="target_slew">${CFG['target_slew'][FL['type']]}</param>
           <param name="min_pos">${FL['min_pos']}</param>
           <param name="max_pos">${FL['max_pos']}</param>
-          <param name="torque_limit">${FL['max_effort']}</param>
+          <xacro:b601_output_limit joint="${FL}" hardware="${hardware}"/>
         </xacro:if>
       </joint>
 

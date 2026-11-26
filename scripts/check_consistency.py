@@ -22,11 +22,14 @@
 """
 
 import argparse
+import math
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import yaml
+
+from project_config import joint_effort_scale
 
 
 def load_urdf(path):
@@ -299,27 +302,39 @@ def check_urdf_matches_config(urdf, config_path, errors):
     with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     joints = cfg.get("joints", {})
+    system_name = cfg["robot"].get("ros2_control_name", "b601")
+    system = urdf["ros2_control"].get(system_name, {})
     for name, expected in joints.items():
         info = urdf["joints"].get(name)
         if info is None:
             errors.append(f"真值里有 {name}，但 URDF 里没有这个关节")
             continue
-        for key, urdf_key in (("min_pos", "lower"), ("max_pos", "upper"),
-                              ("max_velocity", "velocity"), ("max_effort", "effort")):
-            if key not in expected:
-                continue
+        effort_scale = joint_effort_scale(cfg, name)
+        torque_nm = expected.get("max_motor_torque_nm")
+        effort = float(torque_nm) / effort_scale if torque_nm is not None else expected["max_effort"]
+        limits = {"lower": expected["min_pos"], "upper": expected["max_pos"],
+                  "velocity": expected["max_velocity"], "effort": effort}
+        for urdf_key, value in limits.items():
             have = info[urdf_key]
-            want = float(expected[key])
+            want = float(value)
             if have is None or abs(have - want) > 1e-6:
                 errors.append(
-                    f"{name} 的 URDF {urdf_key}={have} 与真值 {key}={want} 不一致"
+                    f"{name} 的 URDF {urdf_key}={have} 与配置换算值 {want} 不一致"
                     "（xacro 是否漏传 project_config_file？）"
                 )
+        if system.get("plugin") == "b601_hardware/DmSystemHardware" and expected["control"]:
+            params = system["joints"].get(name, {}).get("params", {})
+            if torque_nm is None and "motor_torque_limit_nm" not in params:
+                have = float(params.get("torque_limit", "inf")) * effort_scale
+            else:
+                have = float(params.get("motor_torque_limit_nm", "inf"))
+            want = float(torque_nm) if torque_nm is not None else float(effort) * effort_scale
+            if not math.isclose(have, want, rel_tol=0.0, abs_tol=1e-6):
+                errors.append(f"{name} 的 DM 电机侧力矩上限 {have} N·m 与配置的 {want} N·m 不一致")
     # 手臂关节顺序
     arm = cfg.get("robot", {}).get("arm_joints", [])
     for name in arm:
-        if name not in urdf["ros2_control"].get(
-                cfg.get("robot", {}).get("ros2_control_name", "b601"), {}).get("joints", {}):
+        if name not in system.get("joints", {}):
             errors.append(f"真值的 arm_joints 里的 {name} 没有出现在 ros2_control 接口里")
 
 

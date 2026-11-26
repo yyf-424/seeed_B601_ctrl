@@ -114,10 +114,11 @@ hardware:
 固定增益、逐轴重力前馈及辨识模型来自 `controllers.mit`。停放位、J4 预置、分段等待、
 碰撞检查默认值及归中容差来自 `recenter`。控制器 YAML 和安全配置由该文件生成。
 
-整机运动约束由 `joints.min_pos/max_pos`、`joints.max_velocity`、`joints.max_effort` 和
+整机运动约束由 `joints.min_pos/max_pos`、`joints.max_velocity`、`joints.max_motor_torque_nm` 和
 `target_slew` 提供。手臂速度上限为 6.0 rad/s，夹爪为 0.05 m/s。位置目标的斜率分别为
 0.5 rad/s 和 0.5 m/s。MIT 的总输出包括 PD 和前馈。关节端 MIT 在下发前用最新反馈估算
 总力矩，电机仍按内部高速闭环计算。温度、总线故障和反馈失效继续触发停机保护。
+力矩上限统一填写电机侧 N·m。URDF 的直线关节 `effort` 由 xacro 按传动比换算。
 
 ```bash
 ./scripts/sync_config.py           # 同步生成的 ROS 参数文件和 SRDF 命名姿态

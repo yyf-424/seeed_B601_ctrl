@@ -15,12 +15,20 @@
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
+  <!-- URDF effort uses the joint's units. The project stores motor-side torque in N·m. -->
+  <xacro:macro name="b601_joint_limit" params="cfg name">
+    <xacro:property name="joint" value="${cfg['joints'][name]}"/>
+    <xacro:property name="driven" value="${cfg['joints'][cfg['robot']['gripper_joint']] if name == cfg['robot']['mimic_joint'] else joint}"/>
+    <xacro:property name="effort" value="${joint['max_motor_torque_nm'] / driven['motor']['effort_scale'] if 'max_motor_torque_nm' in joint else joint['max_effort']}"/>
+    <limit lower="${joint['min_pos']}" upper="${joint['max_pos']}"
+           effort="${effort}" velocity="${joint['max_velocity']}"/>
+  </xacro:macro>
+
   <xacro:macro name="b601_links" params="project_config_file">
 
     <!-- 唯一的限位来源：config/b601_project.yaml 的 joints 段。
          这里不再写任何数字 —— 想改限位只有那一个地方可改。 -->
     <xacro:property name="CFG" value="${xacro.load_yaml(project_config_file)}"/>
-    <xacro:property name="J" value="${CFG['joints']}"/>
     <xacro:property name="G" value="${CFG['model']}"/>
     <xacro:b601_materials cfg="${CFG}"/>
 
@@ -71,8 +79,7 @@
       <axis xyz="${' '.join(map(str, G['joints']['joint1']['axis']['xyz']))}"/>
       <!-- 限位按 2026-11-20 实测收紧：真机底座实际只能到 ±2.60 rad（手推到碰停测得
            −2.597 / +2.627），官方 URDF 的 ±2.8 越过了机械停止位。 -->
-      <limit lower="${J['joint1']['min_pos']}" upper="${J['joint1']['max_pos']}"
-             effort="${J['joint1']['max_effort']}" velocity="${J['joint1']['max_velocity']}"/>
+      <xacro:b601_joint_limit cfg="${CFG}" name="joint1"/>
     </joint>
 
     <!-- ========================================================== 关节 2 -->
@@ -98,8 +105,7 @@
       <parent link="link1"/>
       <child link="link2"/>
       <axis xyz="${' '.join(map(str, G['joints']['joint2']['axis']['xyz']))}"/>
-      <limit lower="${J['joint2']['min_pos']}" upper="${J['joint2']['max_pos']}"
-             effort="${J['joint2']['max_effort']}" velocity="${J['joint2']['max_velocity']}"/>
+      <xacro:b601_joint_limit cfg="${CFG}" name="joint2"/>
     </joint>
 
     <!-- ========================================================== 关节 3 -->
@@ -124,8 +130,7 @@
       <parent link="link2"/>
       <child link="link3"/>
       <axis xyz="${' '.join(map(str, G['joints']['joint3']['axis']['xyz']))}"/>
-      <limit lower="${J['joint3']['min_pos']}" upper="${J['joint3']['max_pos']}"
-             effort="${J['joint3']['max_effort']}" velocity="${J['joint3']['max_velocity']}"/>
+      <xacro:b601_joint_limit cfg="${CFG}" name="joint3"/>
     </joint>
 
     <!-- ========================================================== 关节 4 -->
@@ -152,8 +157,7 @@
       <parent link="link3"/>
       <child link="link4"/>
       <axis xyz="${' '.join(map(str, G['joints']['joint4']['axis']['xyz']))}"/>
-      <limit lower="${J['joint4']['min_pos']}" upper="${J['joint4']['max_pos']}"
-             effort="${J['joint4']['max_effort']}" velocity="${J['joint4']['max_velocity']}"/>
+      <xacro:b601_joint_limit cfg="${CFG}" name="joint4"/>
     </joint>
 
     <!-- ========================================================== 关节 5 -->
@@ -176,8 +180,7 @@
       <parent link="link4"/>
       <child link="link5"/>
       <axis xyz="${' '.join(map(str, G['joints']['joint5']['axis']['xyz']))}"/>
-      <limit lower="${J['joint5']['min_pos']}" upper="${J['joint5']['max_pos']}"
-             effort="${J['joint5']['max_effort']}" velocity="${J['joint5']['max_velocity']}"/>
+      <xacro:b601_joint_limit cfg="${CFG}" name="joint5"/>
     </joint>
 
     <!-- ========================================================== 关节 6 -->
@@ -200,8 +203,7 @@
       <parent link="link5"/>
       <child link="link6"/>
       <axis xyz="${' '.join(map(str, G['joints']['joint6']['axis']['xyz']))}"/>
-      <limit lower="${J['joint6']['min_pos']}" upper="${J['joint6']['max_pos']}"
-             effort="${J['joint6']['max_effort']}" velocity="${J['joint6']['max_velocity']}"/>
+      <xacro:b601_joint_limit cfg="${CFG}" name="joint6"/>
     </joint>
 
     <!-- =========================================================== 夹爪 -->
@@ -245,8 +247,7 @@
       <parent link="end_link"/>
       <child link="finger_left_link"/>
       <axis xyz="${' '.join(map(str, G['joints']['finger_left']['axis']['xyz']))}"/>
-      <limit lower="${J['finger_left']['min_pos']}" upper="${J['finger_left']['max_pos']}"
-             effort="${J['finger_left']['max_effort']}" velocity="${J['finger_left']['max_velocity']}"/>
+      <xacro:b601_joint_limit cfg="${CFG}" name="finger_left"/>
     </joint>
 
     <!-- 右指：从动关节（mimic），位移与左指严格相反 → 平行夹爪 -->
@@ -268,8 +269,7 @@
       <parent link="end_link"/>
       <child link="finger_right_link"/>
       <axis xyz="${' '.join(map(str, G['joints']['finger_right']['axis']['xyz']))}"/>
-      <limit lower="${J['finger_right']['min_pos']}" upper="${J['finger_right']['max_pos']}"
-             effort="${J['finger_right']['max_effort']}" velocity="${J['finger_right']['max_velocity']}"/>
+      <xacro:b601_joint_limit cfg="${CFG}" name="finger_right"/>
       <!-- 左指移动 dy，右指移动 -dy；这是“一个驱动器两个手指”的建模方式 -->
       <xacro:property name="M" value="${G['joints']['finger_right']['mimic']}"/>
       <mimic joint="${M['joint']}" multiplier="${M['multiplier']}" offset="${M['offset']}"/>

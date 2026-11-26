@@ -304,7 +304,7 @@ def main() -> int:
     for jn in ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]:
         j = by_id = next(x for x in joints if x.name == jn)
         lim = abs(j.limit[1] - j.limit[0]) if j.limit else 100
-        # 力矩上限取 URDF 的 <limit effort>（真值 b601_project.yaml 的 max_effort）：
+        # 执行器输出上限取 URDF 已换算到关节单位的 <limit effort>：
         # 写死会与真机 torque_limit 脱钩 —— 2026-11-23 用户确认 MIT 模式下
         # j1-j3(4340P)=24 N·m、j4-j7(4310)=10 N·m，之前这里写死 27/7 已过时。
         eff = j.effort if j.effort else 10.0

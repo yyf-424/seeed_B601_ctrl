@@ -17,6 +17,13 @@ def load_project_config():
     return yaml.safe_load(TRUTH.read_text(encoding="utf-8"))
 
 
+def joint_effort_scale(project, name):
+    robot = project["robot"]
+    if name == robot["mimic_joint"]:
+        name = robot["gripper_joint"]
+    return float(project["joints"][name]["motor"]["effort_scale"])
+
+
 def expanded_position_range(measured, fraction):
     lower, upper = (Decimal(str(value)) for value in measured)
     margin = (upper - lower) * Decimal(str(fraction))

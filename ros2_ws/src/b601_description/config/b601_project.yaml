@@ -43,7 +43,7 @@ robot:
 #
 #   min_pos / max_pos     URDF limit 与 ros2_control 软限位，一改全改
 #   max_velocity          关节单位（rad/s 或 m/s），用于命令限速和 MoveIt 时间参数化
-#   max_effort            关节单位力矩，同时作为真机 torque_limit
+#   max_motor_torque_nm   电机侧力矩上限（N·m）；URDF 按关节单位换算
 #   startup               上电/启动姿态（mock 初值 + 真机"以为在哪儿" + 安全节点警告基线）
 #   motor.*               仅 hardware:=dm 生效；scale 把电机 rad 换成关节单位
 #   control               false = 没有命令接口（mimic 从动指）
@@ -67,7 +67,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
-    max_effort: 24.0
+    max_motor_torque_nm: 24.0
     startup: 0.0
     control: true
     motor:
@@ -92,7 +92,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
-    max_effort: 24.0
+    max_motor_torque_nm: 24.0
     startup: -0.3
     control: true
     motor:
@@ -115,7 +115,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.21
-    max_effort: 24.0
+    max_motor_torque_nm: 24.0
     startup: -0.6
     control: true
     motor:
@@ -138,7 +138,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.37
-    max_effort: 10.0
+    max_motor_torque_nm: 10.0
     startup: 0.0
     control: true
     motor:
@@ -161,7 +161,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.37
-    max_effort: 10.0
+    max_motor_torque_nm: 10.0
     startup: 0.0
     control: true
     motor:
@@ -184,7 +184,7 @@ joints:
     max_velocity: 6.0
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.37
-    max_effort: 10.0
+    max_motor_torque_nm: 10.0
     startup: 0.0
     control: true
     motor:
@@ -212,7 +212,7 @@ joints:
     max_velocity: 0.05
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.05
-    max_effort: 10.0
+    max_motor_torque_nm: 10.0
     startup: 0.0
     control: true
     motor:
@@ -239,7 +239,7 @@ joints:
     max_velocity: 0.05
     # 反馈跳变门限（rad/周期）：钉死它，放宽角速度时守卫不跟着放松
     feedback_jump_limit: 0.05
-    max_effort: 10.0
+    max_motor_torque_nm: 0.10  # 从动指的模型等效上限，使用主动指的传动比
     startup: 0.0
     control: false
 
@@ -391,10 +391,10 @@ controllers:
           low_after_first_target: true
           q_ref_lpf_hz: 0.0
 
-      # 夹爪使用独立纯 PD。关节单位换算后，电机侧 Kp/Kd 为 6.5/1.2。
+      # 夹爪使用独立纯 PD。电机侧 Kp/Kd 为 6.0/1.2。
       gripper_mit:
         per_joint:
-          finger_left: {kp_move: 65000.0, kd_move: 12000.0}
+          finger_left: {kp_move: 60000.0, kd_move: 12000.0}
         group:
           <<: *arm_mit_group
           settle_band_min: 0.0005
