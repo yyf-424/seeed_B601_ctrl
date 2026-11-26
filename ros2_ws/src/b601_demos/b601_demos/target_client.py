@@ -122,10 +122,12 @@ class TargetClient:
         """Expand local joint edits into one full joint target for the ROS interface."""
         positions = dict(zip(message.name, message.position))
         velocities = dict(zip(message.name, message.velocity))
+        tff = dict(zip(message.name, message.effort))
         if (not positions or len(positions) != len(message.name)
                 or len(message.position) != len(message.name)
                 or (message.velocity and len(message.velocity) != len(message.name))
-                or message.effort or not positions.keys() <= set(self.joints)):
+                or (message.effort and len(message.effort) != len(message.name))
+                or not positions.keys() <= set(self.joints)):
             raise ValueError("invalid joint target")
         with self.lock:
             values = []
@@ -144,6 +146,7 @@ class TargetClient:
         return JointState(
             header=message.header, name=list(self.joints), position=values,
             velocity=[velocities.get(name, 0.0) for name in self.joints] if velocities else [],
+            effort=[tff.get(name, 0.0) for name in self.joints] if tff else [],
         )
 
     def remember_target(self, frame):
@@ -157,20 +160,30 @@ class TargetClient:
         self.publisher.publish(frame)
         if (all(self.limits[name]["min_pos"] <= value <= self.limits[name]["max_pos"]
                 for name, value in zip(frame.target.name, frame.target.position))
-                and all(isfinite(value) for value in frame.target.velocity)):
+                and all(isfinite(value) for value in [*frame.target.velocity, *frame.target.effort])):
             self.remember_target(frame)
 
-    def set_joints(self, positions, timeout, *, spinning=False):
+    def set_joints(self, positions, timeout, *, velocities=None, tff=None, spinning=False):
         message = JointState(name=list(positions), position=list(positions.values()))
-        frame = self.frame(self.complete_target(message))
+        target = self.complete_target(message)
+        for field, values in (("velocity", velocities), ("effort", tff)):
+            if values:
+                if not values.keys() <= set(self.joints):
+                    raise ValueError(f"unknown joint in {field}")
+                setattr(target, field, [float(values.get(name, 0.0)) for name in self.joints])
+        frame = self.frame(target)
         reply = self.call(self.sender, SetTarget.Request(frame=frame), timeout, spinning=spinning)
         if not reply.accepted:
             raise RuntimeError(reply.message)
         self.remember_target(frame)
         return reply.dispatch_id
 
-    def set_joint(self, joint, position, timeout, *, spinning=False):
-        return self.set_joints({joint: position}, timeout, spinning=spinning)
+    def set_joint(self, joint, position, timeout, *, velocity=None, tff=None, spinning=False):
+        return self.set_joints(
+            {joint: position}, timeout, spinning=spinning,
+            velocities={joint: velocity} if velocity is not None else None,
+            tff={joint: tff} if tff is not None else None,
+        )
 
     def close(self, timeout):
         if rclpy.ok():

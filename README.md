@@ -309,7 +309,7 @@ source scripts/ros_env.sh && b601_source_workspace
 python3 scripts/test_target_arbitration.py --web
 ```
 
-运行 `python3 scripts/test_target_arbitration.py` 执行七组隔离仲裁回归。加 `--physical` 验证物理场景两个起始姿态的归中与失能门控。详见 [复测步骤](validation/target-web.md#复测)。
+运行 `python3 scripts/test_target_arbitration.py` 执行隔离仲裁回归。加 `--physical` 验证物理场景两个起始姿态的归中与失能门控。详见 [复测步骤](validation/target-web.md#复测)。
 
 浏览器打开 [本地目标控制台](http://127.0.0.1:8765/)，可以指定网页、外部策略或其他来源名。
 指定 `web` 后，可用滑块或数值框编辑同一列表中的七个关节，点击「发送七关节目标」提交。
@@ -351,8 +351,19 @@ python3 scripts/dm_mit_move.py --set 'joint1=0.035'
 | `/status` | `std_msgs/msg/String` | JSON，包含指定来源、当前来源、公开会话号、最近七关节目标、整机采纳编号和掉线持位状态 |
 
 未指定来源时，第一个申请成功的客户端持有整机控制权。手动指定后，只有名称匹配的客户端可以申请。
-`joint1` 到 `joint6` 的位置单位为 rad，`finger_left` 为 m。七个位置按关节名配对，也可提交七个速度。
-SDK 支持局部编辑，首次用实测反馈补齐七关节，后续保留同一会话已发送的其它目标。
+每帧包含七个关节名和位置，可同时提交七个速度和七个任务前馈。原生 ROS 2 使用
+`TargetFrame.target` 中的 `name`、`position`、`velocity` 和 `effort`，其中 `effort` 承载 `tff`。
+
+| 目标量 | `joint1` 至 `joint6` | `finger_left` |
+|---|---|---|
+| 位置 | rad | m |
+| 速度 | rad/s | m/s |
+| `tff` | N·m | N |
+
+每帧省略 `tff` 时，任务前馈立即归零。MIT 前馈等于重力补偿、摩擦补偿和任务前馈之和。
+非零任务前馈在最近一次目标采纳后默认有效 0.5 秒。只发会话心跳时，该项仍按时归零。
+SDK 支持局部编辑，首次用实测反馈补齐七关节，后续沿用同一会话已发出的其它位置。
+`set_joints(..., velocities={...}, tff={...})` 按名称传入可选量，省略的关节取零。
 会话令牌用于命令和释放，状态话题只公布独立的公开编号。ROS 域内的应用应部署为可信节点，
 若需隔离未经授权的参与者，由部署端设置 DDS/SROS2 发布与服务权限。
 
@@ -387,7 +398,7 @@ ros2 topic echo /b601_target_arbiter/status --qos-durability transient_local --o
 ```
 
 流式策略用 `TargetClient(node, "policy")` 申请控制权，按策略频率调用
-`client.publish(JointState(name=[...], position=[...]))`，并保持节点的 ROS executor
+`client.publish(JointState(name=[...], position=[...], velocity=[...], effort=[...]))`，并保持节点的 ROS executor
 运行以发送定时心跳。ROS 2 原生客户端可订阅状态，调用 `select_source`，
 发布带私有会话号和递增序号的 `TargetFrame`，也可用 `set_target` 取得转发编号。
 `select_source` 的状态公开编号可与 `revoke_source` 一起使用。
@@ -399,11 +410,37 @@ ros2 topic echo /b601_target_arbiter/status --qos-durability transient_local --o
 转发节点通过各组的 `target_holding` 和 `target_applied` 报告状态。断流持位依赖转发进程、
 ROS 通信和新鲜反馈。使用主线自带的刚度切换时，持位目标仍可按正常策略进入低刚度。
 
+### HTTP 与命令行
+
+本地网页可逐关节填写速度和任务前馈。HTTP `POST /api/target` 接收以下 JSON，
+`session_id` 由 `POST /api/select` 返回。未列出的速度和任务前馈取零。
+
+```json
+{
+  "session_id": "<session_id>",
+  "sequence": 1,
+  "positions": {
+    "joint1": 0.04, "joint2": -0.3, "joint3": -0.6, "joint4": 0.03,
+    "joint5": 0.0, "joint6": 0.0, "finger_left": 0.015
+  },
+  "velocities": {"joint1": 0.01},
+  "tff": {"joint1": 0.25, "finger_left": 0.1}
+}
+```
+
+在 MuJoCo 中用命令行发同类目标：
+
+```bash
+python3 scripts/dm_mit_move.py --set 'joint1=0.04,finger_left=0.015' \
+  --vel 'joint1=0.01' --tff 'joint1=0.25,finger_left=0.1'
+```
+
 ### 复测
 
 ```bash
 source scripts/ros_env.sh && b601_source_workspace
-python3 scripts/test_target_arbitration.py
+python3 scripts/test_target_arbitration.py --http-port 8876
+python3 scripts/test_target_arbitration.py --physical --http-port 8876
 ```
 
 这个脚本会自动启动和关闭隔离 MuJoCo，验证转发节点的唯一输出、整机独占会话、七关节目标、

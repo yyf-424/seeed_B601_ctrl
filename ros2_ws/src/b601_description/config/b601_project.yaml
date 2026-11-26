@@ -366,7 +366,7 @@ controllers:
           friction_scale: 0.0
           friction_vel_eps: 0.02
           use_gravity: false
-          task_torque_timeout_sec: 0.0
+          task_torque_timeout_sec: 0.5  # MIT 任务前馈沿用已有超时，位置目标继续有效。
           target_velocity_timeout_sec: 0.25
           state_interfaces: [position, velocity]
 

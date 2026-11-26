@@ -279,7 +279,7 @@ class TargetArbiter(Node):
         session = self.session if self.session and self.session.id == frame.session_id else None
         source = session.source if session else ""
         try:
-            positions, velocities = self.prepare(frame, session)
+            positions, velocities, tff = self.prepare(frame, session)
         except ValueError as error:
             self.event("reject", source, str(error))
             return False, str(error), 0
@@ -291,11 +291,14 @@ class TargetArbiter(Node):
             "source": source, "session": session.status_id,
             "sequence": frame.sequence, "dispatch_id": str(self.dispatch_id),
             "position": {name: positions[name] for name in self.joints},
+            "velocity": {name: velocities.get(name, 0.0) for name in self.joints},
+            "tff": {name: tff.get(name, 0.0) for name in self.joints},
         }
         for controller, joints in self.routes.items():
             target = JointState(
                 name=list(joints), position=[positions[name] for name in joints],
                 velocity=[velocities[name] for name in joints] if velocities else [],
+                effort=[tff.get(name, 0.0) for name in joints],
             )
             self.outputs[controller].publish(
                 AuthorizedTarget(kind=AuthorizedTarget.TARGET, arbiter_id=self.epochs[controller],
@@ -313,17 +316,19 @@ class TargetArbiter(Node):
         names = msg.name
         if (len(names) != len(self.joints) or set(names) != set(self.joints)
                 or len(msg.position) != len(names)
-                or (msg.velocity and len(msg.velocity) != len(names)) or msg.effort):
-            raise ValueError("send all seven configured joints exactly once with positions and optional velocities")
+                or (msg.velocity and len(msg.velocity) != len(names))
+                or (msg.effort and len(msg.effort) != len(names))):
+            raise ValueError("send all seven configured joints exactly once with positions and optional velocities and tff")
         velocities = dict(zip(names, msg.velocity))
         positions = dict(zip(names, msg.position))
-        if not all(isfinite(value) for value in [*positions.values(), *velocities.values()]):
+        tff = dict(zip(names, msg.effort))
+        if not all(isfinite(value) for value in [*positions.values(), *velocities.values(), *tff.values()]):
             raise ValueError("non-finite target")
         for name, value in positions.items():
             bounds = self.limits[name]
             if not bounds["min_pos"] <= value <= bounds["max_pos"]:
                 raise ValueError(f"{name} outside configured position bounds")
-        return positions, velocities
+        return positions, velocities, tff
 
     def on_applied(self, controller, message):
         previous = self.applied.get(controller, 0)

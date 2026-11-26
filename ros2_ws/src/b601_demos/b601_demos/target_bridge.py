@@ -1,4 +1,4 @@
-"""Forward authorized targets to the stock MIT controller's JointState input."""
+"""Forward authorized position, velocity and task feedforward to the MIT controller."""
 import json
 from collections import deque
 from math import isfinite

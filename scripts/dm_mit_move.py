@@ -27,7 +27,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from pathlib import Path
+from math import isfinite
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticStatus
@@ -53,12 +53,14 @@ STATUS_QOS = QoSProfile(
 
 
 ARM = PROJECT["robot"]["arm_joints"]
+GRIPPER = PROJECT["robot"]["gripper_joint"]
+JOINTS = (*ARM, GRIPPER)
 
 
 def load_limits():
     j = PROJECT["joints"]
-    return ({n: float(j[n]["min_pos"]) for n in ARM},
-            {n: float(j[n]["max_pos"]) for n in ARM})
+    return ({n: float(j[n]["min_pos"]) for n in JOINTS},
+            {n: float(j[n]["max_pos"]) for n in JOINTS})
 
 
 class MitMover(Node):
@@ -101,7 +103,7 @@ class MitMover(Node):
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
             rclpy.spin_once(self, timeout_sec=SETTINGS["poll_sec"])
-            if (all(n in self.current for n in ARM) and self.safety != "UNKNOWN"
+            if (all(n in self.current for n in JOINTS) and self.safety != "UNKNOWN"
                     and self.controller_seen):
                 return True
         if not self.controller_seen:
@@ -110,9 +112,13 @@ class MitMover(Node):
                 "此时发目标不会被执行；请确认 controllers:=... b601_mit_controller 且状态 active")
         return False
 
-    def goto(self, target: dict[str, float], label: str) -> bool:
+    def goto(self, target: dict[str, float], label: str,
+             velocities: dict[str, float], tff: dict[str, float]) -> bool:
         start = {n: self.current[n] for n in ARM}
         want = {n: target.get(n, start[n]) for n in ARM}
+        if GRIPPER in target or GRIPPER in velocities or GRIPPER in tff:
+            current_gripper = min(self.hi[GRIPPER], max(self.lo[GRIPPER], self.current[GRIPPER]))
+            want[GRIPPER] = target.get(GRIPPER, current_gripper)
 
         # ---- 前置校验：不合法就根本不动 ----
         for n, v in want.items():
@@ -147,8 +153,10 @@ class MitMover(Node):
                 self.get_logger().warn(f"{label}：安全状态 WARNING（继续，不停机）")
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
-            msg.name = ARM
-            msg.position = [want[n] for n in ARM]
+            msg.name = list(want)
+            msg.position = list(want.values())
+            msg.velocity = [velocities.get(n, 0.0) for n in msg.name] if velocities else []
+            msg.effort = [tff.get(n, 0.0) for n in msg.name] if tff else []
             self.targets.publish(msg)
 
             elapsed = time.monotonic() - t0
@@ -194,7 +202,12 @@ class MitMover(Node):
             #   ② 误差进入容差，或者"已经静止 settle 秒"（纯 MIT 稳态下垂，误差下不去）。
             # "静止即到位"还要求确实走过一大半路程，否则只读模式/未接管时会假成功。
             settled = quiet > self.settle and err_now <= max(self.tol, SETTINGS["settled_initial_error_fraction"] * err0)
-            done = reached and (err_now <= self.tol or settled)
+            gripper_reached = (
+                GRIPPER not in target or
+                abs(self.current[GRIPPER] - target[GRIPPER])
+                <= PROJECT["validation"]["mit_five_poses"]["criteria"]["gripper_max_error_m"]
+            )
+            done = reached and (err_now <= self.tol or settled) and gripper_reached
             if done or elapsed > SETTINGS["deadline_scale"] * max(
                 move / max(self.slew, PROJECT["implementation"]["mit"]["slew_min"]),
                 SETTINGS["deadline_floor_sec"],
@@ -202,6 +215,9 @@ class MitMover(Node):
                 self.get_logger().info(
                     f"{label}：结束，稳态最大误差 {err_now:.3f} rad、最大速度 {vel_now:.3f} rad/s"
                     "（纯 MIT 无重力补偿时误差≈重力下垂量）")
+                if not gripper_reached:
+                    self.get_logger().error(f"{label}：夹爪未到位，实测 {self.current[GRIPPER]:.4f} m")
+                    return False
                 return True
             time.sleep(dt)
 
@@ -217,9 +233,12 @@ def parse_pose(spec: str) -> dict[str, float]:
             raise ValueError(f"无法解析 '{part}'（应为 joint2=-0.35）")
         k, v = part.split("=", 1)
         k = k.strip()
-        if k not in ARM:
+        if k not in JOINTS:
             raise ValueError(f"未知关节 '{k}'")
-        out[k] = float(v)
+        value = float(v)
+        if not isfinite(value):
+            raise ValueError(f"{k} 的目标值必须为有限数")
+        out[k] = value
     return out
 
 
@@ -231,6 +250,8 @@ def main() -> int:
                     help="MIT 控制器心跳（激活后 ~10 Hz 发布），用于确认控制器真在跑")
     ap.add_argument("--set", default="", help="目标姿态，例：joint2=-0.35,joint5=0.2")
     ap.add_argument("--poses", default="", help="多个姿态用 ; 分隔，依次执行")
+    ap.add_argument("--vel", default="", help="目标速度，例如 joint1=0.05（rad/s，夹爪 m/s）")
+    ap.add_argument("--tff", default="", help="任务前馈，例如 joint1=0.2（N·m，夹爪 N）")
     ap.add_argument("--rate", type=float, default=SETTINGS["rate"], help="目标发布频率 Hz")
     ap.add_argument("--tolerance", type=float, default=SETTINGS["tolerance"],
                     help="到位判据 rad（只用于判到位，不会让目标跳步；纯 MIT 有下垂，别设太小）")
@@ -242,6 +263,14 @@ def main() -> int:
     if not args.set and not args.poses:
         print("至少要给 --set 或 --poses", file=sys.stderr)
         return 2
+
+    try:
+        velocities = parse_pose(args.vel)
+        tff = parse_pose(args.tff)
+        specs = [p for p in args.poses.split(";") if p.strip()] if args.poses else [args.set]
+        targets = [parse_pose(spec) for spec in specs]
+    except ValueError as error:
+        ap.error(str(error))
 
     rclpy.init()
     debug_topic = args.debug_topic or f"/{args.controller}/debug"
@@ -255,10 +284,8 @@ def main() -> int:
             + f"；安全状态 {node.safety}；斜坡 {node.slew:.2f} rad/s")
 
         node.targets.select(SETTINGS["ready_timeout_sec"])
-        specs = [p for p in args.poses.split(";") if p.strip()] if args.poses else [args.set]
-        for i, spec in enumerate(specs, 1):
-            target = parse_pose(spec)
-            if not node.goto(target, f"[{i}/{len(specs)}] {spec}"):
+        for i, (spec, target) in enumerate(zip(specs, targets), 1):
+            if not node.goto(target, f"[{i}/{len(specs)}] {spec}", velocities, tff):
                 node.get_logger().error("中止后续姿态")
                 return 1
         node.get_logger().info("全部姿态完成")

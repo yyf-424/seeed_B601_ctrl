@@ -578,9 +578,6 @@ controller_interface::CallbackReturn B601MitController::on_configure(
   target_sub_ = node->create_subscription<sensor_msgs::msg::JointState>(
     "~/joint_target", rclcpp::SystemDefaultsQoS(),
     std::bind(&B601MitController::target_callback, this, std::placeholders::_1));
-  task_sub_ = node->create_subscription<std_msgs::msg::Float64MultiArray>(
-    "~/task_torque", b601_config::mit::topic_depth,
-    std::bind(&B601MitController::task_torque_callback, this, std::placeholders::_1));
   ff_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/ff", b601_config::mit::topic_depth);
   debug_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/debug", b601_config::mit::topic_depth);
 
@@ -670,7 +667,6 @@ controller_interface::CallbackReturn B601MitController::on_activate(
     seq_seen_ = init.seq;
     target_buffer_.writeFromNonRT(init);
   }
-  task_buffer_.writeFromNonRT({});
   activation_time_ns_ = get_node()->now().nanoseconds();
   accepting_commands_ = true;
   RCLCPP_INFO(
@@ -697,13 +693,15 @@ void B601MitController::target_callback(const sensor_msgs::msg::JointState::Shar
   const auto stamp_ns = get_node()->now().nanoseconds();
   const auto n = joint_names_.size();
   if (!accepting_commands_.load() || msg->name.size() != msg->position.size() ||
-    (!msg->velocity.empty() && msg->velocity.size() != msg->name.size()))
+    (!msg->velocity.empty() && msg->velocity.size() != msg->name.size()) ||
+    (!msg->effort.empty() && msg->effort.size() != msg->name.size()))
   {
     return;
   }
   TargetCommand cmd;
   cmd.q.resize(n);
   cmd.velocity.assign(n, 0.0);
+  cmd.tff.assign(n, 0.0);
   for (std::size_t i = 0; i < n; ++i) {
     const auto found = std::find(msg->name.begin(), msg->name.end(), joint_names_[i]);
     if (found == msg->name.end() || std::find(found + 1, msg->name.end(), *found) != msg->name.end()) {
@@ -717,7 +715,10 @@ void B601MitController::target_callback(const sensor_msgs::msg::JointState::Shar
     if (!msg->velocity.empty()) {
       cmd.velocity[i] = msg->velocity[k];
     }
-    if (!std::isfinite(cmd.q[i]) || !std::isfinite(cmd.velocity[i])) {
+    if (!msg->effort.empty()) {
+      cmd.tff[i] = msg->effort[k];
+    }
+    if (!std::isfinite(cmd.q[i]) || !std::isfinite(cmd.velocity[i]) || !std::isfinite(cmd.tff[i])) {
       return;
     }
   }
@@ -725,18 +726,6 @@ void B601MitController::target_callback(const sensor_msgs::msg::JointState::Shar
   cmd.seq = ++target_seq_;
   target_buffer_.writeFromNonRT(cmd);
   target_received_ = true;
-}
-
-void B601MitController::task_torque_callback(
-  const std_msgs::msg::Float64MultiArray::SharedPtr msg)
-{
-  const auto stamp_ns = get_node()->now().nanoseconds();
-  if (!accepting_commands_.load() || msg->data.size() != joint_names_.size() ||
-    !std::all_of(msg->data.begin(), msg->data.end(), [](double x) {return std::isfinite(x);}))
-  {
-    return;
-  }
-  task_buffer_.writeFromNonRT({msg->data, stamp_ns});
 }
 
 // ---------------------------------------------------------------- 重力前馈计算
@@ -824,9 +813,7 @@ controller_interface::return_type B601MitController::update(
   const bool velocity_fresh = valid_target && is_fresh(cmd->stamp_ns, target_velocity_timeout_sec_);
   const bool moving_reference = velocity_fresh &&
     std::any_of(cmd->velocity.begin(), cmd->velocity.end(), [](double v) {return v != 0.0;});
-  const auto * task = task_buffer_.readFromRT();
-  const bool task_fresh = task && task->torque.size() == n &&
-    is_fresh(task->stamp_ns, task_torque_timeout_sec_);
+  const bool task_fresh = valid_target && is_fresh(cmd->stamp_ns, task_torque_timeout_sec_);
   if (valid_target && cmd->seq != seq_seen_)
   {
     bool changed = done_ && moving_reference;
@@ -941,7 +928,7 @@ controller_interface::return_type B601MitController::update(
       : 0.0;
     const double friction =
       -friction_scale * friction_[i] * std::tanh(qd_f_[i] / friction_vel_eps_);
-    const double task_torque = task_fresh ? task->torque[i] : 0.0;
+    const double task_torque = task_fresh ? cmd->tff[i] : 0.0;
     ff_components_[i] = friction;
     ff_components_[n + i] = gravity;
     ff_components_[2 * n + i] = task_torque;

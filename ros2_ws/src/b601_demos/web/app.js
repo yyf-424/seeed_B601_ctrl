@@ -106,9 +106,28 @@ function makeRows(names) {
       edited.add(name);
       refresh();
     });
-    row.append(title, measured, slider, number);
+    const references = document.createElement("div");
+    references.className = "joint-references";
+    const [velocity, tff] = [["速度", `${unit}/s`], ["任务前馈", unit === "m" ? "N" : "N·m"]]
+      .map(([caption, referenceUnit]) => {
+        const field = document.createElement("label");
+        field.textContent = `${caption} (${referenceUnit})`;
+        const input = document.createElement("input");
+        input.type = "number";
+        input.step = "any";
+        input.placeholder = "0";
+        input.setAttribute("aria-label", `${label} ${field.textContent}`);
+        input.addEventListener("input", () => {
+          edited.add(name);
+          refresh();
+        });
+        field.append(input);
+        references.append(field);
+        return input;
+      });
+    row.append(title, measured, slider, number, references);
     list.append(row);
-    rows.set(name, { measured, slider, number, unit });
+    rows.set(name, { measured, slider, number, velocity, tff, unit });
   }
 }
 
@@ -254,11 +273,30 @@ async function sendTargets() {
     }
     return [name, input.valueAsNumber];
   }));
+  const optional = (field) => {
+    const values = {};
+    for (const [name, row] of rows) {
+      const input = row[field];
+      if (!input.checkValidity()) {
+        input.reportValidity();
+        throw new Error(`${name} 的目标值无效。`);
+      }
+      if (input.value !== "") values[name] = input.valueAsNumber;
+    }
+    return values;
+  };
+  const velocities = optional("velocity");
+  const tff = optional("tff");
   const reply = await api("/api/target", {
-    session_id: session.id, sequence: ++session.sequence, positions,
+    session_id: session.id, sequence: ++session.sequence, positions, velocities, tff,
   });
   for (const name of edited) {
-    if (rows.get(name).number.valueAsNumber === positions[name]) edited.delete(name);
+    const row = rows.get(name);
+    if (row.velocity.valueAsNumber === velocities[name]) row.velocity.value = "";
+    if (row.tff.valueAsNumber === tff[name]) row.tff.value = "";
+    if (row.number.valueAsNumber === positions[name] && !row.velocity.value && !row.tff.value) {
+      edited.delete(name);
+    }
   }
   notice(`七关节目标已转发，编号 ${reply.dispatch_id}。`);
 }

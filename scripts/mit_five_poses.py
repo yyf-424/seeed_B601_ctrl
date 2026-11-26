@@ -69,7 +69,7 @@ def validate_configuration(controllers_file=None):
     for group, joints in (("b601_mit_arm", NAMES[:6]), ("b601_mit_gripper", NAMES[6:])):
         params = tool_cfg[group]["ros__parameters"]
         assert params["joints"] == joints and params["motor_impedance"] and not params["free_enabled"]
-        assert params["gravity_scale"] == params["friction_scale"] == params["task_torque_timeout_sec"] == 0
+        assert params["gravity_scale"] == params["friction_scale"] == 0
         assert not params["use_gravity"]
     prior = PLAN["start"]
     for pose in PLAN["poses"]:

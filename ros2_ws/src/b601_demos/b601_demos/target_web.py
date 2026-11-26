@@ -160,6 +160,12 @@ class TargetWeb(Node):
             if not isinstance(positions, dict):
                 raise ValueError("positions must be an object keyed by joint name")
             target = JointState(name=list(positions), position=[float(v) for v in positions.values()])
+            for key, field in (("velocities", "velocity"), ("tff", "effort")):
+                values = data.get(key, {})
+                if not isinstance(values, dict) or not values.keys() <= positions.keys():
+                    raise ValueError(f"{key} must be an object keyed by joint name")
+                if values:
+                    setattr(target, field, [float(values.get(name, 0.0)) for name in target.name])
             request = SetTarget.Request(frame=TargetFrame(
                 session_id=data["session_id"], sequence=data["sequence"], target=target))
             client = self.set_target

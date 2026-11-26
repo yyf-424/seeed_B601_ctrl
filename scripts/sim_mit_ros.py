@@ -83,7 +83,6 @@ class Harness(Node):
         self.create_subscription(
             Float64MultiArray, f"/{controller}/state", self._on_state_msg, 10)
         self.targets = TargetClient(self, source)
-        self.task_pub = self.create_publisher(Float64MultiArray, f"/{controller}/task_torque", 10)
         self.ff: list[float] = []
         self.create_subscription(Float64MultiArray, f"/{controller}/ff", self._on_ff, 10)
         qos = QoSProfile(
@@ -156,12 +155,15 @@ class Harness(Node):
     def q(self) -> list[float]:
         return [self.latest[j] for j in self.arm_joints]
 
-    def send(self, target: list[float], velocity: list[float] | None = None) -> None:
+    def send(self, target: list[float], velocity: list[float] | None = None,
+             tff: list[float] | None = None) -> None:
         msg = JointState()
         msg.name = list(self.arm_joints)
         msg.position = list(target)
         if velocity is not None:
             msg.velocity = velocity
+        if tff is not None:
+            msg.effort = tff
         self.targets.publish(msg)
 
     def send_ramp_trajectory(self, target: list[float], slew: float, action_client,
@@ -387,7 +389,6 @@ def node_wait_controllers(node, names: list[str], timeout: float) -> bool:
 
 def mit_frame_test(node: Harness) -> int:
     """在零重力夹具上，用反馈验证速度目标，并观测三段力矩的合成与超时。"""
-    from std_msgs.msg import Float64MultiArray
 
     fixture = SETTINGS["mit_frame"]
     node.spin_for(fixture["warmup_sec"])
@@ -403,7 +404,7 @@ def mit_frame_test(node: Harness) -> int:
     after_timeout = abs(node.q()[0] - position[0])
 
     # 任务力矩在发送窗口内有效，过期后保留位置目标和其他前馈。
-    node.task_pub.publish(Float64MultiArray(data=[fixture["task_torque_nm"]] + [0.0] * (n - 1)))
+    node.send(position, tff=[fixture["task_torque_nm"]] + [0.0] * (n - 1))
     node.spin_for(fixture["task_observation_sec"])
     task_applied = node.ff[2 * n] if len(node.ff) == 3 * n else None
     combined = node.state[0] if len(node.state) == 8 * n + 4 else None

@@ -49,7 +49,6 @@ private:
     std::array<double, chain::kNumJoints> & tau) const;
 
   void target_callback(const sensor_msgs::msg::JointState::SharedPtr msg);
-  void task_torque_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
   rcl_interfaces::msg::SetParametersResult parameter_callback(
     const std::vector<rclcpp::Parameter> & params);
 
@@ -141,17 +140,11 @@ private:
   {
     std::vector<double> q;
     std::vector<double> velocity;
+    std::vector<double> tff;
     int64_t stamp_ns{0};
     uint64_t seq{0};
   };
-  struct TaskTorqueCommand
-  {
-    std::vector<double> torque;
-    int64_t stamp_ns{0};
-  };
   rt::RealtimeBuffer<TargetCommand> target_buffer_;
-  rt::RealtimeBuffer<TaskTorqueCommand> task_buffer_;
-  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr task_sub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr ff_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr state_pub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr target_sub_;

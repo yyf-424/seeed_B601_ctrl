@@ -8,6 +8,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import yaml
 
@@ -17,7 +18,7 @@ from diagnostic_msgs.msg import DiagnosticStatus
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float64MultiArray, String
 from std_srvs.srv import SetBool, Trigger
 
 from b601_description.project_config import load_project_config
@@ -38,6 +39,7 @@ class TestNode(Node):
         self.status = {}
         self.safety = None
         self.holds = {}
+        self.ff = {}
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String, f"{ARBITER}/status", self.on_status, latched)
         self.create_subscription(JointState, "/joint_states", self.on_feedback, qos_profile_sensor_data)
@@ -46,6 +48,9 @@ class TestNode(Node):
             self.create_subscription(
                 Bool, f"/{controller}/target_holding",
                 lambda msg, controller=controller: self.on_hold(controller, msg), 10)
+            self.create_subscription(
+                Float64MultiArray, f"/{controller}/ff",
+                lambda msg, controller=controller: self.ff.update({controller: list(msg.data)}), 10)
 
     def on_status(self, message):
         self.status = json.loads(message.data)
@@ -74,6 +79,10 @@ class TestNode(Node):
         self.until(lambda: self.status.get("last_applied_id") == str(dispatch_id),
                    f"all routes must acknowledge dispatch {dispatch_id}")
 
+    def check_tff(self, arm, gripper, label):
+        self.until(lambda: self.ff.get(ARM, [])[12:18] == arm
+                   and self.ff.get(GRIPPER, [])[2:] == [gripper], label, timeout=2)
+
     def reaches(self, values, tolerance=0.004):
         self.until(
             lambda: all(joint in self.feedback and abs(self.feedback[joint] - goal) < tolerance
@@ -82,7 +91,87 @@ class TestNode(Node):
         )
 
 
-def test(node, launch_log):
+def test_tff(node, client, positions=None):
+    names = node.status["joints"]
+    if positions is None:
+        positions = {name: node.feedback[name] for name in names}
+    zeros = [0.0] * 6
+    arm = [0.25, *zeros[1:]]
+    client.select(TIMEOUT)
+    try:
+        for effort in ([0.25], [float("nan"), *zeros]):
+            malformed = client.frame(JointState(
+                name=names, position=list(positions.values()), effort=effort))
+            assert not client.call(client.sender, SetTarget.Request(frame=malformed), TIMEOUT).accepted
+
+        dispatch = client.set_joints(
+            positions, TIMEOUT, velocities={"joint1": 0.01},
+            tff={"joint1": arm[0], "finger_left": 0.1})
+        node.applied(dispatch)
+        node.check_tff(arm, 0.1, "SDK point target must apply both task feedforward groups")
+        assert node.status["last_forwarded"]["velocity"]["joint1"] == 0.01
+        dispatch = client.set_joints(positions, TIMEOUT)
+        node.applied(dispatch)
+        node.check_tff(zeros, 0.0, "omitting tff must clear both groups on the next target")
+        assert not any(node.status["last_forwarded"]["tff"].values())
+
+        client.publisher.publish(client.frame(JointState(
+            name=list(reversed(names)), position=list(reversed(positions.values())),
+            effort=list(reversed([*arm, 0.1])))))
+        node.check_tff(arm, 0.1, "raw stream must match feedforward by joint name")
+        node.check_tff(zeros, 0.0, "stale task feedforward must clear with the session still active")
+        assert node.status["source"] == client.source
+    finally:
+        client.release(TIMEOUT)
+    print("PASS SDK and raw ROS 2 task feedforward, invalid frames, omitted zero and timeout")
+
+
+def test_http_and_cli(node, port, positions=None):
+    def request(path, body=None):
+        payload = json.dumps(body).encode() if body is not None else None
+        req = Request(
+            f"http://127.0.0.1:{port}/api/{path}", data=payload,
+            headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=3) as reply:
+            return json.load(reply)
+
+    if positions is None:
+        positions = {name: node.feedback[name] for name in node.status["joints"]}
+    session = request("select", {})["session_id"]
+    frame = {"session_id": session, "sequence": 1, "positions": positions}
+    arm = [0.25, 0.0, 0.0, 0.0, 0.0, 0.0]
+    zeros = [0.0] * 6
+    try:
+        reply = request("target", {**frame, "velocities": {"joint1": 0.01},
+                                   "tff": {"joint1": 0.25, "finger_left": 0.1}})
+        node.applied(reply["dispatch_id"])
+        node.check_tff(arm, 0.1, "HTTP must apply both task feedforward groups")
+        assert request("state")["status"]["last_forwarded"]["velocity"]["joint1"] == 0.01
+        reply = request("target", {**frame, "sequence": 2})
+        node.applied(reply["dispatch_id"])
+        node.check_tff(zeros, 0.0, "HTTP position-only target must clear both groups")
+    finally:
+        request("release", {"session_id": session})
+    print("PASS HTTP velocity, task feedforward and omitted zero")
+
+    mover = Path(__file__).with_name("dm_mit_move.py")
+    with subprocess.Popen([
+        "python3", str(mover), "--set", "joint1=0.055,finger_left=0.015",
+        "--vel", "joint1=0.01", "--tff", "joint1=0.25,finger_left=0.1",
+    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
+        try:
+            node.check_tff(arm, 0.1, "CLI must apply both task feedforward groups")
+            node.until(lambda: process.poll() is not None, "CLI must complete")
+        finally:
+            if process.poll() is None:
+                process.terminate()
+        output, _ = process.communicate(timeout=5)
+        assert process.returncode == 0, output
+    assert node.status["last_forwarded"]["velocity"]["joint1"] == 0.01
+    print("PASS CLI position, velocity and task feedforward")
+
+
+def test(node, launch_log, http_port=None):
     external = TargetClient(node, "external")
     policy = TargetClient(node, "policy")
     authority = node.create_client(SetAuthority, f"{ARBITER}/set_authority")
@@ -99,6 +188,7 @@ def test(node, launch_log):
         subscribers = node.get_subscriptions_info_by_topic(f"/{controller}/joint_target")
         assert [info.node_name for info in subscribers] == [controller], subscribers
     print("PASS idle startup and one publisher per controller")
+    test_tff(node, external)
 
     first_frame = TargetFrame(session_id="no-session", sequence=1,
                               target=JointState(name=["joint1"], position=[-0.1]))
@@ -158,6 +248,9 @@ def test(node, launch_log):
     finally:
         external.close(TIMEOUT)
         policy.close(TIMEOUT)
+
+    if http_port:
+        test_http_and_cli(node, http_port)
 
     reserve_disable = node.create_client(SetBool, f"{ARBITER}/reserve_disable")
     assert not external.call(reserve_disable, SetBool.Request(data=True), TIMEOUT).success
@@ -255,7 +348,7 @@ def test(node, launch_log):
     print(json.dumps({"feedback": node.feedback, "status": node.status}, ensure_ascii=False))
 
 
-def test_physical_recenter(node):
+def test_physical_recenter(node, http_port=None):
     project = load_project_config()
     arm = project["robot"]["arm_joints"]
     home = {name: project["recenter"]["joints"][name] for name in arm}
@@ -285,15 +378,29 @@ def test_physical_recenter(node):
         assert target.call(reserve, SetBool.Request(data=True), TIMEOUT).success
         assert target.call(reserve, SetBool.Request(data=False), TIMEOUT).success
         print(f"PASS physical MuJoCo recenter and disable gate from {start}", flush=True)
+    if http_port:
+        # Exercise the generated physical controller configuration from a joint goal
+        # well inside the limits after the existing recenter checks.
+        goal = dict(zip(arm, (-0.28, -0.18, -0.38, 0.24, 0.23, 0.0)))
+        goal[project["robot"]["gripper_joint"]] = 0.015
+        target.select(TIMEOUT)
+        try:
+            node.applied(target.set_joints(goal, TIMEOUT))
+            node.reaches(goal)
+        finally:
+            target.release(TIMEOUT)
+        test_tff(node, target, positions=goal)
+        test_http_and_cli(node, http_port, positions=goal)
 
 
-def start_fixture(output, web, physical=False):
+def start_fixture(output, web, physical=False, *, port=8765):
     if physical:
         with (output / "launch.log").open("w") as stream:
             return subprocess.Popen([
                 "ros2", "launch", "b601_bringup", "bringup.launch.py",
                 "hardware:=mujoco", "mujoco_scene:=physical",
                 "dm_command_mode:=mit_impedance", "use_rviz:=false",
+                f"use_target_web:={str(web).lower()}", f"target_web_port:={port}",
             ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
 
     root = Path(__file__).resolve().parent.parent
@@ -320,7 +427,7 @@ def start_fixture(output, web, physical=False):
             "hardware:=mujoco", "dm_command_mode:=mit_impedance", "use_rviz:=false",
             "mit_recenter_check_collisions:=false",
             f"initial_positions_file:={initial_path}", f"controllers_file:={controllers}",
-            f"use_target_web:={str(web).lower()}",
+            f"use_target_web:={str(web).lower()}", f"target_web_port:={port}",
         ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
 
 
@@ -329,6 +436,7 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--web", action="store_true", help="启动同一 MuJoCo 夹具并预览本地网页")
     mode.add_argument("--physical", action="store_true", help="验证内置物理场景的归中及失能门控")
+    parser.add_argument("--http-port", type=int, help="在指定本地端口启动网页并验证 HTTP 和 CLI")
     args = parser.parse_args()
     os.environ["ROS_LOCALHOST_ONLY"] = "1"
     domain = os.environ.get("B601_TEST_ROS_DOMAIN_ID", "227")
@@ -347,19 +455,22 @@ def main():
             rclpy.spin_once(node, timeout_sec=0.05)
         if node.count_publishers("/joint_states") or "controller_manager" in node.get_node_names():
             raise RuntimeError("Test domain already contains a robot, choose B601_TEST_ROS_DOMAIN_ID.")
-        process = start_fixture(output, args.web, args.physical)
+        process = start_fixture(
+            output, args.web or args.http_port is not None, args.physical,
+            port=args.http_port or 8765,
+        )
         if args.web:
             node.until(lambda: node.status.get("feedback_ready"),
                        "MuJoCo preview must become ready")
-            print("MuJoCo：访问 http://127.0.0.1:8765/ ，Ctrl-C 停止。", flush=True)
+            print(f"MuJoCo：访问 http://127.0.0.1:{args.http_port or 8765}/ ，Ctrl-C 停止。", flush=True)
             while rclpy.ok() and process.poll() is None:
                 rclpy.spin_once(node, timeout_sec=0.1)
             if process.poll() not in (None, 0):
                 raise RuntimeError(f"MuJoCo launch failed, see {output / 'launch.log'}")
         elif args.physical:
-            test_physical_recenter(node)
+            test_physical_recenter(node, args.http_port)
         else:
-            test(node, output / "launch.log")
+            test(node, output / "launch.log", args.http_port)
     except (KeyboardInterrupt, ExternalShutdownException):
         if not args.web:
             raise

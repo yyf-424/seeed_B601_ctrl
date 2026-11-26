@@ -12,7 +12,7 @@
 | `b601_target_bridge` | 调用现有 MIT 控制器的 `joint_target` 入口，按控制器消费序号匹配回执。来源失联或仲裁心跳中断时，以新鲜实测位置提交持位目标 |
 | `b601_mit_recenter` | 通过整机仲裁接管，按 J4 上抬、其余五轴归中、J4 回落执行，依据六轴实测及控制器回执完成归中 |
 
-网页、外部策略和命令行客户端共用 `TargetFrame`。整帧包含六个手臂关节和主动夹爪，速度可选。控制器的采纳回执用于确认目标已经消费，位置误差和到位窗口用于确认运动完成。网页 Disable 需要最近一次归中回执及六轴仍在停放范围。执行期间仲裁会冻结新的会话申请，网页确认硬件进入 `inactive` 后退出后端。
+网页、外部策略和命令行客户端共用 `TargetFrame`。整帧包含六个手臂关节和主动夹爪的位置，速度和任务前馈可选。控制器的采纳回执用于确认目标已经消费，位置误差和到位窗口用于确认运动完成。网页 Disable 需要最近一次归中回执及六轴仍在停放范围。执行期间仲裁会冻结新的会话申请，网页确认硬件进入 `inactive` 后退出后端。
 
 ## v1.0.1 MuJoCo 验收结果
 
@@ -35,6 +35,12 @@
 
 夹爪两指在常规档和低刚度档的实测超速急停阈值为 `0.25 m/s`，警告线为 `0.20 m/s`。常规档超过阈值触发，低刚度档达到阈值即触发。隔离 MuJoCo 的安全节点已回读两档新值。夹爪命令速度上限为 `0.05 m/s`。
 
+## MIT 任务前馈的 MuJoCo 验收
+
+- SDK、原生 ROS 2、HTTP 和命令行均通过。手臂 J1 的 `0.25 N·m` 与夹爪的 `0.1 N` 按同一帧分别到达两组控制器。省略、拒绝畸形帧及超时归零通过。
+- 浏览器填入位置、速度和任务前馈后，网页显示两组已采纳。MIT 专项回归读回 J1 任务前馈及该轴总前馈均为 `0.8 N·m`，并观测到重力和摩擦分量。
+- 此次覆盖使用隔离 MuJoCo。
+
 ## 实机覆盖
 
 以下覆盖按操作者在 2026-11-25 提供的实机验收情况登记。自动回归复测使用隔离 MuJoCo。实机轨迹、次数和测量值沿用已有现场记录。
@@ -50,14 +56,14 @@
 
 ## 复测
 
-从工作区根目录构建并运行静态校验。下面的默认回归覆盖七组仲裁检查，`--physical` 复测物理场景的两个归中起点与失能门控。
+从工作区根目录构建并运行静态校验。默认回归覆盖目标、仲裁和断流持位。`--physical` 复测物理场景的两个归中起点与失能门控。两种模式均可加 `--http-port` 检查 HTTP 与命令行发令。
 
 ```bash
 ./scripts/build.sh
 ./scripts/verify.sh
 source scripts/ros_env.sh && b601_source_workspace
-python3 scripts/test_target_arbitration.py
-python3 scripts/test_target_arbitration.py --physical
+python3 scripts/test_target_arbitration.py --http-port 8876
+python3 scripts/test_target_arbitration.py --physical --http-port 8876
 ```
 
 回归夹具默认使用 ROS 域 `227`。通过 `B601_TEST_ROS_DOMAIN_ID` 可指定另一个空闲域。独立网页和同场景的 ROS 客户端使用同一个空闲域，例如 `226`。

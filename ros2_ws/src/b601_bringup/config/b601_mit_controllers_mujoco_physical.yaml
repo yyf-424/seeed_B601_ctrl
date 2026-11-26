@@ -71,7 +71,7 @@ b601_mit_arm:
     friction_scale: 0.0
     friction_vel_eps: 0.02
     use_gravity: true
-    task_torque_timeout_sec: 0.0
+    task_torque_timeout_sec: 0.5
     target_velocity_timeout_sec: 0.25
     gravity_params:
     - 1.3266
@@ -142,7 +142,7 @@ b601_mit_gripper:
     friction_scale: 0.0
     friction_vel_eps: 0.002
     use_gravity: false
-    task_torque_timeout_sec: 0.0
+    task_torque_timeout_sec: 0.5
     target_velocity_timeout_sec: 0.25
     gravity_params:
     - 1.3266
