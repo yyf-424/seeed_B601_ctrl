@@ -10,15 +10,17 @@
     - revolute：hinge 关节，axis 取 URDF 的轴
     - prismatic：slide 关节（夹爪两指），并按 URDF 的 mimic 关系手动同步
     - inertial：mass + pos(质心) + fullinertia(URDF 的惯量张量)
-    - collision：直接用 URDF 的 collision 几何（圆柱/盒子），MuJoCo 原生支持
+    - collision：默认沿用 URDF 圆柱/盒子，物理场景的 link1/link3/link5 使用官方碰撞 STL 凸包
     - 基座固定到 world，加地面与光照
 
 用法：
     python3 scripts/gen_mjcf.py > ros2_ws/src/b601_mujoco/models/b601_arm.xml
+    python3 scripts/gen_mjcf.py --physical-collisions > ros2_ws/src/b601_mujoco/models/b601_arm_physical.xml
 """
 
 from __future__ import annotations
 
+import argparse
 import math
 import sys
 import xml.etree.ElementTree as ET
@@ -26,6 +28,24 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 from project_config import ROOT, load_project_config
+
+
+VENDOR_COLLISION = ROOT / "ros2_ws/src/b601_description/assets/b601_dm/meshes/collision"
+COLLISION_HULL_LINKS = ("link1", "link3", "link5")
+
+
+def collision_hull(path):
+    """Return convex-hull vertices from a bundled binary STL, in metres."""
+    from scipy.spatial import ConvexHull
+
+    triangle = np.dtype([("normal", "<f4", (3,)), ("vertices", "<f4", (3, 3)), ("attribute", "<u2")])
+    stl = path.read_bytes()
+    count = int.from_bytes(stl[80:84], "little")
+    if not count or len(stl) != 84 + count * triangle.itemsize:
+        raise ValueError(f"Invalid binary collision STL: {path}")
+    points = np.frombuffer(stl, dtype=triangle, offset=84)["vertices"].reshape(-1, 3)
+    points = np.unique(np.round(points, 6), axis=0)
+    return points[ConvexHull(points).vertices]
 
 
 def rpy_to_quat(r, p, y):
@@ -150,6 +170,12 @@ class JointEl:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--physical-collisions", action="store_true",
+                        help="为内置重力与碰撞场景生成链节碰撞凸包")
+    args = parser.parse_args()
+    hull_links = COLLISION_HULL_LINKS if args.physical_collisions else ()
+
     sys.path.insert(0, "ros2_ws/src/b601_gravity_id")
     from b601_gravity_id.model import expand_xacro
 
@@ -180,10 +206,32 @@ def main() -> int:
         for element in elements:
             tag, attributes = next(iter(element.items()))
             w("    " + empty_element(tag, attributes))
+        if group == "asset" and hull_links:
+            w("    <!-- 凸包来源：b601_description/assets/b601_dm/meshes/collision（Seeed，Apache-2.0） -->")
+            for name in hull_links:
+                vertices = collision_hull(VENDOR_COLLISION / f"{name}.STL")
+                w(f'    <mesh name="{name}_collision" vertex="')
+                w("\n".join("      " + " ".join(f"{v:.6f}" for v in point) for point in vertices))
+                w('    "/>')
         if group != "worldbody":
             w(f"  </{group}>")
 
     color = settings["materials_by_link"]
+
+    def emit_collision(link_name, pad):
+        mat = color.get(link_name, "silver")
+        if link_name in hull_links:
+            w(f'{pad}  <geom name="{link_name}_geom" type="mesh" '
+              f'mesh="{link_name}_collision" material="{mat}"/>')
+            return
+        for kind, pars, xyz, rpy, length in links[link_name].geoms:
+            rq = mat_to_quat(rpy_to_matrix(rpy))
+            size = (pars[0], length / 2) if kind == "cylinder" else tuple(v / 2 for v in pars)
+            size_attr = " ".join(f"{v:.6f}" for v in size)
+            w(f'{pad}  <geom name="{link_name}_geom" type="{kind}" size="{size_attr}" '
+              f'pos="{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}" '
+              f'quat="{rq[0]:.6f} {rq[1]:.6f} {rq[2]:.6f} {rq[3]:.6f}" '
+              f'material="{mat}"/>')
 
     def emit_body(link_name: str, indent: int, extra_xyz=None, extra_rpy=None, depth=0):
         """递归输出 body；fixed 关节的变换折叠进子 body 的 pos/quat"""
@@ -218,22 +266,7 @@ def main() -> int:
               f'{ixy:.8f} {ixz:.8f} {iyz:.8f}"/>')
         if joint_line:
             w(joint_line)
-        for kind, pars, xyz, rpy, length in link.geoms:
-            rq = mat_to_quat(rpy_to_matrix(rpy))
-            mat = color.get(link_name, "silver")
-            if kind == "cylinder":
-                # MuJoCo 的 cylinder 沿 z 轴、half-height 语义
-                w(f'{pad}  <geom name="{link_name}_geom" type="cylinder" '
-                  f'size="{pars[0]:.6f} {length / 2:.6f}" '
-                  f'pos="{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}" '
-                  f'quat="{rq[0]:.6f} {rq[1]:.6f} {rq[2]:.6f} {rq[3]:.6f}" '
-                  f'material="{mat}"/>')
-            else:
-                w(f'{pad}  <geom name="{link_name}_geom" type="box" '
-                  f'size="{pars[0] / 2:.6f} {pars[1] / 2:.6f} {pars[2] / 2:.6f}" '
-                  f'pos="{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}" '
-                  f'quat="{rq[0]:.6f} {rq[1]:.6f} {rq[2]:.6f} {rq[3]:.6f}" '
-                  f'material="{mat}"/>')
+        emit_collision(link_name, pad)
 
         # 子 link
         for cj in children_of.get(link_name, []):
@@ -257,21 +290,7 @@ def main() -> int:
             w(f'{pad}  <inertial pos="{link.com[0]:.6f} {link.com[1]:.6f} {link.com[2]:.6f}" '
               f'mass="{link.mass:.6f}" fullinertia="{ixx:.8f} {iyy:.8f} {izz:.8f} '
               f'{ixy:.8f} {ixz:.8f} {iyz:.8f}"/>')
-        for kind, pars, xyz, rpy, length in link.geoms:
-            rq = mat_to_quat(rpy_to_matrix(rpy))
-            mat = color.get(link_name, "silver")
-            if kind == "cylinder":
-                w(f'{pad}  <geom name="{link_name}_geom" type="cylinder" '
-                  f'size="{pars[0]:.6f} {length / 2:.6f}" '
-                  f'pos="{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}" '
-                  f'quat="{rq[0]:.6f} {rq[1]:.6f} {rq[2]:.6f} {rq[3]:.6f}" '
-                  f'material="{mat}"/>')
-            else:
-                w(f'{pad}  <geom name="{link_name}_geom" type="box" '
-                  f'size="{pars[0] / 2:.6f} {pars[1] / 2:.6f} {pars[2] / 2:.6f}" '
-                  f'pos="{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}" '
-                  f'quat="{rq[0]:.6f} {rq[1]:.6f} {rq[2]:.6f} {rq[3]:.6f}" '
-                  f'material="{mat}"/>')
+        emit_collision(link_name, pad)
         for cj in children_of.get(link_name, []):
             if cj.type == "fixed":
                 emit_body_fixed(cj.child, indent + 1, cj.xyz, rpy_to_matrix(cj.rpy), depth + 1)

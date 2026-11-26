@@ -23,6 +23,7 @@ import difflib
 import math
 import re
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import yaml
@@ -438,7 +439,23 @@ def _mit_params(cfg: dict, mit: dict, inst: dict, gravity_compensation: bool) ->
     return params
 
 
-def render_mit_controllers(cfg: dict, gravity_compensation: bool = False) -> str:
+def mujoco_physical_gravity_params(cfg: dict) -> list[float]:
+    model = ET.parse(WS_SRC / "b601_mujoco" / "models" / "b601_arm_physical.xml")
+    # 与 generate_cpp_config.py 的 kGravityLinks 顺序一致。
+    arm_count = len(cfg["robot"]["arm_joints"])
+    links = [f"link{i}" for i in range(2, arm_count + 1)]
+    links.extend(("end_link", "finger_left_link", "finger_right_link"))
+    params = []
+    for link in links:
+        inertial = model.find(f".//body[@name='{link}']/inertial")
+        mass = Decimal(inertial.attrib["mass"])
+        center = [Decimal(value) for value in inertial.attrib["pos"].split()]
+        params.extend([float(mass), *(float(mass * value) for value in center)])
+    return params
+
+
+def render_mit_controllers(cfg: dict, gravity_compensation: bool = False, *,
+                           mujoco_physical: bool = False) -> str:
     """MIT 力控控制器 yaml（controller_manager 声明 + 每个实例的参数块）。"""
     mit = cfg["controllers"]["mit"]
     instances = mit["instances"]
@@ -462,6 +479,13 @@ def render_mit_controllers(cfg: dict, gravity_compensation: bool = False) -> str
     head += f"# bringup 参数：mit_gravity_compensation:={str(gravity_compensation).lower()}\n"
     data = {"controller_manager": {"ros__parameters": cm_params}}
     data.update(body)
+    if mujoco_physical:
+        params = mujoco_physical_gravity_params(cfg)
+        for name in instances:
+            body[name]["ros__parameters"]["gravity_params"] = params.copy()
+        body["b601_mit_arm"]["ros__parameters"].update(
+            use_gravity=True, gravity_scale=1.0, free_follow_feedback=False)
+        head = GENERATED_NOTE + "# 内置 MuJoCo 物理场景。手臂使用 MJCF 重力前馈并保持高刚度。\n"
     return head + dump_yaml(data)
 
 
@@ -543,6 +567,8 @@ def render_all(cfg: dict) -> dict[Path, str]:
             render_mit_controllers(cfg),
         WS_SRC / "b601_bringup" / "config" / "b601_mit_controllers_gravity.yaml":
             render_mit_controllers(cfg, gravity_compensation=True),
+        WS_SRC / "b601_bringup" / "config" / "b601_mit_controllers_mujoco_physical.yaml":
+            render_mit_controllers(cfg, mujoco_physical=True),
         WS_SRC / "b601_bringup" / "config" / "hardware_dm.yaml":
             render_hardware_dm(cfg),
         srdf: render_srdf(cfg, srdf),

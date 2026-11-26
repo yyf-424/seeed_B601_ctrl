@@ -255,7 +255,47 @@ def test(node, launch_log):
     print(json.dumps({"feedback": node.feedback, "status": node.status}, ensure_ascii=False))
 
 
-def start_fixture(output, web):
+def test_physical_recenter(node):
+    project = load_project_config()
+    arm = project["robot"]["arm_joints"]
+    home = {name: project["recenter"]["joints"][name] for name in arm}
+    recenter = node.create_client(Trigger, "/b601_mit_recenter/recenter")
+    reserve = node.create_client(SetBool, f"{ARBITER}/reserve_disable")
+    target = TargetClient(node, "external")
+    node.until(lambda: node.status.get("feedback_ready") and recenter.service_is_ready(),
+               "physical MuJoCo must provide feedback and recenter service")
+    for goal in (
+        dict(zip(arm, (-0.28, -0.18, -0.38, 0.24, 0.23, 0.0))),
+        dict(zip(arm, (0.0, -0.03, -0.16, -0.18, 0.0, 0.0))),
+    ):
+        target.select(TIMEOUT)
+        try:
+            node.applied(target.set_joints(goal, TIMEOUT))
+            node.reaches(goal)
+        finally:
+            target.release(TIMEOUT)
+        assert not node.status["disable_ready"], node.status
+        start = {name: node.feedback[name] for name in arm}
+        result = recenter.call_async(Trigger.Request())
+        node.until(result.done, "physical MuJoCo recenter must finish", timeout=45)
+        assert result.result().success, (start, result.result().message)
+        node.reaches(home)
+        node.until(lambda: node.status.get("disable_ready"),
+                   "physical MuJoCo parking feedback must unlock disable")
+        assert target.call(reserve, SetBool.Request(data=True), TIMEOUT).success
+        assert target.call(reserve, SetBool.Request(data=False), TIMEOUT).success
+        print(f"PASS physical MuJoCo recenter and disable gate from {start}", flush=True)
+
+
+def start_fixture(output, web, physical=False):
+    if physical:
+        with (output / "launch.log").open("w") as stream:
+            return subprocess.Popen([
+                "ros2", "launch", "b601_bringup", "bringup.launch.py",
+                "hardware:=mujoco", "mujoco_scene:=physical",
+                "dm_command_mode:=mit_impedance", "use_rviz:=false",
+            ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+
     root = Path(__file__).resolve().parent.parent
     source = root / "ros2_ws/src"
 
@@ -286,7 +326,9 @@ def start_fixture(output, web):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--web", action="store_true", help="启动同一 MuJoCo 夹具并预览本地网页")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--web", action="store_true", help="启动同一 MuJoCo 夹具并预览本地网页")
+    mode.add_argument("--physical", action="store_true", help="验证内置物理场景的归中及失能门控")
     args = parser.parse_args()
     os.environ["ROS_LOCALHOST_ONLY"] = "1"
     domain = os.environ.get("B601_TEST_ROS_DOMAIN_ID", "227")
@@ -305,7 +347,7 @@ def main():
             rclpy.spin_once(node, timeout_sec=0.05)
         if node.count_publishers("/joint_states") or "controller_manager" in node.get_node_names():
             raise RuntimeError("Test domain already contains a robot, choose B601_TEST_ROS_DOMAIN_ID.")
-        process = start_fixture(output, args.web)
+        process = start_fixture(output, args.web, args.physical)
         if args.web:
             node.until(lambda: node.status.get("feedback_ready"),
                        "MuJoCo preview must become ready")
@@ -314,6 +356,8 @@ def main():
                 rclpy.spin_once(node, timeout_sec=0.1)
             if process.poll() not in (None, 0):
                 raise RuntimeError(f"MuJoCo launch failed, see {output / 'launch.log'}")
+        elif args.physical:
+            test_physical_recenter(node)
         else:
             test(node, output / "launch.log")
     except (KeyboardInterrupt, ExternalShutdownException):

@@ -125,7 +125,7 @@ hardware:
 ./scripts/sync_config.py --check   # 检查派生文件同步状态
 ```
 
-修改模型或仿真场景后，构建工作空间并加载其环境，再生成 MuJoCo 模型。
+修改模型或仿真场景后，先构建并加载工作空间，再生成所需的模型。单独生成物理场景需要 `python3-scipy`。
 
 ```bash
 ./scripts/build.sh
@@ -134,7 +134,11 @@ model="$(mktemp)"
 if python3 scripts/gen_mjcf.py > "$model"; then
   cp "$model" ros2_ws/src/b601_mujoco/models/b601_arm.xml
 fi
+if python3 scripts/gen_mjcf.py --physical-collisions > "$model"; then
+  cp "$model" ros2_ws/src/b601_mujoco/models/b601_arm_physical.xml
+fi
 rm "$model"
+./scripts/build.sh
 ```
 
 位置回路使用 `./scripts/dm_park.sh` 核对归中并失能，`--keep-enabled` 用于只归中核对。
@@ -171,7 +175,7 @@ ros2 service call /b601_mit_recenter/recenter std_srvs/srv/Trigger '{}'
 | 重力补偿高刚度跟踪 | 115 / 120.025 / 120.025 / 30 / 18 / 28 | 5 / 5 / 5 / 2.8 / 1.6 / 0.65 |
 | 重力补偿低刚度保持 | 57.5 / 60.0125 / 60.0125 / 15 / 9 / 14 | 1 / 1 / 1 / 0.56 / 0.32 / 0.13 |
 
-`mit_gravity_compensation` 默认关闭，使用纯 PD。开启后从高刚度起步，首个目标完成且六轴连续到位 3 秒后降档，收到新目标再升档。六轴到位判定与纯 PD 一致，按每轴相邻目标的位移乘以 5%，误差带下限为 0.01 rad，上限为 0.05 rad。低档逐周期采用实测位置作为位置参考。两档共用实机辨识重力模型，高档沿用 J2–J5 的前馈比例，低档保留全轴重力比例。生成器按高档的 50% Kp 和 20% Kd 计算每轴低档增益。
+`mit_gravity_compensation` 默认关闭，使用纯 PD。开启后从高刚度起步，首个目标完成且六轴连续到位 3 秒后降档，收到新目标再升档。每轴按相邻目标位移的 5% 计算到位误差带，上限为 0.05 rad。重力补偿档的下限为 J3 0.03 rad、J4 和 J5 0.02 rad、其余轴 0.01 rad。纯 PD 的六轴下限均为 0.01 rad。低档逐周期采用实测位置作为位置参考。两档共用实机辨识重力模型，高档沿用 J2–J5 的前馈比例，低档保留全轴重力比例。生成器按高档的 50% Kp 和 20% Kd 计算每轴低档增益。
 
 ### 快速启动重力补偿
 
@@ -280,6 +284,7 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 - **Mock** 是网页的空操作，页面保持空闲。
 - **MuJoCo** 启动 MIT 控制器，默认关闭重力和物理碰撞。需要模拟重力时，连接前在
   「MuJoCo 物理模式」选择「开启重力与碰撞」，同时启用地面接触和机械臂自碰撞。
+  内置物理场景使用专用 MIT 配置，手臂按模型质量和质心做重力前馈，并保持高刚度跟踪。
 - **实机** 使用项目串口与 MIT 重力补偿变刚度。点击连接会使能电机，请按项目规程先确认现场。
   连接只启动底层控制并以进入时的实测位置作为初始参考。上层目标和自动归中需要独立操作。
   关闭浏览器不会停止 bringup。
@@ -290,7 +295,8 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 
 从命令行启动 `hardware:=mujoco` 也默认同时关闭重力和物理碰撞，传入
 `mujoco_scene:=physical` 可同时开启。回归夹具仍可通过 `mujoco_model` 指向自定义模型。
-现有简化碰撞体在标定归中位会发生自碰撞。网页归中联调请使用默认模式。
+物理场景独立加载 `b601_arm_physical.xml`，其中 `link1`、`link3`、`link5` 的接触几何使用随包的 Seeed 碰撞 STL 凸包。
+物理场景的一键归中使用 `recenter.joints` 的标定停放位。六轴实测到位后才允许 Disable。
 
 连接就绪后，可手动指定权威来源及发送目标。也可通过 `use_target_web:=true`
 随既有 MIT bringup 启动同一页面，此时页面显示该后端。
@@ -301,6 +307,8 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 source scripts/ros_env.sh && b601_source_workspace
 python3 scripts/test_target_arbitration.py --web
 ```
+
+用 `python3 scripts/test_target_arbitration.py --physical` 在隔离 ROS 域验证物理场景归中与失能门控。
 
 浏览器打开 [本地目标控制台](http://127.0.0.1:8765/)，可以指定网页、外部策略或其他来源名。
 指定 `web` 后，可用滑块或数值框编辑同一列表中的七个关节，点击「发送七关节目标」提交。

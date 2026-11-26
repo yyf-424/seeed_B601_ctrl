@@ -188,7 +188,7 @@ for model in b601_dm b601_mitimpedance; do
 done
 # MIT 实例覆盖：在 mit_impedance 模型上再查一遍「每关节都有属主」
 if [[ -f "$TMP/b601_mitimpedance.urdf" ]]; then
-  for mit_yaml in b601_mit_controllers.yaml b601_mit_controllers_gravity.yaml; do
+  for mit_yaml in b601_mit_controllers.yaml b601_mit_controllers_gravity.yaml b601_mit_controllers_mujoco_physical.yaml; do
     if python3 "$REPO_ROOT/scripts/check_consistency.py" "$TMP/b601_mitimpedance.urdf" \
         --project-config "$PROJECT_CONFIG" \
         --repo-root "$REPO_ROOT" \

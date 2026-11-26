@@ -377,9 +377,9 @@ controllers:
         per_joint:
           joint1: {kp_move: 115.0, kd_move: 5.0, gravity_joint_scale: 0.0}
           joint2: {kp_move: 120.025, kd_move: 5.0, gravity_joint_scale: 1.0}
-          joint3: {kp_move: 120.025, kd_move: 5.0, gravity_joint_scale: 1.0}
-          joint4: {kp_move: 30.0, kd_move: 2.8, gravity_joint_scale: 1.0}
-          joint5: {kp_move: 18.0, kd_move: 1.6, gravity_joint_scale: 1.0}
+          joint3: {kp_move: 120.025, kd_move: 5.0, gravity_joint_scale: 1.0, settle_band_min: 0.03}
+          joint4: {kp_move: 30.0, kd_move: 2.8, gravity_joint_scale: 1.0, settle_band_min: 0.02}
+          joint5: {kp_move: 18.0, kd_move: 1.6, gravity_joint_scale: 1.0, settle_band_min: 0.02}
           joint6: {kp_move: 28.0, kd_move: 0.65, gravity_joint_scale: 0.0}
         group:
           <<: *arm_mit_group

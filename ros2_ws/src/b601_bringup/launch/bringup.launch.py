@@ -86,7 +86,7 @@ def generate_launch_description():
     safety_params_file = PathJoinSubstitution([safety_share, "config", "safety_params.yaml"])
     initial_positions_file = LaunchConfiguration("initial_positions_file")
     project_config_file = LaunchConfiguration("project_config_file")
-    physical_model = PathJoinSubstitution([FindPackageShare("b601_mujoco"), "models", "b601_arm.xml"])
+    physical_model = PathJoinSubstitution([FindPackageShare("b601_mujoco"), "models", "b601_arm_physical.xml"])
 
     def configure_mujoco_scene(context):
         if hardware.perform(context) == "mujoco" and not mujoco_model.perform(context):
@@ -146,6 +146,9 @@ def generate_launch_description():
             raise RuntimeError("mit_gravity_compensation 与 controllers_file 只能选择一个")
         if not is_mit:
             default_file = "b601_controllers.yaml"
+        elif (hardware.perform(context) == "mujoco"
+              and LaunchConfiguration("attached_mujoco_scene", default="").perform(context) == "physical"):
+            default_file = "b601_mit_controllers_mujoco_physical.yaml"
         elif gravity:
             default_file = "b601_mit_controllers_gravity.yaml"
         else:
@@ -338,11 +341,11 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "controllers_file",
                 default_value="",
-                description="控制器配置文件，留空按 dm_command_mode 自动选择",
+                description="控制器配置文件，留空按控制模式和 MuJoCo 场景自动选择",
             ),
             DeclareLaunchArgument(
                 "mit_gravity_compensation", default_value="false", choices=["false", "true"],
-                description="电机侧 MIT 重力补偿，开启后自动切换跟踪与保持增益",
+                description="选择电机侧 MIT 重力补偿配置；内置 MuJoCo 物理场景使用专用高刚度配置",
             ),
             DeclareLaunchArgument(
                 "mit_recenter_on_startup", default_value="true", choices=["false", "true"],
