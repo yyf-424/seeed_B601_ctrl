@@ -1,11 +1,12 @@
-# B601-DM ROS 2 框架 v1.0.0
+# B601-DM ROS 2 框架 v1.0.1
 
 这套框架用 ROS 2 Humble 和 ros2_control 驱动 B601-DM 六轴机械臂与夹爪。
 上层提供本地网页、命令行、Python `TargetClient` 和原生 ROS 2 接口。
 MoveIt 2 提供标准位置轨迹规划，MuJoCo 提供动力学仿真。
 
 **控制器目前可用，增益、重力补偿和切换表现仍需细调。**
-已完成高刚度跟踪、两档重力补偿、短时低刚度保持和归中失能的基础验收。负载变化、全工作区精度和长期低刚度表现仍待系统评估。上层实机覆盖按操作者确认登记。见 [上层验收](validation/target-web.md) 和 [发布记录](CHANGELOG.md)。
+已完成高刚度跟踪、两档重力补偿、短时低刚度保持和归中失能的基础验收。负载变化、全工作区精度和长期低刚度表现仍待系统评估。
+v1.0.1 已在 MuJoCo 两种场景复测网页、命令行、SDK、原生 ROS 2 接口和整机仲裁。上层实机覆盖按操作者确认登记。见 [上层验收](validation/target-web.md) 和 [发布记录](CHANGELOG.md)。
 
 ## 演示
 
@@ -58,7 +59,7 @@ python3 -m pip install --user 'motorbridge==0.4.9'
 python3 -m pip install --user 'mujoco==3.17.0'
 ```
 
-使用重力辨识与绘图工具时，再安装 `python3-scipy` 和 `python3-matplotlib`。
+重力辨识和重新生成物理场景的碰撞凸包需要 `python3-scipy`，绘图工具需要 `python3-matplotlib`。
 `./scripts/install_deps.sh core control moveit` 可检查各组 ROS 软件包。
 
 ### 构建和首次运行
@@ -258,7 +259,7 @@ python3 scripts/mit_five_poses.py --score-hardware .verify/mit-v0.2.1-results.js
 
 ## MIT 目标仲裁与网页
 
-上层架构、实机覆盖与复测结果见 [上层框架验收](validation/target-web.md)。
+上层架构、MuJoCo 双场景复测、实机覆盖和复现命令见 [上层框架验收](validation/target-web.md)。
 
 MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 根据实际加载的控制器配置建立内部路由。手动工具、分段归中、仿真与真机五姿态脚本、浏览器
@@ -308,7 +309,7 @@ source scripts/ros_env.sh && b601_source_workspace
 python3 scripts/test_target_arbitration.py --web
 ```
 
-用 `python3 scripts/test_target_arbitration.py --physical` 在隔离 ROS 域验证物理场景归中与失能门控。
+运行 `python3 scripts/test_target_arbitration.py` 执行七组隔离仲裁回归。加 `--physical` 验证物理场景两个起始姿态的归中与失能门控。详见 [复测步骤](validation/target-web.md#复测)。
 
 浏览器打开 [本地目标控制台](http://127.0.0.1:8765/)，可以指定网页、外部策略或其他来源名。
 指定 `web` 后，可用滑块或数值框编辑同一列表中的七个关节，点击「发送七关节目标」提交。

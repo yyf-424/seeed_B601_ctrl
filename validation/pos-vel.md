@@ -3,6 +3,30 @@
 ROS 2 轨迹控制器发送位置指令。硬件插件发送角度目标和速度上限，电机固件执行位置与速度闭环。
 历史真机五姿态全部通过，六轴最大稳态误差 0.0047 rad。原始记录可通过 `git show v0.1.0:validation/pos-vel.json` 查阅。
 
+## 在 MuJoCo 复测 MoveIt 2
+
+`v1.0.1` 已分别验证仅规划和规划执行，返回 34 点与 33 点轨迹。使用两个终端，在当前工作区加载环境并设置同一个空闲 ROS 域，例如 `225`。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
+export ROS_DOMAIN_ID=225 ROS_LOCALHOST_ONLY=1
+```
+
+终端一启动 MuJoCo 位置回路与 MoveIt。
+
+```bash
+ros2 launch b601_moveit_config demo.launch.py hardware:=mujoco use_rviz:=false
+```
+
+终端二分别执行规划与规划加执行。
+
+```bash
+ros2 run b601_demos moveit_pose_goal --ros-args -p plan_only:=true
+ros2 run b601_demos moveit_pose_goal --ros-args -p plan_only:=false
+```
+
+轨迹点数随规划结果变化。执行验收以 MoveIt 返回成功和 `b601_arm_controller` 报告到位为准。MIT 网页和目标仲裁通过独立入口复测。见 [上层框架验收](target-web.md)。
+
 ## 环境和离线门禁
 
 在当前检出目录执行。需要 Ubuntu 22.04、ROS 2 Humble、ros2_control、MoveIt 2、Python
